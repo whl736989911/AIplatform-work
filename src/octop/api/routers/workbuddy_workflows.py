@@ -19,6 +19,7 @@ invisible workflow is a uniform 404 — never 403.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Annotated, Any
 
@@ -49,6 +50,8 @@ from octop.infra.workbuddy.workflow_compiler import (
     WorkflowCompileError,
     compile_workflow_definition,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -124,6 +127,11 @@ def _repo(server: Any) -> WorkBuddyWorkflowRepo:
 
 def _refusal(exc: Exception) -> OctopError:
     """Map a store/compiler refusal onto its stable error code; never fake success."""
+    if isinstance(exc, OctopError):
+        # Routes raise coded errors themselves (404 for invisible rows, 409 for a
+        # bad state); those must survive unchanged, or a uniform 404 turns into a
+        # 503 and leaks that the object exists but is out of reach.
+        return exc
     code = str(getattr(exc, "code", "") or "")
     message = str(getattr(exc, "message", "") or exc)
     if isinstance(exc, WorkBuddyPostgresRequiredError):
@@ -135,6 +143,9 @@ def _refusal(exc: Exception) -> OctopError:
             return OctopError(ErrorCode(code), message)
         except ValueError:
             return OctopError(ErrorCode.WORKBUDDY_WORKFLOW_INVALID, message)
+    # Anything unexpected still fails closed, but it must not disappear: an
+    # opaque 503 once hid a jsonb binding error from every test.
+    logger.exception("unhandled workflow store failure", exc_info=exc)
     return OctopError(ErrorCode.WORKBUDDY_DEPENDENCY_UNAVAILABLE, _STORE_UNAVAILABLE)
 
 
