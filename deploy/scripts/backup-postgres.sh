@@ -23,7 +23,7 @@ SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 load_env_file
 
-BACKUP_DIR="${OCTOP_BACKUP_DIR:-${DEPLOY_DIR}/backups}"
+BACKUP_DIR="$(deploy_path "${OCTOP_BACKUP_DIR:-backups}")"
 RETENTION_DAYS="${OCTOP_BACKUP_RETENTION_DAYS:-14}"
 MIN_COUNT="${OCTOP_BACKUP_RETENTION_MIN_COUNT:-7}"
 S3_URL="${OCTOP_BACKUP_S3_URL:-}"
@@ -68,6 +68,9 @@ if ! service_running postgres; then
 fi
 
 log "dumping ${POSTGRES_DB} from container service postgres"
+# The archive holds tenant data: create it unreadable to anyone else from the
+# first byte, not only after the rename below.
+umask 077
 if ! compose exec -T postgres \
     pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
     --format=custom --no-owner --no-privileges --compress=6 >"$partial" 2>"${partial}.err"; then
@@ -83,18 +86,32 @@ if [ ! -s "$partial" ]; then
 fi
 
 # --- verify the archive parses and contains real objects ---------------------
-table_entries=$(compose exec -T postgres pg_restore --list <"$partial" 2>/dev/null \
-    | grep -c 'TABLE DATA' || true)
+# List once: a failed `pg_restore --list` (bad archive or a docker exec error)
+# must be reported as such, not silently turned into a "missing header" verdict.
+listing=$(compose exec -T postgres pg_restore --list <"$partial" 2>"${partial}.list.err") || {
+    _detail="$(tr -d '\r\n' <"${partial}.list.err" | tail -c 400)"
+    rm -f "$partial" "${partial}.list.err"
+    fail DEPENDENCY_UNAVAILABLE "pg_restore --list could not read the archive" "detail=${_detail}"
+}
+rm -f "${partial}.list.err"
+
+table_entries=$(printf '%s\n' "$listing" | grep -c 'TABLE DATA' || true)
 if [ "${table_entries:-0}" -lt 1 ]; then
     rm -f "$partial"
     fail DEPENDENCY_UNAVAILABLE "archive verification failed: no TABLE DATA entries found" \
         "archive=$(basename "$partial")"
 fi
-if ! compose exec -T postgres pg_restore --list <"$partial" 2>/dev/null | grep -q 'Archive created at'; then
-    rm -f "$partial"
-    fail DEPENDENCY_UNAVAILABLE "archive verification failed: missing archive header" \
-        "archive=$(basename "$partial")"
-fi
+# Shell pattern instead of `... | grep -q`: with `pipefail`, a grep that exits
+# on its first match makes printf fail with SIGPIPE, which would report a good
+# archive as broken depending on timing.
+case "$listing" in
+    *"Archive created at"*) ;;
+    *)
+        rm -f "$partial"
+        fail DEPENDENCY_UNAVAILABLE "archive verification failed: missing archive header" \
+            "archive=$(basename "$partial")"
+        ;;
+esac
 
 schema_version=$(compose exec -T postgres \
     psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc 'SELECT version FROM _schema_version' 2>/dev/null \
@@ -141,16 +158,19 @@ fi
 
 # --- optional offsite copy ---------------------------------------------------
 offsite='"configured":false'
+# Never echo the raw target: an operator may paste a URL with userinfo or a
+# presigned query string, and these details end up in machine-readable output.
+s3_display=$(printf '%s' "$S3_URL" | sed -e 's#//[^@/]*@#//#' -e 's#?.*$##')
 if [ -n "$S3_URL" ]; then
     if ! command -v aws >/dev/null 2>&1; then
         fail DEPENDENCY_UNAVAILABLE "OCTOP_BACKUP_S3_URL is set but the aws CLI is not installed" \
-            "url=${S3_URL}"
+            "url=${s3_display}"
     fi
     if ! aws s3 cp "$archive" "${S3_URL%/}/$(basename "$archive")" --only-show-errors >/dev/null 2>&1; then
-        fail DEPENDENCY_UNAVAILABLE "offsite upload failed" "url=${S3_URL}"
+        fail DEPENDENCY_UNAVAILABLE "offsite upload failed" "url=${s3_display}"
     fi
     if ! aws s3 cp "${archive}.json" "${S3_URL%/}/$(basename "${archive}.json")" --only-show-errors >/dev/null 2>&1; then
-        fail DEPENDENCY_UNAVAILABLE "offsite sidecar upload failed" "url=${S3_URL}"
+        fail DEPENDENCY_UNAVAILABLE "offsite sidecar upload failed" "url=${s3_display}"
     fi
     bucket_and_key="${S3_URL#s3://}"
     bucket="${bucket_and_key%%/*}"
@@ -161,7 +181,8 @@ if [ -n "$S3_URL" ]; then
     if ! aws s3api head-object \
         --bucket "$bucket" \
         --key "${key_prefix}$(basename "$archive")" >/dev/null 2>&1; then
-        fail DEPENDENCY_UNAVAILABLE "offsite copy could not be verified with a HEAD request" "url=${S3_URL}"
+        fail DEPENDENCY_UNAVAILABLE "offsite copy could not be verified with a HEAD request" \
+            "url=${s3_display}"
     fi
     offsite="\"configured\":true,\"verified\":true"
 fi

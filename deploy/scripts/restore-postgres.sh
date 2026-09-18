@@ -106,10 +106,23 @@ else
 fi
 
 # --- preflight: the archive must parse before anything is dropped --------------
-if ! compose exec -T postgres pg_restore --list <"$ARCHIVE" 2>/dev/null | grep -q 'Archive created at'; then
+# The listing is captured once and matched with a shell pattern: piping into
+# `grep -q` would let grep exit early, SIGPIPE the producer, and -- under
+# `pipefail` -- report a readable archive as broken.
+archive_listing=$(compose exec -T postgres pg_restore --list <"$ARCHIVE" 2>"${ARCHIVE}.list.err") || {
+    _detail="$(tr -d '\r\n' <"${ARCHIVE}.list.err" | tail -c 400)"
+    rm -f "${ARCHIVE}.list.err"
     fail DEPENDENCY_UNAVAILABLE "archive is not a readable pg_dump custom archive" \
-        "archive=$(basename "$ARCHIVE")"
-fi
+        "detail=${_detail}"
+}
+rm -f "${ARCHIVE}.list.err"
+case "$archive_listing" in
+    *"Archive created at"*) ;;
+    *)
+        fail DEPENDENCY_UNAVAILABLE "archive is not a readable pg_dump custom archive" \
+            "archive=$(basename "$ARCHIVE")"
+        ;;
+esac
 
 log "restoring $(basename "$ARCHIVE") into database ${TARGET}"
 

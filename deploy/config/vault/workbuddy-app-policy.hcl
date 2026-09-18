@@ -1,7 +1,10 @@
 # =============================================================================
 # Vault policy for the WorkBuddy application workload identity (AppRole).
 #
-# Applied by deploy/scripts/bootstrap-vault-workload-identity.sh. Default-deny:
+# Applied by the operator once the `vault` profile is provisioned: this
+# deployment ships no bootstrap script for it (the profile stays a placeholder
+# while dependency-lock.json marks Vault legal/runtime review as blocked, so no
+# runtime path may assume Vault-backed secrets exist). Default-deny:
 # the workload may read exactly the secret paths it owns and nothing else, and
 # may not manage auth methods, policies, tokens, or the audit log.
 #

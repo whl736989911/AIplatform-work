@@ -13,9 +13,23 @@
 # --- identity of this deployment ---------------------------------------------
 # DEPLOY_DIR: directory holding compose.production.yml (script's parent/parent).
 DEPLOY_DIR="${DEPLOY_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}"
-COMPOSE_FILE="${OCTOP_COMPOSE_FILE:-${DEPLOY_DIR}/compose.production.yml}"
-ENV_FILE="${OCTOP_ENV_FILE:-${DEPLOY_DIR}/.env}"
-SECRETS_DIR="${OCTOP_SECRETS_DIR:-${DEPLOY_DIR}/secrets}"
+
+# Relative overrides — `OCTOP_BACKUP_DIR=./backups` is the shipped default in
+# production.env.example — resolve against DEPLOY_DIR, never the caller's working
+# directory. Otherwise an interactive shell, a cron job and
+# restore-readiness-gate.sh each look at a different place, and the gate reports
+# "no backup archive found" while archives pile up somewhere else.
+deploy_path() {
+    _candidate="${1#./}"
+    case "$_candidate" in
+        /*) printf '%s' "$_candidate" ;;
+        *) printf '%s/%s' "$DEPLOY_DIR" "$_candidate" ;;
+    esac
+}
+
+COMPOSE_FILE="$(deploy_path "${OCTOP_COMPOSE_FILE:-compose.production.yml}")"
+ENV_FILE="$(deploy_path "${OCTOP_ENV_FILE:-.env}")"
+SECRETS_DIR="$(deploy_path "${OCTOP_SECRETS_DIR:-secrets}")"
 
 # --- logging -----------------------------------------------------------------
 log() {
@@ -145,6 +159,15 @@ compose() {
 
 # load_env_file: export the deployment settings for host scripts, ignoring
 # comments/blank lines. Values are used verbatim (no eval).
+#
+# Two rules the deployment scripts rely on:
+#   * a variable that is already exported wins over the file, so a caller can
+#     pass a one-off override (the restore drill exports OCTOP_ALLOW_RESTORE=yes
+#     exactly this way) — this also matches `docker compose`, where the shell
+#     environment beats `--env-file`;
+#   * a trailing CR is stripped, so a `.env` written on Windows cannot smuggle
+#     "\r" into values that later reach `docker compose` interpolation (an
+#     exported `OCTOP_BIND_ADDRESS=127.0.0.1\r` fails the whole render).
 load_env_file() {
     if [ ! -f "$ENV_FILE" ]; then
         fail DEPLOYMENT_POLICY "environment file not found (copy production.env.example)" \
@@ -159,6 +182,12 @@ load_env_file() {
         case "$_key" in
             *[!A-Za-z0-9_]*) continue ;;
         esac
+        case "$_value" in
+            *"$(printf '\r')") _value=${_value%"$(printf '\r')"} ;;
+        esac
+        if [ -n "$(printenv "$_key" || true)" ]; then
+            continue
+        fi
         export "$_key=$_value"
     done <"$ENV_FILE"
 }

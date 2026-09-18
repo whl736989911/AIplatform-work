@@ -1,0 +1,26 @@
+# PostgreSQL 17.6 with pgvector, built on the digest-pinned upstream base.
+#
+# Why this exists: contracts/dependency-lock.json pins PostgreSQL to
+# postgres:17.6-bookworm, and that image ships no pgvector.  WorkBuddy knowledge
+# tables declare `vector(1024)` columns, so the deployment image has to carry the
+# extension while the base version stays exactly 17.6 (which is what
+# OCTOP_EXPECTED_DATABASE_SERVER_VERSION checks in the live policy gate).
+#
+# Build (the deployment directory is the context, so the image and the compose
+# file share one copy of the extension bootstrap):
+#   docker build -f deploy/Dockerfile.postgres -t workbuddy/postgres:17.6-pgvector deploy
+#
+# Pin the result by digest before production use:
+#   deploy/scripts/pin-image-digest.sh workbuddy/postgres:17.6-pgvector
+FROM postgres:17.6-bookworm
+
+# The official image already configures the PGDG repository for PostgreSQL 17,
+# so the matching pgvector build comes from the same source as the server.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends postgresql-17-pgvector; \
+    rm -rf /var/lib/apt/lists/*
+
+# Every database created by this image gets the extension, exactly as the
+# compose stack does through the same file.
+COPY config/postgres/init-vector.sql /docker-entrypoint-initdb.d/01-vector.sql

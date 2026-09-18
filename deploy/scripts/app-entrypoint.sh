@@ -8,7 +8,11 @@
 # every credential delivered as a mounted secret file. This script therefore:
 #
 #   1. builds the control-plane DSN and broker URL from secret FILES, so no
-#      password ever reaches the environment, argv, or the compose file;
+#      password appears in the compose file, the image, argv, or the logs. Both
+#      URLs are exported into this process's environment (DATABASE_URL,
+#      REDIS_URL) because the dependency probe reads them from there; that means
+#      `docker inspect` and this container's own uid can read them, which is the
+#      known, accepted exposure of running as this uid;
 #   2. refuses to start when a required secret is missing or empty;
 #   3. wires the private S3-compatible storage adapter and Vault workload
 #      identity placeholders from files, failing closed when the operator

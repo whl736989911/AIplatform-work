@@ -32,7 +32,7 @@ else
     fail DEPLOYMENT_POLICY "python3 is required by the policy gate and was not found on PATH"
 fi
 
-rendered=$(compose config --format json 2>/tmp/compose-config.err) || {
+rendered=$(compose --profile '*' config --format json 2>/tmp/compose-config.err) || {
     _detail="$(tr -d '\r\n' < /tmp/compose-config.err | tail -c 400)"
     fail DEPLOYMENT_POLICY "docker compose config failed" "detail=${_detail}"
 }
@@ -70,7 +70,10 @@ def check(name, ok, detail):
 DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 CREDENTIAL_KEY_RE = re.compile(r"(?:^|_)(PASSWORD|SECRET|TOKEN|ACCESS_KEY|SECRET_KEY|CREDENTIAL)(?:_|$)")
 REQUIRED_SERVICES = ("app", "postgres", "redis", "migrate", "volume-init")
-HARDENED_SERVICES = ("app", "postgres", "redis", "migrate", "volume-init", "vault", "bootstrap")
+# Services that stay up and therefore must publish a healthcheck. The one-shot
+# jobs (volume-init, migrate, bootstrap) are asserted by `jobs_are_one_shot`
+# instead: a healthcheck on a container that exits cannot report anything.
+HEALTHCHECKED_SERVICES = ("app", "postgres", "redis", "vault")
 NON_ROOT_EXPECTED = ("app", "postgres", "redis", "migrate", "volume-init", "vault", "bootstrap")
 
 
@@ -152,7 +155,9 @@ for name in NON_ROOT_EXPECTED:
         hardening_problems.append(f"{name}:no_new_privileges_missing")
     if not service.get("tmpfs"):
         hardening_problems.append(f"{name}:no_tmpfs_scratch")
-    if not service.get("healthcheck") or not service["healthcheck"].get("test"):
+    if name in HEALTHCHECKED_SERVICES and (
+        not service.get("healthcheck") or not service["healthcheck"].get("test")
+    ):
         hardening_problems.append(f"{name}:no_healthcheck")
     if name not in ("volume-init", "migrate", "bootstrap"):
         limits = (
@@ -224,6 +229,11 @@ for name, service in sorted(services.items()):
         pairs = list(environment.items())
     for key, value in pairs:
         key = str(key)
+        # A boolean switch (OCTOP_REQUIRE_SETUP_PASSWORD=true) matches the key
+        # pattern but carries no credential, so only real values are flagged.
+        flag = isinstance(value, bool) or str(value).strip().lower() in ("true", "false")
+        if flag:
+            continue
         if CREDENTIAL_KEY_RE.search(key.upper()) and not key.upper().endswith("_FILE"):
             if value not in (None, ""):
                 inline_credentials.append(f"{name}:{key}")

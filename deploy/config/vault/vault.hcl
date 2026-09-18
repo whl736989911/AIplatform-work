@@ -39,7 +39,7 @@ storage "file" {
   path = "/vault/file"
 }
 
-# An audit device is enabled at bootstrap by
-# deploy/scripts/bootstrap-vault-workload-identity.sh. Vault refuses further
-# requests when no audit device is enabled, so an unaudited store cannot serve
-# WorkBuddy secrets.
+# An audit device must be enabled by the operator before this store serves
+# WorkBuddy secrets: Vault refuses further requests when no audit device is
+# enabled, so an unaudited store cannot serve them. This deployment ships no
+# bootstrap for it (see the vault profile note in compose.production.yml).

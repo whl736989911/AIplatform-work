@@ -30,7 +30,7 @@ SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 load_env_file
 
-BACKUP_DIR="${OCTOP_BACKUP_DIR:-${DEPLOY_DIR}/backups}"
+BACKUP_DIR="$(deploy_path "${OCTOP_BACKUP_DIR:-backups}")"
 MAX_AGE_HOURS="${OCTOP_BACKUP_MAX_AGE_HOURS:-26}"
 RETENTION_DAYS="${OCTOP_BACKUP_RETENTION_DAYS:-14}"
 REQUIRED_DEPENDENCIES="${OCTOP_REQUIRED_DEPENDENCIES:-postgresql,redis}"
@@ -136,46 +136,69 @@ fi
 
 # --- dependency probe ---------------------------------------------------------
 if service_running app; then
-    if compose exec -T app env \
-        OCTOP_REQUIRED_DEPENDENCIES="$REQUIRED_DEPENDENCIES" \
-        OCTOP_ALLOWED_BLOCKED="$ALLOWED_BLOCKED" \
-        python3 - <<'PY' >/tmp/dependency-gate.json 2>/tmp/dependency-gate.err
+    # The probe reads DATABASE_URL/REDIS_URL from the process environment, and the
+    # app builds both at container start.  `compose exec` only inherits the compose
+    # `environment:` block, so the values are read back from the app process inside
+    # the container — no credential ever reaches this host's argv or environment.
+    # The shipped CLI runs the probe; driving `python3 -` over stdin instead would
+    # break the CEL sandbox's spawn-based worker, which re-imports __main__.
+    compose exec -T app sh -c '
+            set -eu
+            for name in DATABASE_URL OCTOP_DATABASE_URL REDIS_URL; do
+                value=$(tr "\0" "\n" < /proc/1/environ \
+                    | grep "^${name}=" | head -n 1 | cut -d= -f2-)
+                if [ -n "$value" ]; then export "$name=$value"; fi
+            done
+            exec octop workbuddy dependencies
+        ' >/tmp/dependency-raw.json 2>/tmp/dependency-gate.err || true
+    # `octop workbuddy dependencies` exits 2 when a dependency failed and 3 when
+    # one is blocked (see cli/commands/workbuddy.py). Those are signals for the
+    # caller: this gate owns the policy of which blocked entries are acceptable,
+    # so it judges the reported JSON instead of the exit code.
+    if [ -s /tmp/dependency-raw.json ]; then
+        evaluator=$(mktemp)
+        cat >"$evaluator" <<'PY'
 import json
-import os
 import sys
 
-from octop.infra.workbuddy import probe_dependencies
+required = {name for name in sys.argv[1].split(",") if name}
+allowed_blocked = {name for name in sys.argv[2].split(",") if name}
 
-required = {name for name in os.environ["OCTOP_REQUIRED_DEPENDENCIES"].split(",") if name}
-allowed_blocked = {name for name in os.environ["OCTOP_ALLOWED_BLOCKED"].split(",") if name}
-
-result = probe_dependencies()
+result = json.load(sys.stdin)
 problems = []
-for check in result["checks"]:
-    name, status = check["name"], check["status"]
+for check in result.get("checks", []):
+    name = str(check.get("name"))
+    status = str(check.get("status"))
+    detail = str(check.get("detail", ""))
     if status == "failed":
-        problems.append(f"{name}: failed ({check['detail']})")
-        continue
-    if status == "blocked" and name not in allowed_blocked:
-        problems.append(f"{name}: blocked but not allow-listed ({check['detail']})")
-        continue
-    if name in required and status != "passed":
-        problems.append(f"{name}: required dependency is {status} ({check['detail']})")
+        problems.append(name + ": failed (" + detail + ")")
+    elif status == "blocked" and name not in allowed_blocked:
+        problems.append(name + ": blocked but not allow-listed (" + detail + ")")
+    elif name in required and status != "passed":
+        problems.append(name + ": required dependency is " + status + " (" + detail + ")")
 
 print(json.dumps({
     "status": "failed" if problems else "passed",
-    "checks": [{"name": check["name"], "status": check["status"]} for check in result["checks"]],
+    "checks": [{"name": check.get("name"), "status": check.get("status")}
+               for check in result.get("checks", [])],
     "problems": problems,
 }))
 sys.exit(1 if problems else 0)
 PY
-    then
-        add_check dependency_gate passed \
-            "required (${REQUIRED_DEPENDENCIES}) passed; blocked entries limited to (${ALLOWED_BLOCKED})"
+        if python3 "$evaluator" "$REQUIRED_DEPENDENCIES" "$ALLOWED_BLOCKED" \
+                </tmp/dependency-raw.json >/tmp/dependency-gate.json 2>>/tmp/dependency-gate.err
+        then
+            add_check dependency_gate passed \
+                "required (${REQUIRED_DEPENDENCIES}) passed; blocked entries limited to (${ALLOWED_BLOCKED})"
+        else
+            problems=$(tr -d '\r\n' < /tmp/dependency-gate.json | tail -c 300)
+            add_check dependency_gate failed "${problems}"
+            verdict="failed"
+        fi
+        rm -f "$evaluator"
     else
         detail=$(tr -d '\r\n' < /tmp/dependency-gate.err | tail -c 300)
-        problems=$(tr -d '\r\n' < /tmp/dependency-gate.json | tail -c 300)
-        add_check dependency_gate failed "${detail}${problems}"
+        add_check dependency_gate failed "probe produced no output: ${detail}"
         verdict="failed"
     fi
 else

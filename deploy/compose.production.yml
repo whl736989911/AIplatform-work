@@ -76,6 +76,7 @@ services:
       - postgres_data:/volumes/postgres
       - redis_data:/volumes/redis
       - vault_data:/volumes/vault
+      - vault_logs:/volumes/vault-logs
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m
     logging: *bounded-logs
@@ -137,7 +138,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # pgvector extension bootstrap; initdb.d runs only on an empty data volume
-      - ../docker/postgres/init-vector.sql:/docker-entrypoint-initdb.d/01-vector.sql:ro
+      - ./config/postgres/init-vector.sql:/docker-entrypoint-initdb.d/01-vector.sql:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
       - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m
@@ -320,7 +321,11 @@ services:
     networks:
       - vaultpriv
     healthcheck:
-      test: ["CMD-SHELL", "vault status >/dev/null"]
+      # `vault status` exits 0 unsealed, 1 on error and 2 while sealed. This
+      # profile intentionally starts sealed and stays sealed until the operator
+      # supplies unseal material out of band, so health means "the server answers
+      # on its listener", not "unsealed".
+      test: ["CMD-SHELL", "vault status >/dev/null 2>&1; rc=$$?; [ \"$$rc\" -eq 0 ] || [ \"$$rc\" -eq 2 ]"]
       interval: 15s
       timeout: 5s
       retries: 10

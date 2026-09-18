@@ -16,7 +16,8 @@ protected-mode yes
 # Authentication: the only accepted credential is the injected secret.
 requirepass "__REDIS_PASSWORD__"
 
-# Durability: AOF so queued broker work survives a restart.
+# AOF keeps the delivery hints held here across a restart. PostgreSQL is the
+# workflow execution fact store; nothing in this instance is authoritative state.
 appendonly yes
 appendfilename "appendonly.aof"
 appenddirname "appendonlydir"

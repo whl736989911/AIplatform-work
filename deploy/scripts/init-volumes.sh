@@ -56,10 +56,11 @@ handle() {
     CHANGED=$((CHANGED + 1))
 }
 
-handle octop_data "/volumes/octop" "${OCTOP_UID:-10001}:${OCTOP_GID:-10001}"
-handle postgres_data "/volumes/postgres" "${POSTGRES_UID:-999}:${POSTGRES_GID:-999}"
-handle redis_data "/volumes/redis" "${REDIS_UID:-999}:${REDIS_GID:-1000}"
-handle vault_data "/volumes/vault" "${VAULT_UID:-100}:${VAULT_GID:-1000}"
+handle octop_data "${OCTOP_UID:-10001}:${OCTOP_GID:-10001}" /volumes/octop
+handle postgres_data "${POSTGRES_UID:-999}:${POSTGRES_GID:-999}" /volumes/postgres
+handle redis_data "${REDIS_UID:-999}:${REDIS_GID:-1000}" /volumes/redis
+handle vault_data "${VAULT_UID:-100}:${VAULT_GID:-1000}" /volumes/vault
+handle vault_logs "${VAULT_UID:-100}:${VAULT_GID:-1000}" /volumes/vault-logs
 
 printf '{"status":"passed","service":"volume-init","changed":%s,"volumes":{%s}}\n' \
     "$CHANGED" "$OUT"
