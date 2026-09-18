@@ -18,6 +18,7 @@ import {
   GraduationCap,
   Shield,
   PanelsTopLeft,
+  Building2,
 } from "lucide-react";
 import type { OctopUser } from "../api/modules/auth";
 import { navAllowed, userCan } from "../utils/permissions";
@@ -101,6 +102,14 @@ export function buildNavSections(
           path: "/token-usage",
           icon: <Activity size={iconSize} strokeWidth={iconStroke} />,
           labelKey: "nav.tokenUsage",
+        },
+        // Enterprise governance is visible to every authenticated member —
+        // the tenant role (not a module permission) decides what it shows.
+        {
+          key: "enterprise-governance",
+          path: "/enterprise",
+          icon: <Building2 size={iconSize} strokeWidth={iconStroke} />,
+          labelKey: "nav.enterpriseGovernance",
         },
       ],
     },

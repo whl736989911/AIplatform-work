@@ -12,6 +12,7 @@ const PersonalizationPage = lazy(
   () => import("../pages/Agent/Personalization"),
 );
 const TokenUsagePage = lazy(() => import("../pages/Control/TokenUsage"));
+const EnterprisePage = lazy(() => import("../pages/Enterprise"));
 
 // Lazy-loaded pages — Control
 const RemoteDesktopPage = lazy(() => import("../pages/Control/RemoteDesktop"));
@@ -64,6 +65,8 @@ export const pathToKey: Record<string, string> = {
   "/personalization/memory": "personalization",
   "/skills": "personalization",
   "/token-usage": "token-usage",
+  // WorkBuddy enterprise governance (authenticated members).
+  "/enterprise": "enterprise-governance",
   "/agent-config": "agent-config",
   // Control
   "/channels": "channels",
@@ -159,6 +162,9 @@ export const routeConfigs: RouteConfig[] = [
     element: <RedirectPreserveSearch to="/personalization/skills" />,
   },
   { path: "/token-usage", element: <TokenUsagePage /> },
+  // Enterprise governance (/enterprise) is authenticated-only: the tenant
+  // role from GET /api/v1/tenant-context decides which tabs render.
+  { path: "/enterprise", element: <EnterprisePage /> },
 
   // Control (RequirePermission via pathPermissionKeys in MainLayout)
   { path: "/acp", element: <ACPPage /> },

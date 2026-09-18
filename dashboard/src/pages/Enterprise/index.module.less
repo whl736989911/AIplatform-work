@@ -1,0 +1,115 @@
+/* 企业治理 (/enterprise) — panels share the AdvancedSettings tab layout. */
+
+.panel {
+  width: 100%;
+  min-width: 0;
+}
+
+.centered {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.notice {
+  margin-bottom: 16px;
+}
+
+.sectionBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--fn-border-primary);
+}
+
+.sectionHint {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.form {
+  max-width: 640px;
+}
+
+.fieldGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0 20px;
+}
+
+.inlineForm {
+  max-width: 520px;
+}
+
+.searchInput {
+  width: 220px;
+}
+
+.footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  margin-top: 8px;
+  padding-top: 20px;
+  border-top: 1px solid var(--fn-border-primary);
+  width: 100%;
+}
+
+.footerHint {
+  flex: 1;
+  min-width: 200px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tokenBox {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+
+.tokenHint {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.grantList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.grantRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--fn-border-primary);
+  border-radius: 6px;
+}
+
+.grantMeta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+@media (max-width: 767px) {
+  .searchInput {
+    width: 100%;
+  }
+
+  .form {
+    max-width: none;
+  }
+
+  .inlineForm {
+    max-width: none;
+  }
+}
