@@ -523,7 +523,9 @@ def signature_matches(*, secret: str, timestamp: int, body: bytes, provided: str
     candidate = normalize_signature(provided)
     if not candidate or not _SHA256_HEX.fullmatch(candidate):
         return False
-    return hmac.compare_digest(compute_webhook_signature(secret=secret, timestamp=timestamp, body=body), candidate)
+    return hmac.compare_digest(
+        compute_webhook_signature(secret=secret, timestamp=timestamp, body=body), candidate
+    )
 
 
 def event_matches_filter(event: Mapping[str, Any], event_filter: Mapping[str, Any]) -> bool:
@@ -689,9 +691,7 @@ class WorkBuddyKnowledgeService:
 
     # -- base CRUD ---------------------------------------------------------
 
-    def list_bases(
-        self, actor: WorkBuddyKnowledgeActor
-    ) -> list[dict[str, Any]]:
+    def list_bases(self, actor: WorkBuddyKnowledgeActor) -> list[dict[str, Any]]:
         ctx = self.context(actor)
         repo = self._repository()
         bases = repo.list_bases(ctx, limit=MAX_LIST_BASES)
@@ -754,7 +754,8 @@ class WorkBuddyKnowledgeService:
         else:
             if not actor.is_tenant_admin:
                 raise OctopError(
-                    ErrorCode.FORBIDDEN, "only a tenant admin may create an enterprise knowledge base"
+                    ErrorCode.FORBIDDEN,
+                    "only a tenant admin may create an enterprise knowledge base",
                 )
         revision = self._require_published_model(ctx, model_revision_id)
         base = repo.create_base(
@@ -767,7 +768,9 @@ class WorkBuddyKnowledgeService:
             owner_user_id=owner_user_id,
             department_id=target_department,
         )
-        return self._base_view(base, KnowledgeAccess("admin", PERMISSION_RANK["admin"], ("creator",)))
+        return self._base_view(
+            base, KnowledgeAccess("admin", PERMISSION_RANK["admin"], ("creator",))
+        )
 
     def get_base(self, actor: WorkBuddyKnowledgeActor, kb_id: str) -> dict[str, Any]:
         ctx = self.context(actor)
@@ -844,16 +847,12 @@ class WorkBuddyKnowledgeService:
         self._require(ctx, actor, kb_id, "admin")
         if permission not in PERMISSION_RANK:
             raise OctopError(ErrorCode.WORKBUDDY_INVALID_ARGUMENT, "unknown permission level")
-        row = self._repository().update_acl_permission(
-            ctx, kb_id, acl_id, permission=permission
-        )
+        row = self._repository().update_acl_permission(ctx, kb_id, acl_id, permission=permission)
         if row is None:
             raise OctopError(ErrorCode.NOT_FOUND, "grant not found")
         return self._acl_view(row)
 
-    def delete_acl(
-        self, actor: WorkBuddyKnowledgeActor, kb_id: str, acl_id: str
-    ) -> dict[str, Any]:
+    def delete_acl(self, actor: WorkBuddyKnowledgeActor, kb_id: str, acl_id: str) -> dict[str, Any]:
         ctx = self.context(actor)
         self._require(ctx, actor, kb_id, "admin")
         if not self._repository().delete_acl(ctx, kb_id, acl_id):
@@ -987,9 +986,7 @@ class WorkBuddyKnowledgeService:
             verdict = scanner.scan(data, filename=upload.filename, mime_type=detected)
         except Exception as exc:
             repo.reject_upload(ctx, kb_id, upload_id, rejection_code="SCANNER_FAILED")
-            raise OctopError(
-                ErrorCode.DEPENDENCY_UNAVAILABLE, "content scanner failed"
-            ) from exc
+            raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, "content scanner failed") from exc
         if verdict is None or verdict.status != "clean":
             repo.reject_upload(ctx, kb_id, upload_id, rejection_code="SCANNER_REJECTED")
             raise OctopError(
@@ -1046,15 +1043,10 @@ class WorkBuddyKnowledgeService:
             "created_at": document.created_at,
         }
 
-    def list_documents(
-        self, actor: WorkBuddyKnowledgeActor, kb_id: str
-    ) -> list[dict[str, Any]]:
+    def list_documents(self, actor: WorkBuddyKnowledgeActor, kb_id: str) -> list[dict[str, Any]]:
         ctx = self.context(actor)
         self._require(ctx, actor, kb_id, "read")
-        return [
-            self._document_view(row)
-            for row in self._repository().list_documents(ctx, kb_id)
-        ]
+        return [self._document_view(row) for row in self._repository().list_documents(ctx, kb_id)]
 
     def delete_document(
         self, actor: WorkBuddyKnowledgeActor, kb_id: str, document_id: str
@@ -1096,7 +1088,9 @@ class WorkBuddyKnowledgeService:
             repo.set_document_status(ctx, kb_id, document_id, status="parsing")
             data = store.read(ref.object_key, limit=min(ref.size_bytes, MAX_UPLOAD_BYTES) + 1)
             if sha256_hex(data) != ref.checksum_sha256:
-                raise HookRejection("CHECKSUM_MISMATCH", "stored object no longer matches its checksum")
+                raise HookRejection(
+                    "CHECKSUM_MISMATCH", "stored object no longer matches its checksum"
+                )
             parsed = parser.parse(data, filename=ref.filename, mime_type=ref.mime_type)
             validate_archive_manifest(parsed.archive_entries)
             chunks = chunk_parsed_text(parsed)
@@ -1110,7 +1104,9 @@ class WorkBuddyKnowledgeService:
                     "embedder returned a different number of vectors than chunks",
                 )
             prepared: list[tuple[int, str, int, dict[str, Any], list[float]]] = []
-            for ordinal, ((text, tokens), raw_vector) in enumerate(zip(chunks, vectors, strict=True)):
+            for ordinal, ((text, tokens), raw_vector) in enumerate(
+                zip(chunks, vectors, strict=True)
+            ):
                 prepared.append(
                     (
                         ordinal,
@@ -1129,8 +1125,10 @@ class WorkBuddyKnowledgeService:
                 chunks=prepared,
             )
         except Exception as exc:
-            code = exc.code.value if isinstance(exc, OctopError) else str(
-                getattr(exc, "code", "INDEX_FAILED")
+            code = (
+                exc.code.value
+                if isinstance(exc, OctopError)
+                else str(getattr(exc, "code", "INDEX_FAILED"))
             )
             repo.set_document_status(ctx, kb_id, document_id, status="failed", error_code=code)
             raise
@@ -1240,11 +1238,16 @@ class WorkBuddyKnowledgeService:
             base.embedding_dimensions,
         )
         reported = (
-            (descriptor.adapter_key, descriptor.model_key, descriptor.revision, descriptor.dimensions)
+            (
+                descriptor.adapter_key,
+                descriptor.model_key,
+                descriptor.revision,
+                descriptor.dimensions,
+            )
             if descriptor is not None
             else None
         )
-        if reported != pinned:
+        if descriptor is None or reported != pinned:
             raise OctopError(
                 ErrorCode.MODEL_NOT_CONFIGURED,
                 "embedder does not match the knowledge base's pinned model revision",
@@ -1428,9 +1431,7 @@ class WorkBuddyTriggerService:
             backend = self._require_secret_backend()
             webhook_path = secrets.token_urlsafe(24).replace("=", "")[:48]
             if not _WEBHOOK_PATH.fullmatch(webhook_path):
-                raise OctopError(
-                    ErrorCode.INTERNAL_ERROR, "generated webhook path is invalid"
-                )
+                raise OctopError(ErrorCode.INTERNAL_ERROR, "generated webhook path is invalid")
             secret_value = secrets.token_urlsafe(32)
             secret_ref = backend.create_secret(
                 name=f"workbuddy/{ctx.tenant_id}/{webhook_path}", value=secret_value
@@ -1506,9 +1507,7 @@ class WorkBuddyTriggerService:
     ) -> dict[str, Any]:
         """Write a new secret into the external backend and return it exactly once."""
         ctx = self.context(actor)
-        registration = self._require_registration(
-            ctx, registration_id, workflow_id=workflow_id
-        )
+        registration = self._require_registration(ctx, registration_id, workflow_id=workflow_id)
         if registration.kind != "webhook" or registration.webhook_path is None:
             raise OctopError(ErrorCode.NOT_FOUND, "trigger registration not found")
         backend = self._require_secret_backend()
@@ -1563,13 +1562,15 @@ class WorkBuddyTriggerService:
             timestamp = int(str(timestamp_raw).strip())
         except (TypeError, ValueError):
             raise OctopError(
-                ErrorCode.TRIGGER_SIGNATURE_INVALID, "webhook timestamp header is missing or invalid"
+                ErrorCode.TRIGGER_SIGNATURE_INVALID,
+                "webhook timestamp header is missing or invalid",
             ) from None
         if not timestamp_in_window(
             timestamp, tolerance_seconds=registration.tolerance_seconds, now=now
         ):
             raise OctopError(
-                ErrorCode.TRIGGER_SIGNATURE_INVALID, "webhook timestamp is outside the allowed window"
+                ErrorCode.TRIGGER_SIGNATURE_INVALID,
+                "webhook timestamp is outside the allowed window",
             )
         self._require_secret_backend()  # fail closed before touching the body
         provided = lowered.get(registration.signature_header.lower())
@@ -1620,9 +1621,7 @@ class WorkBuddyTriggerService:
             ctx, registration, claim.delivery, event_key=event_key, event=event, is_test=False
         )
 
-    def test_delivery(
-        self, actor: WorkBuddyKnowledgeActor, registration_id: str
-    ) -> dict[str, Any]:
+    def test_delivery(self, actor: WorkBuddyKnowledgeActor, registration_id: str) -> dict[str, Any]:
         """Admin replay: dispatch a synthetic event and record the audit row."""
         ctx = self.context(actor)
         registration = self._require_registration(ctx, registration_id)
@@ -1727,7 +1726,7 @@ class WorkBuddyTriggerService:
         is_test: bool,
     ) -> dict[str, Any]:
         dispatcher = self._hooks.dispatcher
-        if not _hook_available(dispatcher):
+        if dispatcher is None or not _hook_available(dispatcher):
             self._repository().reject_delivery(
                 ctx, delivery.delivery_id, rejection_code="DISPATCHER_UNAVAILABLE"
             )
@@ -1753,9 +1752,7 @@ class WorkBuddyTriggerService:
             self._repository().reject_delivery(
                 ctx, delivery.delivery_id, rejection_code="DISPATCH_FAILED"
             )
-            raise OctopError(
-                ErrorCode.DEPENDENCY_UNAVAILABLE, "workflow dispatch failed"
-            ) from exc
+            raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, "workflow dispatch failed") from exc
         self._repository().complete_delivery(ctx, delivery.delivery_id, execution_id=execution_id)
         return {
             "delivery_id": delivery.delivery_id,

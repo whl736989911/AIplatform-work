@@ -31,6 +31,9 @@ def _reset_public_schema(pool: object) -> None:
         conn.execute("DROP SCHEMA public CASCADE")
         conn.execute("CREATE SCHEMA public")
         conn.execute("GRANT ALL ON SCHEMA public TO CURRENT_USER")
+        # Control-plane migrations declare pgvector columns (WorkBuddy knowledge
+        # embeddings), so the extension has to exist before run_migrations().
+        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
         conn.execute("COMMIT")
 
 

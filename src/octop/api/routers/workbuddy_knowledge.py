@@ -59,9 +59,7 @@ class KnowledgeBaseCreateBody(BaseModel):
     )
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
-    department_id: str | None = Field(
-        default=None, description="Required for department scope."
-    )
+    department_id: str | None = Field(default=None, description="Required for department scope.")
     model_revision_id: str = Field(
         description="Published bge-m3 platform model revision granted to this tenant."
     )
@@ -91,7 +89,9 @@ class UploadCompleteBody(BaseModel):
 
 class DocumentCreateBody(BaseModel):
     upload_id: str | None = None
-    file_ref: str | None = Field(default=None, description="File reference returned by upload completion.")
+    file_ref: str | None = Field(
+        default=None, description="File reference returned by upload completion."
+    )
     file_ref_id: str | None = Field(default=None, description="Alias of file_ref.")
     title: str = ""
 
@@ -131,9 +131,7 @@ def _require_uuid(value: str, field: str) -> str:
     try:
         return str(uuid.UUID(str(value)))
     except (TypeError, ValueError, AttributeError):
-        raise OctopError(
-            ErrorCode.WORKBUDDY_INVALID_ARGUMENT, f"{field} must be a UUID"
-        ) from None
+        raise OctopError(ErrorCode.WORKBUDDY_INVALID_ARGUMENT, f"{field} must be a UUID") from None
 
 
 def _pool(server: Any) -> DatabasePool:
@@ -265,9 +263,7 @@ async def list_knowledge_acl(
     return workbuddy_envelope(request, {"items": items, "count": len(items)})
 
 
-@router.post(
-    "/knowledge-bases/{id}/acl", status_code=201, summary="Add an explicit grant"
-)
+@router.post("/knowledge-bases/{id}/acl", status_code=201, summary="Add an explicit grant")
 async def add_knowledge_acl(
     request: Request,
     id: str,
@@ -287,9 +283,7 @@ async def add_knowledge_acl(
     return workbuddy_envelope(request, payload)
 
 
-@router.put(
-    "/knowledge-bases/{id}/acl/{acl_id}", summary="Change one grant's permission level"
-)
+@router.put("/knowledge-bases/{id}/acl/{acl_id}", summary="Change one grant's permission level")
 async def update_knowledge_acl(
     request: Request,
     id: str,

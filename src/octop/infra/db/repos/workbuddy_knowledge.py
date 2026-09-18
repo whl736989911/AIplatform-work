@@ -947,9 +947,7 @@ class WorkBuddyKnowledgeRepo:
                 (status, error_code, now_ts(), ctx.tenant_id, kb_id, document_id),
             )
 
-    def soft_delete_document(
-        self, ctx: WorkBuddyDbContext, kb_id: str, document_id: str
-    ) -> bool:
+    def soft_delete_document(self, ctx: WorkBuddyDbContext, kb_id: str, document_id: str) -> bool:
         """Remove retrievability immediately; physical rows stay for the reaper."""
         stamp = now_ts()
         with workbuddy_transaction(self._db, ctx) as conn:
@@ -962,9 +960,7 @@ class WorkBuddyKnowledgeRepo:
             ).fetchone()
         return row is not None
 
-    def next_generation_number(
-        self, ctx: WorkBuddyDbContext, kb_id: str, document_id: str
-    ) -> int:
+    def next_generation_number(self, ctx: WorkBuddyDbContext, kb_id: str, document_id: str) -> int:
         with workbuddy_transaction(self._db, ctx) as conn:
             row = conn.execute(
                 "SELECT coalesce(max(generation_number), 0) AS current "
@@ -1360,7 +1356,14 @@ class WorkBuddyTriggerRepo:
                 "signature_timestamp = ?, received_at = ?, completed_at = NULL "
                 "WHERE tenant_id = ? AND registration_id = ? AND event_key = ? AND status = 'failed' "
                 "RETURNING *",
-                (body_sha256, signature_timestamp, stamp, ctx.tenant_id, registration_id, event_key),
+                (
+                    body_sha256,
+                    signature_timestamp,
+                    stamp,
+                    ctx.tenant_id,
+                    registration_id,
+                    event_key,
+                ),
             ).fetchone()
             if reclaimed is None:
                 return DeliveryClaim(WorkBuddyTriggerDeliveryRow.from_row(existing), False)

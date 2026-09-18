@@ -277,7 +277,9 @@ class FakeKnowledgeRepo:
     def list_bases(self, ctx: Any, *, limit: int = 200) -> list[WorkBuddyKnowledgeBaseRow]:
         return [self.base] if self.base is not None else []
 
-    def effective_acl(self, ctx: Any, kb_id: str, *, user_id: int, department_id: str | None) -> list[Any]:
+    def effective_acl(
+        self, ctx: Any, kb_id: str, *, user_id: int, department_id: str | None
+    ) -> list[Any]:
         return [
             row
             for row in self.acl
@@ -285,10 +287,16 @@ class FakeKnowledgeRepo:
             or (row.department_id is not None and row.department_id == department_id)
         ]
 
-    def effective_acl_map(self, ctx: Any, kb_ids: list[str], *, user_id: int, department_id: str | None) -> dict[str, list[Any]]:
+    def effective_acl_map(
+        self, ctx: Any, kb_ids: list[str], *, user_id: int, department_id: str | None
+    ) -> dict[str, list[Any]]:
         if self.base is None or self.base.kb_id not in kb_ids:
             return {}
-        return {self.base.kb_id: self.effective_acl(ctx, self.base.kb_id, user_id=user_id, department_id=department_id)}
+        return {
+            self.base.kb_id: self.effective_acl(
+                ctx, self.base.kb_id, user_id=user_id, department_id=department_id
+            )
+        }
 
     def get_platform_model_revision(self, ctx: Any, model_revision_id: str) -> Any:
         if self.revision is None or self.revision.model_revision_id != model_revision_id:
@@ -298,7 +306,9 @@ class FakeKnowledgeRepo:
     def tenant_model_granted(self, ctx: Any, model_revision_id: str) -> bool:
         return self.granted
 
-    def search_chunks(self, ctx: Any, kb_id: str, *, query_vector: list[float], limit: int) -> list[Any]:
+    def search_chunks(
+        self, ctx: Any, kb_id: str, *, query_vector: list[float], limit: int
+    ) -> list[Any]:
         self.search_calls.append({"kb_id": kb_id, "dimensions": len(query_vector), "limit": limit})
         return self.hits[:limit]
 
@@ -319,7 +329,9 @@ class FakeKnowledgeRepo:
         return user_id in {7, 8, 9}
 
     # writes
-    def set_document_status(self, ctx: Any, kb_id: str, document_id: str, *, status: str, error_code: str | None = None) -> None:
+    def set_document_status(
+        self, ctx: Any, kb_id: str, document_id: str, *, status: str, error_code: str | None = None
+    ) -> None:
         self.statuses.append((status, error_code))
 
     def publish_generation(self, ctx: Any, **kwargs: Any) -> Any:
@@ -368,17 +380,13 @@ class FakeTriggerRepo:
         self.completed.append(execution_id)
         for key, row in self.ledger.items():
             if row.delivery_id == delivery_id:
-                self.ledger[key] = replace(
-                    row, status="executed", execution_id=execution_id
-                )
+                self.ledger[key] = replace(row, status="executed", execution_id=execution_id)
 
     def reject_delivery(self, ctx: Any, delivery_id: str, *, rejection_code: str) -> None:
         self.rejected.append(rejection_code)
         for key, row in self.ledger.items():
             if row.delivery_id == delivery_id:
-                self.ledger[key] = replace(
-                    row, status="failed", rejection_code=rejection_code
-                )
+                self.ledger[key] = replace(row, status="failed", rejection_code=rejection_code)
 
     def list_grants(self, ctx: Any, registration_id: str) -> list[Any]:
         return [grant for grant in self.grants if grant.registration_id == registration_id]
@@ -411,7 +419,9 @@ class FakeObjectStore:
     def available(self) -> bool:
         return True
 
-    def allocate_target(self, *, tenant_id: str, kb_id: str, upload_id: str, filename: str) -> ObjectStoreTarget:
+    def allocate_target(
+        self, *, tenant_id: str, kb_id: str, upload_id: str, filename: str
+    ) -> ObjectStoreTarget:
         return ObjectStoreTarget(object_key=f"objects/{tenant_id}/{kb_id}/{upload_id}/{filename}")
 
     def stat(self, object_key: str) -> ObjectStat | None:
@@ -435,8 +445,10 @@ class FakeScanner:
 
 class FakeParser:
     def __init__(self, parsed: ParsedDocument | None = None, *, fail: bool = False) -> None:
-        self.parsed = parsed if parsed is not None else ParsedDocument(
-            text_blocks=(TextBlock("hello knowledge world"),)
+        self.parsed = (
+            parsed
+            if parsed is not None
+            else ParsedDocument(text_blocks=(TextBlock("hello knowledge world"),))
         )
         self.fail = fail
 
@@ -450,10 +462,18 @@ class FakeParser:
 
 
 class FakeEmbedder:
-    def __init__(self, *, dimensions: int = EMBEDDING_DIMENSIONS, zero: bool = False, descriptor: EmbeddingDescriptor | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        dimensions: int = EMBEDDING_DIMENSIONS,
+        zero: bool = False,
+        descriptor: EmbeddingDescriptor | None = None,
+    ) -> None:
         self.dimensions = dimensions
         self.zero = zero
-        self.descriptor = descriptor or EmbeddingDescriptor("ollama", "bge-m3", 3, EMBEDDING_DIMENSIONS)
+        self.descriptor = descriptor or EmbeddingDescriptor(
+            "ollama", "bge-m3", 3, EMBEDDING_DIMENSIONS
+        )
 
     def available(self) -> bool:
         return True
@@ -506,17 +526,22 @@ def _reset_hooks() -> None:
 
 
 def _service(repo: FakeKnowledgeRepo, hooks: KnowledgeHooks) -> WorkBuddyKnowledgeService:
-    return WorkBuddyKnowledgeService(db=NoopDb(), hooks=hooks, repo=repo, clock=lambda: 1_700_000_000)
-
-
-def _trigger_service(repo: FakeTriggerRepo, hooks: TriggerHooks) -> WorkBuddyTriggerService:
-    return WorkBuddyTriggerService(
+    return WorkBuddyKnowledgeService(
         db=NoopDb(), hooks=hooks, repo=repo, clock=lambda: 1_700_000_000
     )
 
 
+def _trigger_service(repo: FakeTriggerRepo, hooks: TriggerHooks) -> WorkBuddyTriggerService:
+    return WorkBuddyTriggerService(db=NoopDb(), hooks=hooks, repo=repo, clock=lambda: 1_700_000_000)
+
+
 def _actor(**overrides: Any) -> WorkBuddyKnowledgeActor:
-    values: dict[str, Any] = {"user_id": 7, "tenant_id": TENANT, "department_id": None, "is_tenant_admin": False}
+    values: dict[str, Any] = {
+        "user_id": 7,
+        "tenant_id": TENANT,
+        "department_id": None,
+        "is_tenant_admin": False,
+    }
     values.update(overrides)
     return WorkBuddyKnowledgeActor(**values)
 
@@ -567,9 +592,7 @@ def test_department_admin_reads_as_admin_but_personal_owner_only() -> None:
 
 def test_personal_owner_and_additive_acl() -> None:
     base = _base(scope="personal", owner_user_id=7)
-    owner = resolve_knowledge_access(
-        base, user_id=7, department_id=None, is_tenant_admin=False
-    )
+    owner = resolve_knowledge_access(base, user_id=7, department_id=None, is_tenant_admin=False)
     granted = resolve_knowledge_access(
         base,
         user_id=8,
@@ -630,7 +653,10 @@ def test_filename_accepts_bare_names() -> None:
 
 
 def test_upload_content_checks_size_mime_and_magic() -> None:
-    assert verify_upload_content(filename="a.md", declared_mime="text/markdown", data=b"# hi") == "text/markdown"
+    assert (
+        verify_upload_content(filename="a.md", declared_mime="text/markdown", data=b"# hi")
+        == "text/markdown"
+    )
     with pytest.raises(OctopError) as mismatch:
         verify_upload_content(filename="a.md", declared_mime="application/pdf", data=b"# hi")
     assert mismatch.value.code is ErrorCode.KNOWLEDGE_UNSUPPORTED_TYPE
@@ -726,7 +752,11 @@ def test_search_requires_the_pinned_model_and_revision() -> None:
 
     drift = _service(
         FakeKnowledgeRepo(),
-        _search_hooks(FakeEmbedder(descriptor=EmbeddingDescriptor("ollama", "bge-m3", 4, EMBEDDING_DIMENSIONS))),
+        _search_hooks(
+            FakeEmbedder(
+                descriptor=EmbeddingDescriptor("ollama", "bge-m3", 4, EMBEDDING_DIMENSIONS)
+            )
+        ),
     )
     with pytest.raises(OctopError) as excinfo:
         drift.search(_actor(), KB_ID, query="hello")
@@ -747,7 +777,10 @@ def test_search_rejects_other_models_and_bad_vectors() -> None:
     assert excinfo.value.code is ErrorCode.MODEL_NOT_CONFIGURED
 
     wrong_width = _service(
-        FakeKnowledgeRepo(), _search_hooks(FakeEmbedder(dimensions=768, descriptor=EmbeddingDescriptor("ollama", "bge-m3", 3, 768)))
+        FakeKnowledgeRepo(),
+        _search_hooks(
+            FakeEmbedder(dimensions=768, descriptor=EmbeddingDescriptor("ollama", "bge-m3", 3, 768))
+        ),
     )
     with pytest.raises(OctopError):
         wrong_width.search(_actor(), KB_ID, query="hello")
@@ -765,7 +798,6 @@ def test_search_fails_closed_without_grant_or_embedder() -> None:
     with pytest.raises(OctopError) as grant:
         ungranted.search(_actor(), KB_ID, query="hello")
     assert grant.value.code is ErrorCode.WORKBUDDY_CAPABILITY_NOT_APPROVED
-
 
 
 def test_search_is_impossible_for_invisible_bases() -> None:
@@ -808,9 +840,7 @@ def _index_hooks(
 def test_indexing_publishes_one_ready_generation_atomically() -> None:
     repo = FakeKnowledgeRepo()
     service = _service(repo, _index_hooks(store=FakeObjectStore(b"hello world")))
-    service.index_document(
-        tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID
-    )
+    service.index_document(tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID)
     assert len(repo.published) == 1
     published = repo.published[0]
     assert published["document_id"] == DOC_ID
@@ -820,7 +850,8 @@ def test_indexing_publishes_one_ready_generation_atomically() -> None:
 
 def test_indexing_fails_closed_without_publishing() -> None:
     parser_offline = _service(
-        FakeKnowledgeRepo(), KnowledgeHooks(embedder=FakeEmbedder(), parser=None, object_store=FakeObjectStore())
+        FakeKnowledgeRepo(),
+        KnowledgeHooks(embedder=FakeEmbedder(), parser=None, object_store=FakeObjectStore()),
     )
     with pytest.raises(OctopError):
         parser_offline.index_document(
@@ -848,9 +879,7 @@ def test_indexing_fails_closed_without_publishing() -> None:
         ),
     )
     with pytest.raises(HookRejection):
-        bomb.index_document(
-            tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID
-        )
+        bomb.index_document(tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID)
     assert bomb.repo is not None and bomb.repo.published == []
 
     tampered = _service(
@@ -858,9 +887,7 @@ def test_indexing_fails_closed_without_publishing() -> None:
         _index_hooks(store=FakeObjectStore(b"tampered body")),
     )
     with pytest.raises(HookRejection):
-        tampered.index_document(
-            tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID
-        )
+        tampered.index_document(tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID)
     assert tampered.repo is not None and tampered.repo.published == []
 
 
@@ -922,7 +949,9 @@ def test_upload_completion_rejects_hash_and_scanner_failures() -> None:
     service = _service(
         good,
         KnowledgeHooks(
-            object_store=FakeObjectStore(b"hello world"), scanner=FakeScanner(), embedder=FakeEmbedder()
+            object_store=FakeObjectStore(b"hello world"),
+            scanner=FakeScanner(),
+            embedder=FakeEmbedder(),
         ),
     )
     ref = service.complete_upload(_actor(), KB_ID, upload.upload_id)
@@ -956,7 +985,9 @@ def test_upload_completion_rejects_hash_and_scanner_failures() -> None:
     assert tampered.completed == []
 
     fake_pdf = b"GIF89a-not-a-pdf"
-    pdf_upload = _upload_row(filename="a.pdf", mime_type="application/pdf", size_bytes=len(fake_pdf))
+    pdf_upload = _upload_row(
+        filename="a.pdf", mime_type="application/pdf", size_bytes=len(fake_pdf)
+    )
     wrong_magic = UploadRepo(pdf_upload)
     magic = _service(
         wrong_magic,
@@ -1029,9 +1060,7 @@ def test_webhook_signature_window_and_tampering() -> None:
         )
     assert tampered.value.code is ErrorCode.TRIGGER_SIGNATURE_INVALID
     with pytest.raises(OctopError) as expired:
-        service.ingest_webhook(
-            WEBHOOK_PATH, raw_body=body, headers=_signed(body, timestamp=1_000)
-        )
+        service.ingest_webhook(WEBHOOK_PATH, raw_body=body, headers=_signed(body, timestamp=1_000))
     assert expired.value.code is ErrorCode.TRIGGER_SIGNATURE_INVALID
     assert dispatcher.calls == []
     assert timestamp_in_window(1_700_000_000, tolerance_seconds=300, now=1_700_000_100)
@@ -1040,9 +1069,7 @@ def test_webhook_signature_window_and_tampering() -> None:
 
 def test_webhook_fails_closed_without_proven_dependencies() -> None:
     body = b'{"event": "wf.started"}'
-    no_backend = _trigger_service(
-        FakeTriggerRepo(), _webhook_hooks(None, FakeDispatcher())
-    )
+    no_backend = _trigger_service(FakeTriggerRepo(), _webhook_hooks(None, FakeDispatcher()))
     with pytest.raises(OctopError) as backend:
         no_backend.ingest_webhook(WEBHOOK_PATH, raw_body=body, headers=_signed(body))
     assert backend.value.code is ErrorCode.DEPENDENCY_UNAVAILABLE
@@ -1091,7 +1118,9 @@ def test_rotation_requires_a_proven_secret_backend() -> None:
     repo = FakeTriggerRepo()
     service = _trigger_service(repo, _webhook_hooks(None, FakeDispatcher()))
     with pytest.raises(OctopError) as excinfo:
-        service.rotate_secret(_actor(), repo.registration.workflow_id, repo.registration.registration_id)
+        service.rotate_secret(
+            _actor(), repo.registration.workflow_id, repo.registration.registration_id
+        )
     assert excinfo.value.code is ErrorCode.DEPENDENCY_UNAVAILABLE
 
     backend = FakeSecretBackend({"vault://workbuddy/hook": SECRET})
