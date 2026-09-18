@@ -184,7 +184,9 @@ class WorkflowSemanticResolver(Protocol):
     with ``ok=False``.  Raising is also allowed: the caller then fails closed.
     """
 
-    def check_tool(self, tool_name: str, parameters: Mapping[str, Any]) -> SemanticDecision | None: ...
+    def check_tool(
+        self, tool_name: str, parameters: Mapping[str, Any]
+    ) -> SemanticDecision | None: ...
 
     def check_model(self, model: str | None) -> SemanticDecision | None: ...
 
@@ -366,8 +368,7 @@ def _strict_json_copy(value: Any, *, path: str = "definition") -> Any:
         return copied
     if isinstance(value, (list, tuple)):
         return [
-            _strict_json_copy(item, path=f"{path}[{index}]")
-            for index, item in enumerate(value)
+            _strict_json_copy(item, path=f"{path}[{index}]") for index, item in enumerate(value)
         ]
     raise WorkflowCompileError(
         WORKFLOW_SCHEMA_INVALID,
@@ -525,7 +526,7 @@ def iter_cel_references(expression: str) -> list[tuple[str, str]]:
 def _probe_cel(expression: str, *, path: str) -> dict[str, Any]:
     """Parse one CEL expression through the bounded sandbox and return evidence."""
     try:
-        result = evaluate_cel(expression, {"inputs": {}, "outputs": {}})
+        evaluate_cel(expression, {"inputs": {}, "outputs": {}})
     except CELSandboxError as exc:
         if exc.code in _CEL_INVALID_CODES:
             raise WorkflowCompileError(
@@ -553,7 +554,9 @@ class _Compiler:
         self.normalized = normalize_definition(definition)
         self.nodes: list[Mapping[str, Any]] = list(self.normalized.get("nodes") or [])
         self.edge_specs: list[Mapping[str, Any]] = list(self.normalized.get("edges") or [])
-        self.input_names: tuple[str, ...] = tuple(sorted((self.normalized.get("inputs") or {}).keys()))
+        self.input_names: tuple[str, ...] = tuple(
+            sorted((self.normalized.get("inputs") or {}).keys())
+        )
         self.node_ids: tuple[str, ...] = tuple(str(node["id"]) for node in self.nodes)
         self.node_by_id: dict[str, Mapping[str, Any]] = {
             str(node["id"]): node for node in self.nodes
@@ -680,9 +683,7 @@ class _Compiler:
                     f"approval target {target!r} is not a node",
                     path=f"nodes.{node_id}.config.target_node_id",
                 )
-            self.effective_edges.append(
-                CompiledEdge(node_id, target, when=None, implicit=True)
-            )
+            self.effective_edges.append(CompiledEdge(node_id, target, when=None, implicit=True))
 
         for edge in self.effective_edges:
             self.outgoing[edge.from_node_id].append(edge)
@@ -699,7 +700,7 @@ class _Compiler:
         self.entry_node_id = entries[0]
 
         indegree = {node_id: len(self.incoming[node_id]) for node_id in self.node_ids}
-        ready = [node_id for node_id in entries]
+        ready = list(entries)
         heapq.heapify(ready)
         order: list[str] = []
         while ready:
@@ -820,9 +821,7 @@ class _Compiler:
             if node_type in {"condition", "transform"}:
                 expression = str(config.get("expression") or "")
                 expression_path = f"nodes.{node_id}.config.expression"
-                self.cel_evidence[expression_path] = _probe_cel(
-                    expression, path=expression_path
-                )
+                self.cel_evidence[expression_path] = _probe_cel(expression, path=expression_path)
                 for kind, name in iter_cel_references(expression):
                     self._check_reference(
                         kind, name, node_id=node_id, path=expression_path, scope="cel"
@@ -836,9 +835,7 @@ class _Compiler:
         *,
         require_semantic_resolution: bool,
     ) -> str:
-        needed = any(
-            str(node.get("type")) in {"tool", "llm", "approval"} for node in self.nodes
-        )
+        needed = any(str(node.get("type")) in {"tool", "llm", "approval"} for node in self.nodes)
         if not needed:
             return "not_required"
         if resolver is None:
@@ -854,7 +851,9 @@ class _Compiler:
             config = node.get("config") or {}
             if node_type == "tool":
                 self._apply_decision(
-                    resolver.check_tool(str(config.get("tool_name")), config.get("parameters") or {}),
+                    resolver.check_tool(
+                        str(config.get("tool_name")), config.get("parameters") or {}
+                    ),
                     fallback_code=WORKFLOW_TOOL_UNAVAILABLE,
                     fallback_message=f"tool {config.get('tool_name')!r} is not available",
                     path=f"nodes.{node_id}.config.tool_name",
@@ -947,8 +946,7 @@ class _Compiler:
             node_by_id={node.node_id: node for node in compiled_nodes},
             save_as_by_node=dict(self.save_as_by_node),
             output_key_by_node={
-                node_id: (self.save_as_by_node.get(node_id) or node_id)
-                for node_id in self.node_ids
+                node_id: (self.save_as_by_node.get(node_id) or node_id) for node_id in self.node_ids
             },
             output_key_to_node=dict(self.output_key_to_node),
             semantic_checks=semantic_checks,

@@ -8,7 +8,6 @@ import pytest
 
 from octop.infra.workbuddy.workflow_compiler import (
     WORKFLOW_APPROVER_INVALID,
-    WORKFLOW_APPROVAL_TARGET,
     WORKFLOW_CONDITION_EDGES,
     WORKFLOW_CYCLE,
     WORKFLOW_DEPENDENCY_UNAVAILABLE,
@@ -24,7 +23,6 @@ from octop.infra.workbuddy.workflow_compiler import (
     WORKFLOW_SCHEMA_INVALID,
     WORKFLOW_TEMPLATE_INVALID,
     WORKFLOW_TOOL_UNAVAILABLE,
-    WORKFLOW_UNREACHABLE,
     WORKFLOW_VERSION_HASH_MISMATCH,
     SemanticDecision,
     WorkflowCompileError,
@@ -44,7 +42,9 @@ def manual_trigger() -> dict:
     return {"type": "manual", "config": {}}
 
 
-def transform(name: str, expression: str, *, config: dict | None = None, save_as: str | None = None) -> dict:
+def transform(
+    name: str, expression: str, *, config: dict | None = None, save_as: str | None = None
+) -> dict:
     node = {
         "id": name,
         "type": "transform",
@@ -310,9 +310,7 @@ def test_cycles_and_multiple_roots_are_rejected() -> None:
 
 def test_condition_node_requires_exactly_one_true_and_false_edge() -> None:
     definition = condition_definition()
-    definition["edges"] = [
-        edge for edge in definition["edges"] if edge.get("when") != "false"
-    ]
+    definition["edges"] = [edge for edge in definition["edges"] if edge.get("when") != "false"]
 
     with pytest.raises(WorkflowCompileError) as caught:
         compile_workflow_definition(definition)
