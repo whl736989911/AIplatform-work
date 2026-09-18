@@ -173,7 +173,7 @@ def _is_owner(record: WorkflowRecord, principal: WorkBuddyPrincipal) -> bool:
 def _load_workflow(
     repo: Any, principal: WorkBuddyPrincipal, workflow_id: str, *, conn: Any | None = None
 ) -> WorkflowRecord:
-    record = repo.get_workflow(
+    record: WorkflowRecord | None = repo.get_workflow(
         principal.tenant_id, _public_id(workflow_id, _WORKFLOW_NOT_FOUND), conn=conn
     )
     if record is None:

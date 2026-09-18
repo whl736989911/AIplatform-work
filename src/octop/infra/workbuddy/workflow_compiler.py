@@ -399,35 +399,35 @@ def normalize_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
     Idempotent: ``normalize_definition(normalize_definition(d)) ==
     normalize_definition(d)``.
     """
-    normalized = _strict_json_copy(definition)
+    normalized: dict[str, Any] = dict(_strict_json_copy(definition))
     inputs = normalized.setdefault("inputs", {})
-    if isinstance(inputs, Mapping):
+    if isinstance(inputs, dict):
         for declaration in inputs.values():
-            if isinstance(declaration, Mapping):
+            if isinstance(declaration, dict):
                 declaration.setdefault("required", False)
 
     limits = normalized.get("limits")
-    if not isinstance(limits, Mapping):
+    if not isinstance(limits, dict):
         limits = {}
         normalized["limits"] = limits
     for key, value in _LIMIT_DEFAULTS.items():
         limits.setdefault(key, value)
 
     output = normalized.get("output")
-    if not isinstance(output, Mapping):
+    if not isinstance(output, dict):
         normalized["output"] = dict(_OUTPUT_DEFAULT)
 
     nodes = normalized.get("nodes")
     if isinstance(nodes, list):
         for node in nodes:
-            if not isinstance(node, Mapping):
+            if not isinstance(node, dict):
                 continue
             retry = node.get("retry")
-            if isinstance(retry, Mapping):
+            if isinstance(retry, dict):
                 retry.setdefault("max_attempts", 1)
                 retry.setdefault("backoff_sec", 5)
             config = node.get("config")
-            if node.get("type") == "approval" and isinstance(config, Mapping):
+            if node.get("type") == "approval" and isinstance(config, dict):
                 config.setdefault("timeout_hours", 24)
         normalized["nodes"] = sorted(nodes, key=lambda item: str(item.get("id", "")))
 
@@ -648,7 +648,7 @@ class _Compiler:
             node_type = str(node.get("type"))
             explicit = [edge for edge in self.effective_edges if edge.from_node_id == node_id]
             if node_type == "condition":
-                whens = sorted(edge.when for edge in explicit)
+                whens = sorted(edge.when or "" for edge in explicit)
                 if whens != ["false", "true"]:
                     raise WorkflowCompileError(
                         WORKFLOW_CONDITION_EDGES,
@@ -662,8 +662,8 @@ class _Compiler:
                     f"node {node_id!r} has {len(explicit)} outgoing edges; only condition nodes branch",
                     path=f"nodes.{node_id}",
                 )
-            target = self._approval_target(node)
-            if target is None:
+            approval_target = self._approval_target(node)
+            if approval_target is None:
                 continue
             if node_type != "approval":
                 raise WorkflowCompileError(
@@ -677,17 +677,19 @@ class _Compiler:
                     f"approval node {node_id!r} declares target_node_id and an outgoing edge",
                     path=f"nodes.{node_id}.config.target_node_id",
                 )
-            if target not in self.node_by_id:
+            if approval_target not in self.node_by_id:
                 raise WorkflowCompileError(
                     WORKFLOW_APPROVAL_TARGET,
-                    f"approval target {target!r} is not a node",
+                    f"approval target {approval_target!r} is not a node",
                     path=f"nodes.{node_id}.config.target_node_id",
                 )
-            self.effective_edges.append(CompiledEdge(node_id, target, when=None, implicit=True))
+            self.effective_edges.append(
+                CompiledEdge(node_id, approval_target, when=None, implicit=True)
+            )
 
-        for edge in self.effective_edges:
-            self.outgoing[edge.from_node_id].append(edge)
-            self.incoming[edge.to_node_id].append(edge)
+        for compiled_edge in self.effective_edges:
+            self.outgoing[compiled_edge.from_node_id].append(compiled_edge)
+            self.incoming[compiled_edge.to_node_id].append(compiled_edge)
 
     def check_topology(self) -> None:
         entries = sorted(node_id for node_id in self.node_ids if not self.incoming[node_id])
@@ -783,7 +785,7 @@ class _Compiler:
                     path=path,
                     details={"scope": scope},
                 )
-            owner = name
+            owner: str | None = name
         else:
             owner = self.output_key_to_node.get(name)
             if owner is None:

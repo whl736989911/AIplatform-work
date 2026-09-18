@@ -475,6 +475,19 @@ class WorkBuddyWorkflowRepo:
             ).fetchall()
         return [RevocationRecord.from_row(row) for row in rows]
 
+    def list_revoked_workflow_ids(self, tenant_id: str, *, conn: Any | None = None) -> set[str]:
+        """Workflow ids withdrawn as a whole (revocation with no version).
+
+        Member listings hide these; the router called this before it existed.
+        """
+        with self._connection(tenant_id, conn=conn) as connection:
+            rows = connection.execute(
+                "SELECT workflow_id FROM workbuddy_workflow_revocations "
+                "WHERE tenant_id = ? AND workflow_version_id IS NULL",
+                (tenant_id,),
+            ).fetchall()
+        return {str(row["workflow_id"]) for row in rows}
+
     def is_version_revoked(
         self, tenant_id: str, workflow_id: str, workflow_version_id: str, *, conn: Any | None = None
     ) -> bool:
