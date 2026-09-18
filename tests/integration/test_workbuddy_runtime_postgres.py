@@ -364,7 +364,6 @@ async def test_suspended_tenant_cannot_start_new_executions(
     from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
 
     workflow_id = _publish(pool, tenant, hello_definition(), "Suspended runtime")
-    principal = _principal(tenant)
     repo = WorkBuddyIdentityRepo(pool)
     try:
         repo.suspend_tenant(tenant["tenant_id"], reason="billing review")
@@ -464,3 +463,315 @@ async def test_zero_valid_approvers_fails_the_node(
     assert steps["review"]["status"] == "failed", steps
     assert steps["review"]["error_code"] == ErrorCode.APPROVAL_NO_VALID_APPROVER.value, steps
     assert steps["audit"]["status"] == "success", steps
+
+
+# --------------------------------------------------------------------------- #
+# unknown external writes (contract 5.1.6 / T13)
+# --------------------------------------------------------------------------- #
+
+
+class _LostResponsePort:
+    """A trusted adapter whose external write loses its response.
+
+    It records every dispatch so a test can prove the write is never sent twice.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
+        from octop.infra.workbuddy.runtime import UnresolvedToolOutcome
+
+        self.calls.append({"node_id": node.id, "key": idempotency_key})
+        raise UnresolvedToolOutcome(
+            operation_key=idempotency_key,
+            external_request_id="provider-operation-20260918-001",
+            dispatched_at="2026-09-18T10:00:00Z",
+            tool_revision="rev-3",
+            parameters_digest="d41d8cd98f00b204e9800998ecf8427e",
+            detail="the provider never answered",
+        )
+
+    def execute_llm(self, *, node: Any, activation: Any) -> Any:  # pragma: no cover
+        raise AssertionError("this workflow has no llm node")
+
+    def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:  # pragma: no cover
+        raise AssertionError("chat is not part of this workflow")
+
+
+def external_write_definition(approver_membership_ids: list[str]) -> dict[str, Any]:
+    """Approve, then submit: the conservative shape for an external write."""
+    return {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {"who": {"type": "string", "required": True, "default": "world"}},
+        "nodes": [
+            {
+                "id": "hello",
+                "type": "transform",
+                "name": "Build greeting",
+                "config": {
+                    "input": {"greeting": "hello {{ inputs.who }}"},
+                    "expression": "input",
+                },
+                "save_as": "greeting",
+            },
+            {
+                "id": "review",
+                "type": "approval",
+                "name": "Authorize the submission",
+                "config": {
+                    "approval_message": "Authorize the bid submission?",
+                    "approver_user_ids": approver_membership_ids,
+                    "target_node_id": "submit",
+                },
+            },
+            {
+                "id": "submit",
+                "type": "tool",
+                "name": "Submit the bid",
+                "config": {
+                    "tool_name": "bidding.submit",
+                    "parameters": {"greeting": "{{ nodes.hello.output }}"},
+                },
+                "save_as": "bid",
+            },
+            {
+                "id": "after",
+                "type": "transform",
+                "name": "Record the outcome",
+                "config": {"input": "submitted", "expression": "input"},
+                "save_as": "note",
+            },
+        ],
+        "edges": [
+            {"from": "hello", "to": "review"},
+            # An approval that authorizes a write declares its target instead of
+            # an edge, so the compiler owns that one edge.
+            {"from": "submit", "to": "after"},
+        ],
+    }
+
+
+def _evidence_payload(
+    pool: Any, tenant: dict[str, Any], execution_id: str, content: dict[str, Any]
+) -> str:
+    """Put a verifiable evidence record in the execution's controlled store."""
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    payload_id = WorkBuddyRuntimeRepo(pool).insert_payload(
+        ctx,
+        tenant_id=tenant["tenant_id"],
+        execution_id=execution_id,
+        kind="reconciliation_evidence",
+        node_id="submit",
+        content=content,
+        sha256="0" * 64,
+        size_bytes=len(str(content)),
+    )
+    return payload_id
+
+
+@pytest.fixture
+def lost_response(pool: Any, monkeypatch: Any) -> Any:
+    """Route the runtime router at a service whose tool adapter loses responses."""
+    from octop.api.routers import workbuddy_runtime as router_module
+    from octop.infra.workbuddy.runtime import WorkBuddyRuntimeService
+
+    port = _LostResponsePort()
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    monkeypatch.setattr(router_module, "_service", lambda server: service)
+    return port
+
+
+async def _approve_then_park(
+    client: httpx.AsyncClient, workflow_id: str, execution_id: str
+) -> None:
+    """Approve the authorization so the write is dispatched, then lose it."""
+    listed = await client.get("/approval-requests")
+    requests = [item for item in listed.json()["data"]["items"] if item["status"] == "pending"]
+    assert requests, listed.text
+    approval_id = requests[0]["id"]
+    challenge = await client.post(f"/approval-requests/{approval_id}/challenge")
+    assert challenge.status_code == 200, challenge.text
+    approved = await client.post(
+        f"/executions/{execution_id}/resume",
+        json={
+            "approval_request_id": approval_id,
+            "decision": "approved",
+            "token": challenge.json()["token"],
+        },
+    )
+    assert approved.status_code == 200, approved.text
+
+
+async def _park_execution(app: FastAPI, pool: Any, tenant: dict[str, Any]) -> str:
+    """One execution whose external write may or may not have happened."""
+    definition = external_write_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Lost response runtime")
+    async with _client(app, _principal(tenant)) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        assert accepted.status_code == 202, accepted.text
+        execution_id = accepted.json()["data"]["id"]
+        await _approve_then_park(client, workflow_id, execution_id)
+        parked = await client.get(f"/executions/{execution_id}")
+        assert parked.json()["data"]["status"] == "waiting_reconciliation", parked.text
+    return execution_id
+
+
+async def test_unknown_external_write_parks_and_reconciles(
+    app: FastAPI, pool: Any, tenant: dict[str, Any], lost_response: Any
+) -> None:
+    """T13: the write is never retried, and only evidence moves the execution."""
+    execution_id = await _park_execution(app, pool, tenant)
+    async with _client(app, _principal(tenant)) as client:
+        detail = (await client.get(f"/executions/{execution_id}")).json()["data"]
+        steps = {step["node_id"]: step for step in detail["steps"]}
+        assert steps["submit"]["status"] == "waiting_reconciliation", steps
+        assert detail["wait_reasons"] == ["reconciliation"], detail
+        assert detail["waiting_steps"] == ["submit"], detail
+        assert detail["cancel_requested"] is False, detail
+        # The write was dispatched exactly once and never re-sent.
+        assert len(lost_response.calls) == 1, lost_response.calls
+
+        # A blind resume cannot move an execution with an unknown write.
+        blind = await client.post(
+            f"/executions/{execution_id}/resume",
+            json={"approval_request_id": str(uuid.uuid4()), "decision": "approved", "token": "x"},
+        )
+        assert blind.status_code == 409, blind.text
+        assert blind.json()["error"]["code"] == ErrorCode.RECONCILIATION_REQUIRED.value
+        assert len(lost_response.calls) == 1, lost_response.calls
+
+        evidence_ref = _evidence_payload(
+            pool,
+            tenant,
+            execution_id,
+            {"query": "provider operation lookup", "result": {"bid_id": "BID-77"}},
+        )
+        recorded = await client.post(
+            f"/executions/{execution_id}/reconciliations",
+            json={
+                "step_id": "submit",
+                "decision": "confirmed_success",
+                "evidence_ref": evidence_ref,
+                "external_reference": "provider-operation-20260918-001",
+                "reason": "the provider lookup confirms the bid was accepted",
+            },
+        )
+        assert recorded.status_code == 200, recorded.text
+        settled = (await client.get(f"/executions/{execution_id}")).json()["data"]
+
+    # The recorded result advanced the DAG; the tool was never called again.
+    assert settled["status"] == "success", settled
+    assert settled["outputs"]["bid"] == {"bid_id": "BID-77"}, settled
+    assert settled["wait_reasons"] == [], settled
+    steps = {step["node_id"]: step for step in settled["steps"]}
+    assert steps["after"]["status"] == "success", steps
+    assert len(lost_response.calls) == 1, lost_response.calls
+
+
+async def test_reconciliation_requires_admin_and_evidence(
+    app: FastAPI, pool: Any, tenant: dict[str, Any], lost_response: Any
+) -> None:
+    """Only a tenant admin may decide, and a decision needs valid evidence."""
+    execution_id = await _park_execution(app, pool, tenant)
+    body = {
+        "step_id": "submit",
+        "decision": "confirmed_failed",
+        "evidence_ref": str(uuid.uuid4()),
+        "reason": "the provider says nothing was written",
+    }
+    async with _client(app, _principal(tenant, role="member")) as member_client:
+        refused = await member_client.post(
+            f"/executions/{execution_id}/reconciliations", json=body
+        )
+        assert refused.status_code == 403, refused.text
+
+    async with _client(app, _principal(tenant)) as client:
+        unknown_evidence = await client.post(
+            f"/executions/{execution_id}/reconciliations", json=body
+        )
+        assert unknown_evidence.status_code == 422, unknown_evidence.text
+        assert (
+            unknown_evidence.json()["error"]["code"]
+            == ErrorCode.RECONCILIATION_EVIDENCE_INVALID.value
+        )
+
+        # A confirmed success without the caller's result is not evidence either.
+        no_result = _evidence_payload(pool, tenant, execution_id, {"query": "lookup"})
+        invalid_result = await client.post(
+            f"/executions/{execution_id}/reconciliations",
+            json={**body, "decision": "confirmed_success", "evidence_ref": no_result},
+        )
+        assert invalid_result.status_code == 422, invalid_result.text
+        assert (
+            invalid_result.json()["error"]["code"]
+            == ErrorCode.RECONCILIATION_EVIDENCE_INVALID.value
+        )
+
+        still_parked = (await client.get(f"/executions/{execution_id}")).json()["data"]
+
+    assert still_parked["status"] == "waiting_reconciliation", still_parked
+
+
+async def test_confirmed_failure_terminates_without_retrying(
+    app: FastAPI, pool: Any, tenant: dict[str, Any], lost_response: Any
+) -> None:
+    """A confirmed failure ends the branch; nothing is dispatched again."""
+    execution_id = await _park_execution(app, pool, tenant)
+    evidence_ref = _evidence_payload(
+        pool, tenant, execution_id, {"query": "provider lookup", "result": None}
+    )
+    async with _client(app, _principal(tenant)) as client:
+        recorded = await client.post(
+            f"/executions/{execution_id}/reconciliations",
+            json={
+                "step_id": "submit",
+                "decision": "confirmed_failed",
+                "evidence_ref": evidence_ref,
+                "reason": "the provider confirms the bid was never received",
+            },
+        )
+        assert recorded.status_code == 200, recorded.text
+        settled = (await client.get(f"/executions/{execution_id}")).json()["data"]
+
+    assert settled["status"] == "failed", settled
+    steps = {step["node_id"]: step for step in settled["steps"]}
+    assert steps["submit"]["status"] == "failed", steps
+    assert steps["after"]["status"] == "skipped", steps
+    assert len(lost_response.calls) == 1, lost_response.calls
+
+
+async def test_cancel_during_unknown_write_waits_for_evidence(
+    app: FastAPI, pool: Any, tenant: dict[str, Any], lost_response: Any
+) -> None:
+    """Cancelling cannot undo a maybe-write: it converges after reconciliation."""
+    execution_id = await _park_execution(app, pool, tenant)
+    async with _client(app, _principal(tenant)) as client:
+        canceled = await client.post(f"/executions/{execution_id}/cancel")
+        assert canceled.status_code == 202, canceled.text
+        pending = (await client.get(f"/executions/{execution_id}")).json()["data"]
+        assert pending["status"] == "waiting_reconciliation", pending
+        assert pending["cancel_requested"] is True, pending
+
+        evidence_ref = _evidence_payload(
+            pool, tenant, execution_id, {"query": "provider lookup", "result": None}
+        )
+        recorded = await client.post(
+            f"/executions/{execution_id}/reconciliations",
+            json={
+                "step_id": "submit",
+                "decision": "confirmed_failed",
+                "evidence_ref": evidence_ref,
+                "reason": "the provider confirms nothing was written",
+            },
+        )
+        assert recorded.status_code == 200, recorded.text
+        settled = (await client.get(f"/executions/{execution_id}")).json()["data"]
+
+    assert settled["status"] == "canceled", settled
+    assert settled["cancel_requested"] is True, settled
+    assert len(lost_response.calls) == 1, lost_response.calls

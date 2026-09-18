@@ -38,6 +38,7 @@ from octop.infra.users.identity import Role, User
 from octop.infra.users.password import validate_password_policy
 from octop.infra.users.permissions import effective_permissions
 from octop.infra.utils.locale import normalize_locale, resolve_request_locale
+from octop.infra.workbuddy.roles import TENANT_ADMIN_ROLES
 
 router = APIRouter()
 
@@ -53,7 +54,7 @@ _PLAN_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _DATA_REGION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
 _REQUEST_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 
-TENANT_ADMIN_ROLES = frozenset({"owner", "admin"})
+
 MEMBER_ROLES = ("owner", "admin", "member")
 USER_STATUSES = ("active", "suspended")
 DEPARTMENT_STATUSES = ("active", "archived")

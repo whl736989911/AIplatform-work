@@ -298,28 +298,32 @@ class ApprovalCandidateRow:
 class ReconciliationRow:
     id: str
     execution_id: str
-    node_id: str
-    status: str
-    external_ref: str | None
-    evidence: Any
-    evidence_sha256: str
-    recorded_by_user_id: int
+    step_run_id: str
+    decision: str
+    evidence_ref: str
+    evidence_hash: str
+    external_request_id: str | None
+    result_payload_ref: str | None
+    note: str
+    decided_by_user_id: int
     created_at: Any
-    resolved_at: Any
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> ReconciliationRow:
         return cls(
             id=str(row["id"]),
             execution_id=str(row["execution_id"]),
-            node_id=str(row["node_id"]),
-            status=str(row["status"]),
-            external_ref=row["external_ref"],
-            evidence=row["evidence"],
-            evidence_sha256=str(row["evidence_sha256"]),
-            recorded_by_user_id=int(row["recorded_by_user_id"]),
+            step_run_id=str(row["step_run_id"]),
+            decision=str(row["decision"]),
+            evidence_ref=str(row["evidence_ref"]),
+            evidence_hash=str(row["evidence_hash"]),
+            external_request_id=row["external_request_id"],
+            result_payload_ref=(
+                str(row["result_payload_ref"]) if row["result_payload_ref"] else None
+            ),
+            note=str(row["note"]),
+            decided_by_user_id=int(row["decided_by_user_id"]),
             created_at=row["created_at"],
-            resolved_at=row["resolved_at"],
         )
 
 
@@ -780,7 +784,27 @@ class WorkBuddyRuntimeRepo:
                 """
                 UPDATE workbuddy_executions
                 SET status = 'canceled', cancel_requested_at = now(), finished_at = now()
-                WHERE id = ? AND status IN ('pending', 'running', 'waiting_approval')
+                WHERE id = ? AND status IN ('queued', 'running', 'waiting_approval')
+                """,
+                (execution_id,),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def request_cancel_deferred(
+        self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
+    ) -> bool:
+        """Record the cancel request on an execution parked for reconciliation.
+
+        The contract keeps the execution in ``waiting_reconciliation`` until the
+        unknown write is reconciled; only then does it converge to ``canceled``.
+        """
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_executions
+                SET cancel_requested_at = now()
+                WHERE id = ? AND status = 'waiting_reconciliation'
+                  AND cancel_requested_at IS NULL
                 """,
                 (execution_id,),
             )
@@ -1180,38 +1204,107 @@ class WorkBuddyRuntimeRepo:
         *,
         tenant_id: str,
         execution_id: str,
-        node_id: str,
-        status: str,
-        evidence: Any,
-        evidence_sha256: str,
-        recorded_by_user_id: int,
-        external_ref: str | None = None,
+        step_run_id: str,
+        decision: str,
+        evidence_ref: str,
+        evidence_hash: str,
+        decided_by_user_id: int,
+        note: str,
+        external_request_id: str | None = None,
+        result_payload_ref: str | None = None,
         reconciliation_id: str | None = None,
         conn: Any | None = None,
     ) -> str:
         rid = reconciliation_id or new_runtime_id()
-        resolved = "now()" if status != "pending" else "NULL"
         with runtime_transaction(self._db, ctx, conn) as c:
             c.execute(
-                f"""
+                """
                 INSERT INTO workbuddy_reconciliations(
-                    id, tenant_id, execution_id, node_id, status, external_ref,
-                    evidence, evidence_sha256, recorded_by_user_id, resolved_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {resolved})
+                    id, tenant_id, execution_id, step_run_id, decision, evidence_ref,
+                    evidence_hash, external_request_id, result_payload_ref, note,
+                    decided_by_user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rid,
                     tenant_id,
                     execution_id,
-                    node_id,
-                    status,
-                    external_ref,
-                    _jsonb(evidence),
-                    evidence_sha256,
-                    int(recorded_by_user_id),
+                    step_run_id,
+                    decision,
+                    evidence_ref,
+                    evidence_hash,
+                    external_request_id,
+                    result_payload_ref,
+                    note,
+                    int(decided_by_user_id),
                 ),
             )
         return rid
+
+    def get_payload(
+        self,
+        ctx: WorkBuddyDbContext,
+        execution_id: str,
+        payload_id: str,
+        *,
+        conn: Any | None = None,
+    ) -> PayloadRow | None:
+        with runtime_transaction(self._db, ctx, conn) as c:
+            row = c.execute(
+                "SELECT * FROM workbuddy_execution_payloads WHERE execution_id = ? AND id = ?",
+                (execution_id, payload_id),
+            ).fetchone()
+        return PayloadRow.from_row(row) if row is not None else None
+
+    def find_step_run(
+        self,
+        ctx: WorkBuddyDbContext,
+        execution_id: str,
+        node_id: str,
+        *,
+        status: str | None = None,
+        conn: Any | None = None,
+    ) -> StepRunRow | None:
+        clause = "" if status is None else " AND status = ?"
+        params: tuple[Any, ...] = (
+            (execution_id, node_id) if status is None else (execution_id, node_id, status)
+        )
+        with runtime_transaction(self._db, ctx, conn) as c:
+            row = c.execute(
+                "SELECT * FROM workbuddy_step_runs WHERE execution_id = ? AND node_id = ?"
+                f"{clause} ORDER BY attempt DESC, started_at DESC LIMIT 1",
+                params,
+            ).fetchone()
+        return StepRunRow.from_row(row) if row is not None else None
+
+    def settle_step_run(
+        self,
+        ctx: WorkBuddyDbContext,
+        step_run_id: str,
+        *,
+        status: str,
+        output: Any = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        conn: Any | None = None,
+    ) -> bool:
+        """Backfill the parked attempt: only a waiting step can be settled."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_step_runs
+                SET status = ?, output = ?, error_code = ?, error_message = ?, finished_at = now()
+                WHERE id = ? AND status = 'waiting_reconciliation'
+                """,
+                (
+                    status,
+                    _jsonb(output) if output is not None else None,
+                    error_code,
+                    error_message,
+                    step_run_id,
+                ),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
 
     def list_reconciliations(
         self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None

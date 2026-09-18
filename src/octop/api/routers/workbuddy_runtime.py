@@ -29,9 +29,10 @@ from octop.infra.db.pool import DatabasePool
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.runtime import (
     APPROVAL_DECISIONS,
-    RECONCILIATION_STATUSES,
+    RECONCILIATION_DECISIONS,
     RuntimeActor,
     WorkBuddyRuntimeService,
+    execution_wait_facts,
 )
 
 router = APIRouter()
@@ -92,12 +93,15 @@ class ResumeBody(BaseModel):
 
 
 class ReconciliationBody(BaseModel):
+    """One operator decision about an unknown external write."""
+
     model_config = ConfigDict(extra="forbid")
 
-    node_id: str = Field(min_length=1, max_length=64)
-    status: str = Field(min_length=1, max_length=16)
-    evidence: dict[str, Any] = Field(default_factory=dict)
-    external_ref: str | None = Field(default=None, max_length=200)
+    step_id: str = Field(min_length=1, max_length=64)
+    decision: str = Field(min_length=1, max_length=32)
+    evidence_ref: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=_MAX_TEXT)
+    external_reference: str | None = Field(default=None, max_length=200)
 
 
 class ChatBody(BaseModel):
@@ -171,6 +175,7 @@ async def get_execution(
     payload = view.to_payload()
     payload["steps"] = [step.to_payload() for step in steps]
     payload["edges"] = edges
+    payload.update(execution_wait_facts(view, steps))
     return workbuddy_envelope(request, payload)
 
 
@@ -216,20 +221,22 @@ async def record_reconciliation(
     execution_id: str,
     body: ReconciliationBody,
     request: Request,
-    principal: _Principal,
+    principal: _AdminPrincipal,
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
-    if body.status not in RECONCILIATION_STATUSES:
+    if body.decision not in RECONCILIATION_DECISIONS:
         raise OctopError(
-            ErrorCode.WORKBUDDY_VALIDATION_FAILED, "reconciliation status is not supported"
+            ErrorCode.WORKBUDDY_VALIDATION_FAILED,
+            "decision must be 'confirmed_success' or 'confirmed_failed'",
         )
     payload = _service(server).record_reconciliation(
         _actor(principal),
         _uuid(execution_id, field="execution"),
-        node_id=body.node_id,
-        status=body.status,
-        evidence=body.evidence,
-        external_ref=body.external_ref,
+        node_id=body.step_id,
+        decision=body.decision,
+        evidence_ref=body.evidence_ref,
+        reason=body.reason,
+        external_reference=body.external_reference,
     )
     return workbuddy_envelope(request, dict(payload))
 

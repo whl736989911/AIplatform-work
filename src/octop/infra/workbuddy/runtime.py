@@ -43,6 +43,7 @@ from octop.infra.db.repos.workbuddy_runtime import (
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.cel_sandbox import CELSandboxError, evaluate_cel
+from octop.infra.workbuddy.roles import TENANT_ADMIN_ROLES
 from octop.infra.workbuddy.workflow_compiler import (
     CompiledWorkflow,
     WorkflowCompileError,
@@ -52,6 +53,18 @@ from octop.infra.workbuddy.workflow_compiler import (
 
 NODE_TYPES = frozenset({"tool", "llm", "condition", "approval", "transform"})
 TERMINAL_EXECUTION_STATUSES = frozenset({"success", "failed", "partial", "canceled"})
+EXECUTION_STATUSES = frozenset(
+    {
+        "queued",
+        "running",
+        "waiting_approval",
+        "waiting_reconciliation",
+        "success",
+        "failed",
+        "partial",
+        "canceled",
+    }
+)
 CANCELLABLE_EXECUTION_STATUSES = ("queued", "running", "waiting_approval")
 APPROVAL_TOKEN_TTL_SECONDS = 120
 DEFAULT_MAX_STEPS = 50
@@ -62,7 +75,7 @@ MAX_DEFINITION_NODES = 100
 MAX_DEFINITION_EDGES = 4_950
 
 APPROVAL_DECISIONS = frozenset({"approved", "rejected"})
-RECONCILIATION_STATUSES = frozenset({"matched", "mismatched", "unresolved"})
+RECONCILIATION_DECISIONS = frozenset({"confirmed_success", "confirmed_failed"})
 
 # Restricted one-pass template placeholder, matching the compiler's grammar.
 _TEMPLATE_RE = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
@@ -145,12 +158,53 @@ class EdgeOutcome:
     taken: bool
 
 
+class UnresolvedToolOutcome(Exception):
+    """An external write was dispatched but its outcome cannot be determined.
+
+    The trusted adapter reports what it knows at the moment it gives up: the
+    stable operation key, when it dispatched, the tool revision and resolved
+    parameter digest it used, and any external reference that can be verified
+    later. The engine parks the step for reconciliation instead of retrying, so
+    the same write is never sent twice by accident.
+    """
+
+    def __init__(
+        self,
+        *,
+        operation_key: str,
+        external_request_id: str | None = None,
+        dispatched_at: str | None = None,
+        tool_revision: str | None = None,
+        parameters_digest: str | None = None,
+        detail: str = "",
+    ) -> None:
+        super().__init__(detail or operation_key)
+        self.operation_key = operation_key
+        self.external_request_id = external_request_id
+        self.dispatched_at = dispatched_at
+        self.tool_revision = tool_revision
+        self.parameters_digest = parameters_digest
+        self.detail = detail
+
+    def facts(self) -> dict[str, Any]:
+        """The record the execution keeps while the outcome is unknown."""
+        return {
+            "operation_key": self.operation_key,
+            "external_request_id": self.external_request_id,
+            "dispatched_at": self.dispatched_at,
+            "tool_revision": self.tool_revision,
+            "parameters_digest": self.parameters_digest,
+            "detail": self.detail,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayState:
     """Results already recorded for this execution (resume must not re-run them)."""
 
     outputs: Mapping[str, Any] = field(default_factory=dict)
     skipped: frozenset[str] = frozenset()
+    failed: Mapping[str, tuple[str | None, str | None]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +216,7 @@ class GraphRun:
     error_code: str | None = None
     error_message: str | None = None
     waiting_approval_node_id: str | None = None
+    reconciliation_node_id: str | None = None
     approval_candidates: dict[str, tuple[tuple[int, str | None], ...]] = field(
         default_factory=dict
     )
@@ -535,6 +590,7 @@ def run_graph(
     node_failures: list[StepOutcome] = []
     approval_candidates: dict[str, tuple[tuple[int, str | None], ...]] = {}
     waiting_node: str | None = None
+    reconciliation_node: str | None = None
     executed = 0
 
     def resolve_edge(edge: GraphEdge, taken: bool) -> None:
@@ -748,6 +804,20 @@ def run_graph(
 
         # External nodes: only a trusted adapter may run them; otherwise the
         # step fails closed and the execution records that failure.
+        settled = replay.failed.get(node.id)
+        if settled is not None:
+            error_code, error_message = settled
+            node_failures.append(
+                record(
+                    node,
+                    "failed",
+                    error_code=error_code,
+                    error_message=error_message,
+                    replayed=True,
+                )
+            )
+            propagate_skip(node)
+            continue
         try:
             activation = _activation(graph, node, inputs=inputs, bindings=bindings)
             if node.type == "tool":
@@ -758,6 +828,13 @@ def run_graph(
                 )
             else:
                 value = port.execute_llm(node=node, activation=activation)
+        except UnresolvedToolOutcome as outcome:
+            # The write may or may not have happened. Park the step: downstream
+            # stays unrunnable until an operator reconciles the evidence, and the
+            # tool is never called again for this attempt.
+            record(node, "waiting_reconciliation", output=outcome.facts())
+            reconciliation_node = node.id
+            break
         except OctopError as exc:
             failure = record(
                 node, "failed", error_code=exc.code.value, error_message=exc.message
@@ -767,6 +844,14 @@ def run_graph(
         record(node, "success", output=value)
         propagate_taken(node)
 
+    if reconciliation_node is not None:
+        return GraphRun(
+            status="waiting_reconciliation",
+            steps=tuple(steps),
+            edges=tuple(edge_outcomes),
+            outputs=dict(results),
+            reconciliation_node_id=reconciliation_node,
+        )
     if waiting_node is not None:
         return GraphRun(
             status="waiting_approval",
@@ -776,26 +861,32 @@ def run_graph(
             waiting_approval_node_id=waiting_node,
             approval_candidates=approval_candidates,
         )
-    if failure is not None:
-        succeeded = sum(1 for step in steps if step.status == "success")
+    # Settlement follows the selected branches: a terminal that succeeded marks a
+    # successful branch, so a failure elsewhere makes the execution partial rather
+    # than failed. A failure with no successful terminal fails the execution, and a
+    # legal DAG that produced neither is an engine invariant violation, not a
+    # success.
+    successful = {step.node_id for step in steps if step.status == "success"}
+    terminals = [node.id for node in graph.nodes if not graph.outgoing(node.id)]
+    has_success_terminal = any(node_id in successful for node_id in terminals)
+    first_failure = failure or (node_failures[0] if node_failures else None)
+    if first_failure is not None:
         return GraphRun(
-            status="partial" if succeeded else "failed",
+            status="partial" if has_success_terminal else "failed",
             steps=tuple(steps),
             edges=tuple(edge_outcomes),
             outputs=dict(results),
-            error_code=failure.error_code,
-            error_message=failure.error_message,
+            error_code=first_failure.error_code,
+            error_message=first_failure.error_message,
         )
-    if node_failures:
-        succeeded = sum(1 for step in steps if step.status == "success")
-        first = node_failures[0]
+    if not has_success_terminal:
         return GraphRun(
-            status="partial" if succeeded else "failed",
+            status="failed",
             steps=tuple(steps),
             edges=tuple(edge_outcomes),
             outputs=dict(results),
-            error_code=first.error_code,
-            error_message=first.error_message,
+            error_code="WORKBUDDY_EXECUTION_NO_TERMINAL",
+            error_message="the workflow produced neither a successful terminal nor a failure",
         )
     return GraphRun(
         status="success",
@@ -820,7 +911,7 @@ class RuntimeActor:
 
     @property
     def is_admin(self) -> bool:
-        return self.role == "admin"
+        return self.role in TENANT_ADMIN_ROLES
 
     @property
     def actor_kind(self) -> str:
@@ -846,6 +937,7 @@ class ExecutionView:
     created_at: str | None
     started_at: str | None
     finished_at: str | None
+    cancel_requested: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -856,6 +948,7 @@ class ExecutionView:
             "trigger_type": self.trigger_type,
             "inputs": _json_safe(self.inputs),
             "outputs": _json_safe(self.outputs),
+            "cancel_requested": self.cancel_requested,
             "error_code": self.error_code,
             "error_message": self.error_message,
             "created_by_user_id": self.created_by_user_id,
@@ -1015,6 +1108,36 @@ class AuditLogView:
         }
 
 
+def _latest_attempts(steps: Sequence[Any]) -> dict[str, Any]:
+    """Newest attempt per node: an earlier attempt must not describe the present."""
+    latest: dict[str, Any] = {}
+    for step in sorted(steps, key=lambda item: int(getattr(item, "attempt", 1))):
+        latest[step.node_id] = step
+    return latest
+
+
+def execution_wait_facts(view: ExecutionView, steps: Sequence[Any]) -> dict[str, Any]:
+    """Derived waiting facts for the execution detail (never stored separately).
+
+    Only the newest attempt of a node describes the present, and two kinds of
+    waiting can coexist: reconciliation is reported first because an unknown
+    external write is the more serious of the two.
+    """
+    latest = _latest_attempts(steps)
+    waiting = [step for step in latest.values() if step.status == "waiting_reconciliation"]
+    approval = [step for step in latest.values() if step.status == "waiting_approval"]
+    reasons: list[str] = []
+    if waiting:
+        reasons.append("reconciliation")
+    if approval:
+        reasons.append("approval")
+    return {
+        "wait_reasons": reasons,
+        "waiting_steps": [step.node_id for step in (*waiting, *approval)],
+        "cancel_requested": view.cancel_requested,
+    }
+
+
 def _execution_view(row: ExecutionRow) -> ExecutionView:
     return ExecutionView(
         id=row.id,
@@ -1030,6 +1153,7 @@ def _execution_view(row: ExecutionRow) -> ExecutionView:
         created_at=_iso(row.created_at),
         started_at=_iso(row.started_at),
         finished_at=_iso(row.finished_at),
+        cancel_requested=row.cancel_requested_at is not None,
     )
 
 
@@ -1522,9 +1646,15 @@ class WorkBuddyRuntimeService:
 
     def _replay_state(self, ctx: WorkBuddyDbContext, execution_id: str) -> ReplayState:
         steps = self._repo.list_step_runs(ctx, execution_id)
+        latest = _latest_attempts(steps)
         return ReplayState(
-            outputs={step.node_id: step.output for step in steps if step.status == "success"},
-            skipped=frozenset(step.node_id for step in steps if step.status == "skipped"),
+            outputs={node_id: step.output for node_id, step in latest.items() if step.status == "success"},
+            skipped=frozenset(node_id for node_id, step in latest.items() if step.status == "skipped"),
+            failed={
+                node_id: (step.error_code, step.error_message)
+                for node_id, step in latest.items()
+                if step.status == "failed"
+            },
         )
 
     def _run_execution(
@@ -1558,7 +1688,7 @@ class WorkBuddyRuntimeService:
             ctx,
             execution_id,
             status="running",
-            expected_status=("queued", "waiting_approval"),
+            expected_status=("queued", "waiting_approval", "waiting_reconciliation"),
             mark_started=True,
         )
         run = run_graph(
@@ -1622,6 +1752,38 @@ class WorkBuddyRuntimeService:
                 previous_attempt=attempt,
                 conn=conn,
             )
+            if run.status == "waiting_reconciliation":
+                # The write may have happened; nothing downstream may run, and no
+                # retry is offered, until an operator reconciles the evidence.
+                self._repo.update_execution_status(
+                    ctx,
+                    execution.id,
+                    status="waiting_reconciliation",
+                    expected_status=("running", "queued"),
+                    outputs=run.outputs,
+                    conn=conn,
+                )
+                self._repo.enqueue_outbox(
+                    ctx,
+                    tenant_id=actor.tenant_id,
+                    topic="workbuddy.execution.finished",
+                    dedupe_key=f"{execution.id}:waiting_reconciliation",
+                    payload={
+                        "execution_id": execution.id,
+                        "status": "waiting_reconciliation",
+                        "node_id": run.reconciliation_node_id,
+                    },
+                    conn=conn,
+                )
+                self._audit(
+                    actor,
+                    action="execution.wait_reconciliation",
+                    resource_type="execution",
+                    resource_id=execution.id,
+                    details={"node_id": run.reconciliation_node_id},
+                    conn=conn,
+                )
+                return
             if run.status == "waiting_approval" and run.waiting_approval_node_id is not None:
                 self._open_approval(
                     actor,
@@ -1642,7 +1804,7 @@ class WorkBuddyRuntimeService:
                 ctx,
                 execution.id,
                 status=run.status,
-                expected_status=("running", "queued", "waiting_approval"),
+                expected_status=("running", "queued", "waiting_approval", "waiting_reconciliation"),
                 error_code=run.error_code,
                 error_message=run.error_message,
                 outputs=run.outputs,
@@ -1792,15 +1954,7 @@ class WorkBuddyRuntimeService:
         limit: int = 50,
     ) -> list[ExecutionView]:
         self._require_postgres()
-        if status is not None and status not in {
-            "pending",
-            "running",
-            "waiting_approval",
-            "success",
-            "failed",
-            "partial",
-            "canceled",
-        }:
+        if status is not None and status not in EXECUTION_STATUSES:
             raise _invalid("unknown execution status filter")
         tenant_scope = scope == "tenant"
         if tenant_scope and not actor.is_admin:
@@ -1853,8 +2007,27 @@ class WorkBuddyRuntimeService:
 
     def cancel_execution(self, actor: RuntimeActor, execution_id: str) -> ExecutionView:
         self._require_postgres()
-        self._load_execution(actor, execution_id)
+        execution = self._load_execution(actor, execution_id)
         ctx = self._ctx(actor)
+        if execution.status == "waiting_reconciliation":
+            # Cancelling cannot undo a write that may already have happened, so
+            # the request is recorded and the execution converges to canceled
+            # once the evidence is reconciled.
+            if not self._repo.request_cancel_deferred(ctx, execution_id):
+                raise OctopError(
+                    ErrorCode.WORKBUDDY_EXECUTION_NOT_CANCELLABLE,
+                    "cancel was already requested for this execution",
+                )
+            self._audit(
+                actor,
+                action="execution.cancel_requested",
+                resource_type="execution",
+                resource_id=execution_id,
+            )
+            updated = self._repo.get_execution(ctx, execution_id)
+            if updated is None:  # pragma: no cover - defensive
+                raise _not_found()
+            return _execution_view(updated)
         if not self._repo.request_cancel(ctx, execution_id):
             raise OctopError(
                 ErrorCode.WORKBUDDY_EXECUTION_NOT_CANCELLABLE,
@@ -1920,6 +2093,11 @@ class WorkBuddyRuntimeService:
         if decision not in APPROVAL_DECISIONS:
             raise _invalid("decision must be 'approved' or 'rejected'")
         execution = self._load_execution(actor, execution_id)
+        if execution.status == "waiting_reconciliation":
+            raise OctopError(
+                ErrorCode.RECONCILIATION_REQUIRED,
+                "an unknown external write must be reconciled before resuming",
+            )
         if execution.status != "waiting_approval":
             raise OctopError(
                 ErrorCode.WORKBUDDY_EXECUTION_NOT_RESUMABLE,
@@ -2008,74 +2186,176 @@ class WorkBuddyRuntimeService:
         execution_id: str,
         *,
         node_id: str,
-        status: str,
-        evidence: Mapping[str, Any],
-        external_ref: str | None = None,
+        decision: str,
+        evidence_ref: str,
+        reason: str,
+        external_reference: str | None = None,
     ) -> Mapping[str, Any]:
+        """Settle an unknown external write from verifiable evidence.
+
+        Only a tenant admin may decide, the decision set is exactly
+        ``confirmed_success`` or ``confirmed_failed``, and the evidence must
+        already live in this execution's controlled payload store. A success
+        backfills the original call's verified result and lets the execution
+        continue; a failure terminates that branch. Without evidence there is
+        nothing to decide, so the step keeps waiting.
+        """
         self._require_postgres()
-        if status not in RECONCILIATION_STATUSES:
-            raise _invalid("reconciliation status is not supported")
-        execution = self._load_execution(actor, execution_id)
-        if execution.status in {"success", "canceled", "failed"}:
+        if not actor.is_admin:
             raise OctopError(
-                ErrorCode.WORKBUDDY_RECONCILIATION_CONFLICT,
-                "execution is in a state that does not accept reconciliation",
+                ErrorCode.FORBIDDEN, "reconciliation requires tenant admin"
             )
+        if decision not in RECONCILIATION_DECISIONS:
+            raise _invalid("decision must be 'confirmed_success' or 'confirmed_failed'")
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            raise _invalid("a reconciliation needs the operator's reason")
+        execution = self._load_execution(actor, execution_id)
+        if execution.status != "waiting_reconciliation":
+            raise OctopError(
+                ErrorCode.STATE_CONFLICT,
+                "execution is not waiting for a reconciliation",
+            )
+        ctx = self._ctx(actor)
+        step = self._repo.find_step_run(
+            ctx, execution_id, node_id, status="waiting_reconciliation"
+        )
+        if step is None:
+            raise _not_found()
         graph = self._graph_from_snapshot(execution)
         node = graph.node(node_id)
-        if node is None or node.type not in {"tool", "llm"}:
+        if node is None:
             raise _not_found()
-        evidence_payload = dict(evidence)
-        evidence_sha, evidence_size = _hash_json(evidence_payload)
+        evidence = self._repo.get_payload(ctx, execution_id, evidence_ref)
+        if evidence is None:
+            raise OctopError(
+                ErrorCode.RECONCILIATION_EVIDENCE_INVALID,
+                "evidence reference does not belong to this execution",
+            )
+        evidence_sha, evidence_size = _hash_json(evidence.content)
         if evidence_size > DEFAULT_MAX_OUTPUT_BYTES:
-            raise _invalid("reconciliation evidence exceeds the maximum accepted size")
-        ctx = self._ctx(actor)
+            raise OctopError(
+                ErrorCode.RECONCILIATION_EVIDENCE_INVALID,
+                "reconciliation evidence exceeds the maximum accepted size",
+            )
+        result: Any = None
+        result_payload_ref: str | None = None
+        if decision == "confirmed_success":
+            result = self._verified_reconciliation_result(node, evidence.content)
+            result_sha, result_size = _hash_json(result)
+            if result_size > DEFAULT_MAX_OUTPUT_BYTES:
+                raise OctopError(
+                    ErrorCode.RECONCILIATION_EVIDENCE_INVALID,
+                    "reconciled result exceeds the maximum accepted size",
+                )
+            result_payload_ref = self._repo.insert_payload(
+                ctx,
+                tenant_id=actor.tenant_id,
+                execution_id=execution_id,
+                kind="step_output",
+                node_id=node_id,
+                content=result,
+                sha256=result_sha,
+                size_bytes=result_size,
+            )
+        if not self._repo.settle_step_run(
+            ctx,
+            step.id,
+            status="success" if decision == "confirmed_success" else "failed",
+            output=result,
+            error_code=None if decision == "confirmed_success" else "RECONCILIATION_CONFIRMED_FAILED",
+            error_message=None if decision == "confirmed_success" else normalized_reason,
+        ):
+            raise OctopError(
+                ErrorCode.STATE_CONFLICT,
+                "the parked step was already settled",
+            )
         reconciliation_id = self._repo.insert_reconciliation(
             ctx,
             tenant_id=actor.tenant_id,
             execution_id=execution_id,
-            node_id=node_id,
-            status=status,
-            evidence=evidence_payload,
-            evidence_sha256=evidence_sha,
-            recorded_by_user_id=actor.user_id,
-            external_ref=external_ref,
+            step_run_id=step.id,
+            decision=decision,
+            evidence_ref=evidence_ref,
+            evidence_hash=evidence_sha,
+            external_request_id=external_reference,
+            result_payload_ref=result_payload_ref,
+            note=normalized_reason,
+            decided_by_user_id=actor.user_id,
         )
-        self._repo.insert_payload(
-            ctx,
-            tenant_id=actor.tenant_id,
-            execution_id=execution_id,
-            kind="reconciliation_evidence",
-            node_id=node_id,
-            content=evidence_payload,
-            sha256=evidence_sha,
-            size_bytes=evidence_size,
-        )
-        if status == "matched":
-            self._repo.update_execution_status(
-                ctx,
-                execution_id,
-                status="success",
-                expected_status=("partial",),
-                mark_finished=True,
-            )
         self._audit(
             actor,
             action="reconciliation.record",
             resource_type="execution",
             resource_id=execution_id,
-            details={"node_id": node_id, "status": status},
+            details={"node_id": node_id, "decision": decision, "evidence_ref": evidence_ref},
         )
+        self._repo.insert_notification(
+            ctx,
+            tenant_id=actor.tenant_id,
+            user_id=execution.created_by_user_id or actor.user_id,
+            kind="execution.reconciled",
+            title=f"External write {decision}",
+            body=normalized_reason,
+            resource_type="execution",
+            resource_id=execution_id,
+        )
+        # The decision is final; only the recorded result may now advance the DAG.
+        if execution.cancel_requested_at is not None:
+            self._repo.update_execution_status(
+                ctx,
+                execution_id,
+                status="canceled",
+                expected_status=("waiting_reconciliation",),
+                mark_finished=True,
+            )
+        else:
+            self._run_execution(actor, execution_id, graph=graph, decisions={})
         rows = self._repo.list_reconciliations(ctx, execution_id)
+        settled = self._repo.get_execution(ctx, execution_id)
+        if settled is None:  # pragma: no cover - defensive
+            raise _not_found()
         return {
             "id": reconciliation_id,
             "execution_id": execution_id,
             "node_id": node_id,
-            "status": status,
-            "external_ref": external_ref,
-            "evidence_sha256": evidence_sha,
+            "step_run_id": step.id,
+            "decision": decision,
+            "external_reference": external_reference,
+            "evidence_ref": evidence_ref,
+            "evidence_hash": evidence_sha,
+            "result_payload_ref": result_payload_ref,
             "reconciliations": len(rows),
+            "execution": _execution_view(settled).to_payload(),
         }
+
+    @staticmethod
+    def _verified_reconciliation_result(node: GraphNode, evidence: Any) -> Any:
+        """The original call's result, checked against the node's output schema.
+
+        The registered tool schema lives in the platform tool catalogue, which is
+        not part of this slice yet, so a result is constrained by the node's own
+        ``output_schema`` when the definition declares one and is otherwise taken
+        as the adapter verified it.
+        """
+        if not isinstance(evidence, Mapping) or "result" not in evidence:
+            raise OctopError(
+                ErrorCode.RECONCILIATION_EVIDENCE_INVALID,
+                "evidence for a confirmed success must carry the caller's result",
+            )
+        result = evidence["result"]
+        schema = node.config.get("output_schema") if isinstance(node.config, Mapping) else None
+        if isinstance(schema, Mapping):
+            import jsonschema
+
+            try:
+                jsonschema.validate(result, schema)
+            except jsonschema.ValidationError as exc:
+                raise OctopError(
+                    ErrorCode.RECONCILIATION_EVIDENCE_INVALID,
+                    f"reconciled result does not match the tool output schema: {exc.message}",
+                ) from exc
+        return result
 
     def list_reconciliations(
         self, actor: RuntimeActor, execution_id: str
@@ -2088,12 +2368,15 @@ class WorkBuddyRuntimeService:
         return [
             {
                 "id": row.id,
-                "node_id": row.node_id,
-                "status": row.status,
-                "external_ref": row.external_ref,
-                "evidence_sha256": row.evidence_sha256,
+                "step_run_id": row.step_run_id,
+                "decision": row.decision,
+                "evidence_ref": row.evidence_ref,
+                "evidence_hash": row.evidence_hash,
+                "external_request_id": row.external_request_id,
+                "result_payload_ref": row.result_payload_ref,
+                "note": row.note,
+                "decided_by_user_id": row.decided_by_user_id,
                 "created_at": _iso(row.created_at),
-                "resolved_at": _iso(row.resolved_at),
             }
             for row in rows
         ]

@@ -42,4 +42,46 @@ ALTER TABLE workbuddy_approval_requests DROP CONSTRAINT IF EXISTS workbuddy_appr
 ALTER TABLE workbuddy_approval_requests ADD CONSTRAINT workbuddy_approval_requests_decision_check
   CHECK (decision IN ('approved', 'rejected'));
 
+-- Reconciliations carry one final decision per step run: the evidence the
+-- operator submitted (by reference, not inline), and for a confirmed success the
+-- payload holding the verified result of the original call. An undecidable
+-- outcome is not a row at all -- the step simply keeps waiting.
+ALTER TABLE workbuddy_reconciliations RENAME COLUMN status TO decision;
+ALTER TABLE workbuddy_reconciliations RENAME COLUMN recorded_by_user_id TO decided_by_user_id;
+ALTER TABLE workbuddy_reconciliations RENAME COLUMN evidence_sha256 TO evidence_hash;
+ALTER TABLE workbuddy_reconciliations RENAME COLUMN external_ref TO external_request_id;
+ALTER TABLE workbuddy_reconciliations ADD COLUMN step_run_id uuid;
+ALTER TABLE workbuddy_reconciliations ADD COLUMN evidence_ref uuid;
+ALTER TABLE workbuddy_reconciliations ADD COLUMN result_payload_ref uuid;
+ALTER TABLE workbuddy_reconciliations ADD COLUMN note text;
+
+-- Pre-release rows cannot satisfy the contract (they carry no step run and no
+-- evidence reference), so they are dropped rather than migrated.
+DELETE FROM workbuddy_reconciliations;
+ALTER TABLE workbuddy_reconciliations DROP COLUMN IF EXISTS evidence;
+ALTER TABLE workbuddy_reconciliations DROP COLUMN IF EXISTS resolved_at;
+-- One decision per step run; the node is discovered through that step.
+ALTER TABLE workbuddy_reconciliations DROP COLUMN IF EXISTS node_id;
+
+ALTER TABLE workbuddy_reconciliations
+  ALTER COLUMN step_run_id SET NOT NULL,
+  ALTER COLUMN evidence_ref SET NOT NULL,
+  ALTER COLUMN note SET NOT NULL;
+
+ALTER TABLE workbuddy_reconciliations DROP CONSTRAINT IF EXISTS workbuddy_reconciliations_status_check;
+ALTER TABLE workbuddy_reconciliations
+  ADD CONSTRAINT workbuddy_reconciliations_decision_check
+    CHECK (decision IN ('confirmed_success', 'confirmed_failed')),
+  ADD CONSTRAINT workbuddy_reconciliations_result_check
+    CHECK ((decision = 'confirmed_success') = (result_payload_ref IS NOT NULL)),
+  ADD CONSTRAINT workbuddy_reconciliations_step_unique UNIQUE (tenant_id, step_run_id),
+  ADD CONSTRAINT workbuddy_reconciliations_step_run_fkey
+    FOREIGN KEY (tenant_id, step_run_id) REFERENCES workbuddy_step_runs (tenant_id, id)
+    ON DELETE CASCADE,
+  ADD CONSTRAINT workbuddy_reconciliations_evidence_fkey
+    FOREIGN KEY (tenant_id, evidence_ref) REFERENCES workbuddy_execution_payloads (tenant_id, id),
+  ADD CONSTRAINT workbuddy_reconciliations_result_fkey
+    FOREIGN KEY (tenant_id, result_payload_ref)
+    REFERENCES workbuddy_execution_payloads (tenant_id, id);
+
 UPDATE _schema_version SET version = 23;
