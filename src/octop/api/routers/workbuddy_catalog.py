@@ -32,6 +32,7 @@ from octop.api.routers.workbuddy_identity import (
     workbuddy_principal,
 )
 from octop.infra.connectors.crypto import encrypt_credentials
+from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos.workbuddy_catalog import (
     WorkBuddyCapabilityNotApproved,
     WorkBuddyCasConflict,
@@ -115,6 +116,8 @@ def _repo(server: Any) -> Any:
         )
     from octop.infra.db.repos.workbuddy_catalog import WorkBuddyCatalogRepo
 
+    # ``dialect`` was checked above, so this is a real PostgreSQL pool.
+    assert isinstance(db, DatabasePool), db
     return WorkBuddyCatalogRepo(db)
 
 

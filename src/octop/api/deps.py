@@ -57,7 +57,7 @@ def decode_token(
     audience: str | None = None,
     verify_audience: bool = True,
 ) -> dict[str, Any]:
-    options = None if verify_audience else {"verify_aud": False}
+    options: Any = None if verify_audience else {"verify_aud": False}
     try:
         payload = jwt.decode(
             token,

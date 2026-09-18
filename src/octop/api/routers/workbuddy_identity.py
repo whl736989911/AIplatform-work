@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 
 from octop.api.deps import current_user, extract_raw_token, get_server, sign_token
+from octop.infra.db.pool import DatabasePool
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.users.email import parse_optional_email
 from octop.infra.users.identity import Role, User
@@ -88,6 +89,8 @@ def _identity_repo(server: Any) -> Any:
         )
     from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
 
+    # ``dialect`` was checked above, so this is a real PostgreSQL pool.
+    assert isinstance(db, DatabasePool), db
     return WorkBuddyIdentityRepo(db)
 
 

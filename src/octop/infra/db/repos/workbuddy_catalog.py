@@ -27,7 +27,7 @@ import json
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, TypeGuard, TypeVar
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import UNSET, DbRow, now_ts, sql_in_placeholders
@@ -750,9 +750,9 @@ class WorkBuddyCatalogRepo:
         tenant_id: str,
         *,
         actor_member_id: str,
-        tool_revision_ids: Iterable[str] | None = UNSET,
-        model_revision_ids: Iterable[str] | None = UNSET,
-        default_model_revision_id: str | None = UNSET,
+        tool_revision_ids: Iterable[str] | None | object = UNSET,
+        model_revision_ids: Iterable[str] | None | object = UNSET,
+        default_model_revision_id: str | None | object = UNSET,
         expected_revision: int | None = None,
     ) -> WorkBuddyCapabilities:
         """Replace approved tool/model revisions and the tenant default model.
@@ -783,11 +783,13 @@ class WorkBuddyCatalogRepo:
                 _optional_str(row["default_model_revision_id"]) if row is not None else None
             )
             tools = (
-                current_tools if tool_revision_ids is UNSET else _normalized_ids(tool_revision_ids)
+                current_tools
+                if not _is_id_collection(tool_revision_ids)
+                else _normalized_ids(tool_revision_ids)
             )
             models = (
                 current_models
-                if model_revision_ids is UNSET
+                if not _is_id_collection(model_revision_ids)
                 else _normalized_ids(model_revision_ids)
             )
             if default_model_revision_id is UNSET:
@@ -950,14 +952,16 @@ def _credential_row(
     sql = f"SELECT * FROM {_TABLE_CREDENTIALS} WHERE tenant_id = ? AND credential_id = ?"
     if lock:
         sql += " FOR UPDATE"
-    return conn.execute(sql, (tenant_id, credential_id)).fetchone()
+    row: DbRow | None = conn.execute(sql, (tenant_id, credential_id)).fetchone()
+    return row
 
 
 def _capability_row(conn: Any, tenant_id: str, *, lock: bool = False) -> DbRow | None:
     sql = f"SELECT * FROM {_TABLE_CAPABILITIES} WHERE tenant_id = ?"
     if lock:
         sql += " FOR UPDATE"
-    return conn.execute(sql, (tenant_id,)).fetchone()
+    row: DbRow | None = conn.execute(sql, (tenant_id,)).fetchone()
+    return row
 
 
 def _capability_grants(conn: Any, tenant_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1041,6 +1045,11 @@ def _is_active_member(conn: Any, tenant_id: str, membership_id: str) -> bool:
 def _require_active_member(conn: Any, tenant_id: str, membership_id: str) -> None:
     if not _is_active_member(conn, tenant_id, membership_id):
         raise WorkBuddyMembershipRequired("acting membership is not active in this tenant")
+
+
+def _is_id_collection(value: object) -> TypeGuard[Iterable[str]]:
+    """True when the caller supplied a revision id collection (empty set clears)."""
+    return isinstance(value, (list, tuple, set, frozenset))
 
 
 def _normalized_ids(values: Iterable[str]) -> tuple[str, ...]:

@@ -26,7 +26,7 @@ import secrets
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Literal
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import UNSET, DbRow, now_ts, optional_updates
@@ -205,12 +205,22 @@ def _normalize_timestamp(value: object, *, field: str) -> int:
     return stamp
 
 
+def _coerce_page_number(value: object, *, field: str, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise WorkBuddyError(ERROR_INVALID_ARGUMENT, f"{field} must be an integer")
+    if isinstance(value, int):
+        return value
+    text_value = str(value).strip()
+    if not text_value.isdigit():
+        raise WorkBuddyError(ERROR_INVALID_ARGUMENT, f"{field} must be an integer")
+    return int(text_value)
+
+
 def _page(limit: object, offset: object) -> tuple[int, int]:
-    try:
-        size = int(limit) if limit is not None else DEFAULT_PAGE_SIZE
-        start = int(offset) if offset is not None else 0
-    except (TypeError, ValueError) as exc:
-        raise WorkBuddyError(ERROR_INVALID_ARGUMENT, "limit and offset must be integers") from exc
+    size = _coerce_page_number(limit, field="limit", default=DEFAULT_PAGE_SIZE)
+    start = _coerce_page_number(offset, field="offset", default=0)
     if size <= 0:
         size = DEFAULT_PAGE_SIZE
     size = min(size, MAX_PAGE_SIZE)
@@ -962,10 +972,8 @@ class WorkBuddyIdentityRepo:
             current = self._load_member_row(active, identifier, membership)
             if current is None:
                 return None
-            if (
-                department is not UNSET
-                and department is not None
-                and not self._department_exists(active, identifier, department)
+            if isinstance(department, str) and not self._department_exists(
+                active, identifier, department
             ):
                 return None
             next_role = str(current["role"]) if role is UNSET else str(role)
@@ -1186,17 +1194,15 @@ class WorkBuddyIdentityRepo:
             ).fetchone()
             if current is None:
                 return None
-            if (
-                new_parent is not UNSET
-                and new_parent is not None
-                and not self._guard_department_parent(active, identifier, target, new_parent)
+            if isinstance(new_parent, str) and not self._guard_department_parent(
+                active, identifier, target, new_parent
             ):
                 return None
             clauses: list[str] = []
             params: list[object] = []
-            if new_name is not UNSET:
+            if isinstance(new_name, tuple):
                 clauses.extend(["name = ?", "name_normalized = ?"])
-                params.extend(list(new_name))  # type: ignore[arg-type]
+                params.extend(new_name)
             if new_notes is not UNSET:
                 clauses.append("description = ?")
                 params.append(new_notes)
@@ -1696,10 +1702,11 @@ class WorkBuddyIdentityRepo:
     # ── internal helpers ─────────────────────────────────────────────────────
 
     def _load_tenant_row(self, conn: Any, tenant_id: str) -> DbRow | None:
-        return conn.execute(
+        row: DbRow | None = conn.execute(
             f"SELECT {_TENANT_COLUMNS} FROM workbuddy_tenants WHERE tenant_id = ?",
             (tenant_id,),
         ).fetchone()
+        return row
 
     def _require_active_tenant(self, tenant: DbRow) -> None:
         if str(tenant["status"]) != "active":
@@ -1738,10 +1745,11 @@ class WorkBuddyIdentityRepo:
         return membership_id
 
     def _load_member_row(self, conn: Any, tenant_id: str, membership_id: str) -> DbRow | None:
-        return conn.execute(
+        row: DbRow | None = conn.execute(
             f"{_MEMBER_SELECT} WHERE m.tenant_id = ? AND m.membership_id = ?",
             (tenant_id, membership_id),
         ).fetchone()
+        return row
 
     def _department_exists(self, conn: Any, tenant_id: str, department_id: str) -> bool:
         row = conn.execute(
@@ -1796,17 +1804,19 @@ class WorkBuddyIdentityRepo:
             )
 
     def _load_invitation(self, conn: Any, token_hash: str) -> DbRow | None:
-        return conn.execute(
+        row: DbRow | None = conn.execute(
             f"SELECT {_INVITATION_COLUMNS} FROM workbuddy_invitations WHERE token_hash = ?",
             (token_hash,),
         ).fetchone()
+        return row
 
     def _load_invitation_row(self, conn: Any, tenant_id: str, invitation_id: str) -> DbRow | None:
-        return conn.execute(
+        row: DbRow | None = conn.execute(
             f"SELECT {_INVITATION_COLUMNS} FROM workbuddy_invitations "
             "WHERE tenant_id = ? AND invitation_id = ?",
             (tenant_id, invitation_id),
         ).fetchone()
+        return row
 
     def _invitation_usable(self, invitation: DbRow, *, now: int) -> bool:
         if invitation["accepted_at"] is not None or invitation["revoked_at"] is not None:
@@ -1863,7 +1873,7 @@ class WorkBuddyIdentityRepo:
         )
 
     def _quota_rows(self, conn: Any, tenant_id: str) -> list[DbRow]:
-        return conn.execute(
+        rows: list[DbRow] = conn.execute(
             "SELECT m.metric AS metric, m.unit AS unit, m.default_limit AS default_limit, "
             "m.hard_cap AS hard_cap, q.quota_id AS quota_id, q.limit_value AS limit_value, "
             "q.updated_by AS updated_by, q.updated_at AS updated_at, "
@@ -1878,6 +1888,7 @@ class WorkBuddyIdentityRepo:
             "ORDER BY m.sort_order, m.metric",
             (tenant_id, tenant_id, tenant_id),
         ).fetchall()
+        return rows
 
     def _enforce_user_quota(self, conn: Any, tenant_id: str, *, additional: int = 1) -> None:
         row = self._quota_rows(conn, tenant_id)
@@ -1946,5 +1957,5 @@ class _AmbientTransaction:
     def __enter__(self) -> Any:
         return self._conn
 
-    def __exit__(self, *exc_info: object) -> bool:
+    def __exit__(self, *exc_info: object) -> Literal[False]:
         return False

@@ -123,7 +123,11 @@ class WorkBuddyDbContext:
     @classmethod
     def platform(cls, *, tenant_id: object = None, user_id: object = None) -> WorkBuddyDbContext:
         """Cross-tenant (platform operator) context; optional tenant/user stamps."""
-        return cls(tenant_id=tenant_id, user_id=user_id, system=True)
+        return cls(
+            tenant_id=reject_none_uuid(tenant_id, field="tenant_id"),
+            user_id=reject_none_user_id(user_id),
+            system=True,
+        )
 
     @classmethod
     def for_tenant(
@@ -136,8 +140,8 @@ class WorkBuddyDbContext:
         """Single-tenant context: RLS restricts every statement to this tenant."""
         return cls(
             tenant_id=normalize_uuid(tenant_id, field="tenant_id"),
-            user_id=user_id,
-            department_id=department_id,
+            user_id=reject_none_user_id(user_id),
+            department_id=reject_none_uuid(department_id, field="department_id"),
             system=False,
         )
 
@@ -229,7 +233,7 @@ def current_workbuddy_context(conn: Any) -> WorkBuddyDbContext:
     try:
         return WorkBuddyDbContext(
             tenant_id=text("tenant_id"),
-            user_id=text("user_id"),
+            user_id=reject_none_user_id(text("user_id")),
             department_id=text("department_id"),
             system=(text("system") or SYSTEM_OFF) == SYSTEM_ON,
         )
