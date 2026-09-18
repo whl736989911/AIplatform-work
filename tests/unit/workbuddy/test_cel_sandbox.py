@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 
 import pytest
@@ -54,3 +55,20 @@ def test_deep_ast_is_rejected() -> None:
         evaluate_cel("1 + (2 + (3 + (4 + (5 + 6))))", {}, limits=limits)
 
     assert caught.value.code == "CEL_AST_DEPTH_EXCEEDED"
+
+
+def test_library_startup_is_not_charged_to_the_evaluation_budget() -> None:
+    """A cold worker pays for the CEL import out of its *startup* budget.
+
+    The import costs more than the default evaluation budget on a loaded
+    machine, so charging it there reported correct evaluations as CEL_TIMEOUT.
+    """
+    limits = replace(CELSandboxLimits(), evaluation_timeout_seconds=0.5)
+    started = time.perf_counter()
+
+    result = evaluate_cel("1 + 1", {}, limits=limits)
+
+    assert result.value == 2
+    assert result.stats.duration_ms < limits.evaluation_timeout_seconds * 1_000
+    # Worker work is a fraction of the wall time; the rest is process start.
+    assert (time.perf_counter() - started) * 1_000 > result.stats.duration_ms

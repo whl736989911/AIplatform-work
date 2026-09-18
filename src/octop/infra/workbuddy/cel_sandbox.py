@@ -139,7 +139,22 @@ def _ast_metrics(root: Any) -> tuple[int, int]:
     return nodes, maximum_depth
 
 
-def _evaluate_in_worker(expression: str, context: dict[str, JSONValue], limits: CELSandboxLimits) -> dict[str, Any]:
+def _preload_cel_runtime() -> None:
+    """Import celpy before the worker reports ready.
+
+    The import is charged to ``worker_startup_timeout_seconds``; without this the
+    first evaluation on a cold machine pays for it out of the (much smaller)
+    evaluation timeout and a correct evaluation is reported as ``CEL_TIMEOUT``.
+    """
+    from celpy import Environment, InterpretedRunner, celtypes  # noqa: F401
+    from celpy.adapter import CELJSONEncoder, json_to_cel  # noqa: F401
+    from celpy.celparser import CELParseError  # noqa: F401
+    from celpy.evaluation import Activation, CELEvalError, Context, Evaluator  # noqa: F401
+
+
+def _evaluate_in_worker(
+    expression: str, context: dict[str, JSONValue], limits: CELSandboxLimits
+) -> dict[str, Any]:
     from celpy import Environment, InterpretedRunner, celtypes
     from celpy.adapter import CELJSONEncoder, json_to_cel
     from celpy.celparser import CELParseError
@@ -210,7 +225,9 @@ def _evaluate_in_worker(expression: str, context: dict[str, JSONValue], limits: 
         encoded = json.dumps(value, cls=CELJSONEncoder, allow_nan=False, separators=(",", ":"))
         native_value = json.loads(encoded)
     except (TypeError, ValueError) as exc:
-        raise CELSandboxError("CEL_OUTPUT_NOT_JSON", "CEL result is not a finite JSON value") from exc
+        raise CELSandboxError(
+            "CEL_OUTPUT_NOT_JSON", "CEL result is not a finite JSON value"
+        ) from exc
 
     return {
         "value": native_value,
@@ -237,6 +254,8 @@ def _worker(connection: _Pipe, limits: CELSandboxLimits) -> None:
                 }
             )
             return
+
+        _preload_cel_runtime()
 
         connection.send({"status": "ready", "memory_limit_enforced": memory_limit_enforced})
         request = connection.recv()
@@ -317,7 +336,9 @@ def evaluate_cel(
     try:
         normalized_context = json.loads(json.dumps(context, allow_nan=False))
     except (TypeError, ValueError) as exc:
-        raise CELSandboxError("CEL_INVALID_CONTEXT", "CEL context must contain finite JSON values") from exc
+        raise CELSandboxError(
+            "CEL_INVALID_CONTEXT", "CEL context must contain finite JSON values"
+        ) from exc
 
     process_context = multiprocessing.get_context("spawn")
     parent, child = process_context.Pipe(duplex=True)

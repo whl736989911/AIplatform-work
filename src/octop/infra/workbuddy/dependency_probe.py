@@ -41,11 +41,16 @@ def _package_check(distribution: str, expected: str) -> DependencyCheck:
 
 def _cel_check() -> DependencyCheck:
     try:
-        result = evaluate_cel("has(outputs.value) ? outputs.value : inputs.value", {"inputs": {"value": 7}, "outputs": {}})
+        result = evaluate_cel(
+            "has(outputs.value) ? outputs.value : inputs.value",
+            {"inputs": {"value": 7}, "outputs": {}},
+        )
     except CELSandboxError as exc:
         return DependencyCheck("cel", "failed", f"{exc.code}: {exc.message}")
     if result.value != 7 or result.stats.runner != "InterpretedRunner":
-        return DependencyCheck("cel", "failed", "interpreter-only CEL smoke returned an invalid result")
+        return DependencyCheck(
+            "cel", "failed", "interpreter-only CEL smoke returned an invalid result"
+        )
     memory = "enforced" if result.stats.memory_limit_enforced else "not enforceable on this OS"
     return DependencyCheck(
         "cel",
@@ -82,7 +87,9 @@ def _postgres_check(environ: dict[str, str]) -> DependencyCheck:
             )
             row = cursor.fetchone()
     except Exception as exc:  # dependency boundary; return a controlled, secret-free result
-        return DependencyCheck("postgresql", "failed", f"connection or capability check failed: {type(exc).__name__}")
+        return DependencyCheck(
+            "postgresql", "failed", f"connection or capability check failed: {type(exc).__name__}"
+        )
     if row is None or row[0] is None:
         return DependencyCheck(
             "postgresql",
@@ -228,7 +235,9 @@ def probe_dependencies(environ: dict[str, str] | None = None) -> dict[str, Any]:
         _embedding_check(values),
     ]
     statuses = {check.status for check in checks}
-    overall: DependencyStatus = "failed" if "failed" in statuses else "blocked" if "blocked" in statuses else "passed"
+    overall: DependencyStatus = (
+        "failed" if "failed" in statuses else "blocked" if "blocked" in statuses else "passed"
+    )
     return {
         "status": overall,
         "checks": [check.to_dict() for check in checks],
