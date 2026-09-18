@@ -1,0 +1,864 @@
+{
+  "manifest_version": 1,
+  "base_path": "/api/v1",
+  "source": {
+    "path": "WorkBuddy-开发文档-审计优化版.md",
+    "sha256": "9410524281dca177aa23b8e105eb48a3e5b66ba5ec5cbcfea3560c96506d98f5",
+    "original_route_count": 62
+  },
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "登录，200；返回 access_token、token_type、expires_in",
+      "authorization": "X-Tenant-Slug；限流、统一失败响应；不记录密码/token"
+    },
+    {
+      "method": "POST",
+      "path": "/auth/register",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "消费邀请并建立用户，201",
+      "authorization": "请求含 invitation_token、display_name、password；邀请绑定租户/身份且一次性消费"
+    },
+    {
+      "method": "POST",
+      "path": "/tenants",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "创建企业，201",
+      "authorization": "独立平台管理面身份；不得由普通租户 JWT 调用"
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/{id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "企业基本信息，200",
+      "authorization": "当前租户成员仅得安全摘要；管理信息另受 admin 限制"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "创建草稿，201",
+      "authorization": "有创建能力的成员；请求 name、可选 description、definition"
+    },
+    {
+      "method": "GET",
+      "path": "/workflows",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "可见工作流列表，200",
+      "authorization": "成员只得已发布执行目录；创建者/admin 可含草稿"
+    },
+    {
+      "method": "GET",
+      "path": "/workflows/{id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "工作流详情，200，含 ETag",
+      "authorization": "管理者得 definition/版本指针；普通执行者只得已发布输入规范等最小投影"
+    },
+    {
+      "method": "PUT",
+      "path": "/workflows/{id}",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "保存新版本，201，含 ETag",
+      "authorization": "创建者/admin；If-Match；body 含 base_version_id、definition、可选 change_summary"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows/{id}/activate",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "显式发布，200，含 ETag",
+      "authorization": "创建者/admin；If-Match；body 为 version_id；禁止绕过 proposal"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows/{id}/rollback",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "复制历史版本并发布新版本，201，含 ETag",
+      "authorization": "创建者/admin；If-Match；body 为 version_id"
+    },
+    {
+      "method": "GET",
+      "path": "/workflows/{id}/versions",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "版本列表，200",
+      "authorization": "创建者/admin；标记 active/candidate 及历史引用"
+    },
+    {
+      "method": "GET",
+      "path": "/workflows/{id}/versions/{version_id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "指定不可变版本，200",
+      "authorization": "创建者/admin；版本必须属于路径中的工作流"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows/{id}/execute",
+      "stage": "source",
+      "success_status": 202,
+      "summary": "接受执行，202",
+      "authorization": "已发布工作流的租户成员或授权触发主体；body 为 inputs；外部写必须有幂等键"
+    },
+    {
+      "method": "GET",
+      "path": "/executions",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "本人执行列表，200",
+      "authorization": "用户范围默认本人；admin 的受控范围须有管理目的并审计"
+    },
+    {
+      "method": "GET",
+      "path": "/executions/{id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "执行详情，200",
+      "authorization": "发起者或受控 admin；不向审批人默认提供此完整视图"
+    },
+    {
+      "method": "POST",
+      "path": "/executions/{id}/resume",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "提交审批决定，200",
+      "authorization": "当前有效候选审批人；body 含 approval_request_id、decision、token；CAS"
+    },
+    {
+      "method": "POST",
+      "path": "/executions/{id}/cancel",
+      "stage": "source",
+      "success_status": 202,
+      "summary": "接受取消，202",
+      "authorization": "发起者或受控 admin；body 含 reason；终态返回 409"
+    },
+    {
+      "method": "POST",
+      "path": "/executions/{id}/reconciliations",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "外部写结果证据对账，200",
+      "authorization": "仅受控租户 admin；只对 waiting_reconciliation step；CAS"
+    },
+    {
+      "method": "GET",
+      "path": "/approval-requests",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "本人待审批/已审批列表，200",
+      "authorization": "仅当前候选审批人/决定人及受控 admin 的限定视图"
+    },
+    {
+      "method": "GET",
+      "path": "/approval-requests/{id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "限定审批详情，200",
+      "authorization": "只展示审批必要材料，不返回明文 token 或无关执行 payload"
+    },
+    {
+      "method": "GET",
+      "path": "/jobs",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "本人的异步任务列表，200",
+      "authorization": "便于响应丢失后发现已创建任务"
+    },
+    {
+      "method": "GET",
+      "path": "/jobs/{id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "任务状态与授权结果，200",
+      "authorization": "发起者、任务绑定授权主体或受控 admin"
+    },
+    {
+      "method": "POST",
+      "path": "/chat",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "私有会话中的单轮回答，200",
+      "authorization": "成员仅访问本人会话；工具执行不得绕过工作流执行/审批边界"
+    },
+    {
+      "method": "GET",
+      "path": "/audit-logs",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "审计查询，200",
+      "authorization": "受控 admin；脱敏、只读、分页，查询本身留痕"
+    },
+    {
+      "method": "GET",
+      "path": "/usage",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "用量查询，200",
+      "authorization": "成员看本人，admin 看租户聚合"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows/{id}/improvement-proposals",
+      "stage": "source",
+      "success_status": 202,
+      "summary": "生成建议，202，返回 job_id",
+      "authorization": "创建者/admin；服务端固定当前 base_version_id/hash"
+    },
+    {
+      "method": "GET",
+      "path": "/improvement-proposals",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "可见建议列表，200",
+      "authorization": "工作流管理者看完整治理信息；被分配审阅人只得审核所需投影"
+    },
+    {
+      "method": "GET",
+      "path": "/improvement-proposals/{id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "建议详情、reviews 和指标，200",
+      "authorization": "明确 candidate_version_id、requires_manual_shadow 和样本不足原因"
+    },
+    {
+      "method": "POST",
+      "path": "/improvement-proposals/{id}/decisions",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "登记审核，200",
+      "authorization": "有审核资格且非创建者的人类成员；body 为 decision=approved/rejected、comment"
+    },
+    {
+      "method": "POST",
+      "path": "/improvement-proposals/{id}/promote",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "请求状态推进，200，含 ETag",
+      "authorization": "租户 admin；If-Match 为所属工作流 revision；body action=start_shadow/start_canary/apply/abort"
+    },
+    {
+      "method": "GET",
+      "path": "/knowledge-bases",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "可访问 KB 列表，200",
+      "authorization": "按 read 权限过滤；不返回无权 KB 的名称、数量或 scope"
+    },
+    {
+      "method": "POST",
+      "path": "/knowledge-bases",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "创建 KB，201",
+      "authorization": "成员可建 personal；enterprise/department 需适用管理权限"
+    },
+    {
+      "method": "GET",
+      "path": "/knowledge-bases/{id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "KB 元信息，200",
+      "authorization": "read；模型与固定 revision 可见，凭据不可见"
+    },
+    {
+      "method": "POST",
+      "path": "/knowledge-bases/{id}/archive",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "归档 KB，200",
+      "authorization": "KB admin；设置 archived_at，后续文档/chunk 检索不可见"
+    },
+    {
+      "method": "GET",
+      "path": "/knowledge-bases/{id}/acl",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "读取授权表，200",
+      "authorization": "KB admin，不向仅有 read 的用户枚举成员信息"
+    },
+    {
+      "method": "POST",
+      "path": "/knowledge-bases/{id}/acl",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "添加授权，201",
+      "authorization": "KB admin；user_id/department_id 恰好一个，permission 为 read/write/admin"
+    },
+    {
+      "method": "PUT",
+      "path": "/knowledge-bases/{id}/acl/{acl_id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "原子修改授权级别，200",
+      "authorization": "KB admin；body 仅含 permission；acl 必须属于该 KB"
+    },
+    {
+      "method": "DELETE",
+      "path": "/knowledge-bases/{id}/acl/{acl_id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "撤销显式授权，200",
+      "authorization": "KB admin；acl 必须属于该 KB；下一检索事务生效"
+    },
+    {
+      "method": "POST",
+      "path": "/knowledge-bases/{id}/uploads",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "申请受限文件上传，201",
+      "authorization": "write；请求 filename、mime_type、size_bytes；返回绑定租户/KB 的 upload_id"
+    },
+    {
+      "method": "POST",
+      "path": "/knowledge-bases/{id}/uploads/{upload_id}/complete",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "完成上传校验，200",
+      "authorization": "原上传主体且仍有 write；校验大小、魔数、扫描；返回绑定式 file_ref"
+    },
+    {
+      "method": "POST",
+      "path": "/knowledge-bases/{id}/documents",
+      "stage": "source",
+      "success_status": 202,
+      "summary": "建档与索引，202，返回 job_id",
+      "authorization": "write；body 含 upload_id、file_ref、title"
+    },
+    {
+      "method": "GET",
+      "path": "/knowledge-bases/{id}/documents",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "文档状态列表，200",
+      "authorization": "read；只返回授权文档元数据，不将未完成 chunks 用于检索"
+    },
+    {
+      "method": "DELETE",
+      "path": "/knowledge-bases/{id}/documents/{document_id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "移除文档及可检索性，200",
+      "authorization": "write；后台物理回收不延迟权限生效"
+    },
+    {
+      "method": "POST",
+      "path": "/knowledge-bases/{id}/search",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "指定 KB 检索，200",
+      "authorization": "read；body 含 query、match_count、embedding_model"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows/{id}/trigger-registrations",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "建立 cron/webhook/event 注册，201",
+      "authorization": "工作流管理者；显式授予工具/KB 能力"
+    },
+    {
+      "method": "GET",
+      "path": "/workflows/{id}/trigger-registrations",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "注册状态列表，200",
+      "authorization": "工作流管理者；隐藏签名密钥与连接器凭据"
+    },
+    {
+      "method": "DELETE",
+      "path": "/workflows/{id}/trigger-registrations/{registration_id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "撤销注册与后续授权，200",
+      "authorization": "工作流管理者"
+    },
+    {
+      "method": "POST",
+      "path": "/webhooks/{webhook_path}",
+      "stage": "source",
+      "success_status": 202,
+      "summary": "经签名事件触发（公开入口），202，返回 execution_id",
+      "authorization": "无 JWT；仅凭全局唯一 webhook_path 解析到注册记录"
+    },
+    {
+      "method": "POST",
+      "path": "/triggers/{registration_id}/test-delivery",
+      "stage": "source",
+      "success_status": 202,
+      "summary": "管理员重放/联调投递，202",
+      "authorization": "已认证的工作流管理者；写审计"
+    },
+    {
+      "method": "GET",
+      "path": "/marketplace/templates",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "浏览已审核公开模板，200",
+      "authorization": "当前成员；仅公开脱敏内容"
+    },
+    {
+      "method": "GET",
+      "path": "/marketplace/templates/{id}/versions/{version_id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "查看固定模板版本，200",
+      "authorization": "仅已公开版本；返回许可、所需能力及内容摘要"
+    },
+    {
+      "method": "POST",
+      "path": "/marketplace/templates/{id}/install",
+      "stage": "source",
+      "success_status": 202,
+      "summary": "安装模板，202，返回 job_id",
+      "authorization": "有创建工作流能力的成员；body 含 template_version_id、consent、credential_bindings"
+    },
+    {
+      "method": "GET",
+      "path": "/marketplace/installations/{id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "本租户安装状态，200",
+      "authorization": "安装发起者/工作流管理者"
+    },
+    {
+      "method": "POST",
+      "path": "/marketplace/installations/{id}/upgrade",
+      "stage": "source",
+      "success_status": 202,
+      "summary": "显式升级，202，返回 job_id",
+      "authorization": "工作流管理者；明确目标 template_version_id 与新许可/权限 consent"
+    },
+    {
+      "method": "POST",
+      "path": "/marketplace/submissions",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "创建待审核提交，201",
+      "authorization": "作者；提交仅包含可公开的脱敏模板、许可与能力声明"
+    },
+    {
+      "method": "GET",
+      "path": "/marketplace/submissions/{id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "查看提交和审查状态，200",
+      "authorization": "作者/受控租户 admin"
+    },
+    {
+      "method": "POST",
+      "path": "/marketplace/submissions/{id}/submit",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "提交审核，200",
+      "authorization": "作者；冻结提交内容"
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/{id}/export",
+      "stage": "source",
+      "success_status": 202,
+      "summary": "请求受控数据导出，202，返回 job_id",
+      "authorization": "本租户 admin；写审计"
+    },
+    {
+      "method": "POST",
+      "path": "/exports/{id}/redeem",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "一次性兑换下载会话，200",
+      "authorization": "原申请 admin 且仍有权限；72 小时内一次性 CAS 消费"
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/{id}/deletion-requests",
+      "stage": "source",
+      "success_status": 201,
+      "summary": "申请企业注销，201",
+      "authorization": "本租户 admin，近期重新认证；合规 Gate 未通过时 503"
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/{id}/deletion-requests/{request_id}",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "查看注销阶段和时间点，200",
+      "authorization": "本租户 admin"
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/{id}/deletion-requests/{request_id}/cancel",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "冷静期内撤销申请，200",
+      "authorization": "本租户 admin，近期重新认证；CAS"
+    },
+    {
+      "method": "GET",
+      "path": "/users",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "列出本租户可管理用户",
+      "authorization": "租户 admin；最小字段投影"
+    },
+    {
+      "method": "PATCH",
+      "path": "/users/{id}",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "修改用户显示名、角色、部门或状态",
+      "authorization": "租户 admin；禁止越过平台硬顶或自升权限"
+    },
+    {
+      "method": "GET",
+      "path": "/departments",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "列出本租户部门",
+      "authorization": "当前成员；仅本租户"
+    },
+    {
+      "method": "POST",
+      "path": "/departments",
+      "stage": "A2",
+      "success_status": 201,
+      "summary": "创建部门",
+      "authorization": "租户 admin"
+    },
+    {
+      "method": "PATCH",
+      "path": "/departments/{id}",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "修改部门名称、父级或状态",
+      "authorization": "租户 admin；拒绝跨租户或成环"
+    },
+    {
+      "method": "POST",
+      "path": "/invitations",
+      "stage": "A2",
+      "success_status": 201,
+      "summary": "创建绑定邮箱的一次性邀请",
+      "authorization": "租户 admin；秘密仅经通知任务交付"
+    },
+    {
+      "method": "POST",
+      "path": "/invitations/{id}/revoke",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "撤销未消费邀请",
+      "authorization": "创建者或租户 admin"
+    },
+    {
+      "method": "GET",
+      "path": "/tenant-quotas",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "读取租户配额",
+      "authorization": "租户 admin"
+    },
+    {
+      "method": "PUT",
+      "path": "/tenant-quotas",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "在平台硬顶内收紧或调整配额",
+      "authorization": "租户 admin；不可越过平台上限"
+    },
+    {
+      "method": "GET",
+      "path": "/connector-credentials",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "列出凭据元数据",
+      "authorization": "本人所有凭据和有管理权限的脱敏记录；从不返回秘密"
+    },
+    {
+      "method": "POST",
+      "path": "/connector-credentials",
+      "stage": "A2",
+      "success_status": 201,
+      "summary": "创建服务端规范引用的凭据",
+      "authorization": "成员；客户端不可提交 external_ref"
+    },
+    {
+      "method": "POST",
+      "path": "/connector-credentials/{id}/rotate",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "发布新凭据修订",
+      "authorization": "凭据 owner；CAS 发布"
+    },
+    {
+      "method": "POST",
+      "path": "/connector-credentials/{id}/revoke",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "撤销凭据",
+      "authorization": "凭据 owner 或租户 admin；不泄露秘密"
+    },
+    {
+      "method": "GET",
+      "path": "/connector-credentials/{id}/grants",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "列出凭据使用授权",
+      "authorization": "凭据 owner；仅同租户"
+    },
+    {
+      "method": "POST",
+      "path": "/connector-credentials/{id}/grants",
+      "stage": "A2",
+      "success_status": 201,
+      "summary": "授予同租户用户使用能力",
+      "authorization": "凭据 owner；不交付原始秘密"
+    },
+    {
+      "method": "DELETE",
+      "path": "/connector-credentials/{id}/grants/{user_id}",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "撤销凭据使用授权",
+      "authorization": "凭据 owner；立即阻止后续派发"
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/{id}/suspend",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "挂起租户",
+      "authorization": "独立平台管理面 audience 与入口"
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/{id}/restore",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "恢复租户",
+      "authorization": "独立平台管理面 audience 与入口"
+    },
+    {
+      "method": "POST",
+      "path": "/platform/tools",
+      "stage": "A2",
+      "success_status": 201,
+      "summary": "发布固定不可变工具修订",
+      "authorization": "独立平台管理面；仅登记 adapter_key"
+    },
+    {
+      "method": "POST",
+      "path": "/platform/tools/{id}/revoke",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "撤销工具修订",
+      "authorization": "独立平台管理面"
+    },
+    {
+      "method": "POST",
+      "path": "/platform/models",
+      "stage": "A2",
+      "success_status": 201,
+      "summary": "发布获批准模型修订",
+      "authorization": "独立平台管理面"
+    },
+    {
+      "method": "POST",
+      "path": "/platform/models/{id}/revoke",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "撤销模型修订",
+      "authorization": "独立平台管理面"
+    },
+    {
+      "method": "GET",
+      "path": "/tool-catalog",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "读取租户已获批准工具目录",
+      "authorization": "当前成员；只返回公开能力"
+    },
+    {
+      "method": "GET",
+      "path": "/model-catalog",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "读取租户已获批准模型目录",
+      "authorization": "当前成员；只返回公开能力"
+    },
+    {
+      "method": "GET",
+      "path": "/tenant-capabilities",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "读取租户工具与模型许可",
+      "authorization": "租户 admin"
+    },
+    {
+      "method": "PUT",
+      "path": "/tenant-capabilities",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "原子更新租户能力许可与默认模型",
+      "authorization": "租户 admin；不得超过平台许可"
+    },
+    {
+      "method": "POST",
+      "path": "/approval-requests/{id}/challenge",
+      "stage": "A3",
+      "success_status": 200,
+      "summary": "即时签发两分钟一次性审批挑战",
+      "authorization": "当前有效候选人；no-store"
+    },
+    {
+      "method": "GET",
+      "path": "/notifications",
+      "stage": "A3",
+      "success_status": 200,
+      "summary": "列出本人通知",
+      "authorization": "当前用户本人"
+    },
+    {
+      "method": "POST",
+      "path": "/notifications/{id}/read",
+      "stage": "A3",
+      "success_status": 200,
+      "summary": "标记本人通知已读",
+      "authorization": "当前用户本人"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows/{id}/trigger-registrations/{registration_id}/rotate-secret",
+      "stage": "A3",
+      "success_status": 200,
+      "summary": "轮换 webhook 签名秘密并一次性返回",
+      "authorization": "工作流管理者；no-store；固定300秒重叠"
+    },
+    {
+      "method": "GET",
+      "path": "/chat-sessions",
+      "stage": "A3",
+      "success_status": 200,
+      "summary": "列出本人私有会话",
+      "authorization": "当前用户本人"
+    },
+    {
+      "method": "GET",
+      "path": "/chat-sessions/{id}",
+      "stage": "A3",
+      "success_status": 200,
+      "summary": "读取本人私有会话详情",
+      "authorization": "当前用户本人"
+    },
+    {
+      "method": "POST",
+      "path": "/workflow-definitions/validate",
+      "stage": "A3",
+      "success_status": 200,
+      "summary": "用唯一编译器验证并规范化草稿",
+      "authorization": "当前成员；不保存不激活"
+    },
+    {
+      "method": "POST",
+      "path": "/improvement-proposals/{id}/reviewers",
+      "stage": "B1",
+      "success_status": 200,
+      "summary": "分配独立审核人",
+      "authorization": "工作流管理者；同租户 active 且非创建者"
+    },
+    {
+      "method": "POST",
+      "path": "/platform/submissions/{tenant_id}/{submission_id}/decisions",
+      "stage": "C",
+      "success_status": 200,
+      "summary": "平台审核市场提交",
+      "authorization": "独立平台管理面；静态扫描与人工理由"
+    },
+    {
+      "method": "GET",
+      "path": "/compliance-checklists",
+      "stage": "C",
+      "success_status": 200,
+      "summary": "列出可见合规检查清单",
+      "authorization": "成员读已批准；管理者可见草稿"
+    },
+    {
+      "method": "POST",
+      "path": "/compliance-checklists",
+      "stage": "C",
+      "success_status": 201,
+      "summary": "创建合规检查清单",
+      "authorization": "租户 admin 或清单 owner"
+    },
+    {
+      "method": "POST",
+      "path": "/compliance-checklists/{id}/versions",
+      "stage": "C",
+      "success_status": 201,
+      "summary": "创建不可变规则修订",
+      "authorization": "租户 admin 或清单 owner；规则不可执行"
+    },
+    {
+      "method": "GET",
+      "path": "/compliance-checklists/{id}/versions/{version_id}",
+      "stage": "C",
+      "success_status": 200,
+      "summary": "读取固定清单修订",
+      "authorization": "按状态和清单权限"
+    },
+    {
+      "method": "POST",
+      "path": "/compliance-checklists/{id}/versions/{version_id}/approve",
+      "stage": "C",
+      "success_status": 200,
+      "summary": "批准清单修订",
+      "authorization": "租户 admin"
+    },
+    {
+      "method": "POST",
+      "path": "/compliance-checklists/{id}/versions/{version_id}/revoke",
+      "stage": "C",
+      "success_status": 200,
+      "summary": "撤销清单修订",
+      "authorization": "租户 admin；不改历史报告"
+    },
+    {
+      "method": "POST",
+      "path": "/compliance-checklists/{id}/archive",
+      "stage": "C",
+      "success_status": 200,
+      "summary": "归档清单",
+      "authorization": "租户 admin 或清单 owner"
+    },
+    {
+      "method": "POST",
+      "path": "/auth/reauthenticate",
+      "stage": "D",
+      "success_status": 200,
+      "summary": "签发五分钟一次性再认证凭证",
+      "authorization": "已认证用户提交密码；凭证绑定 tenant/user/purpose"
+    },
+    {
+      "method": "POST",
+      "path": "/exports/{id}/download-challenge",
+      "stage": "D",
+      "success_status": 200,
+      "summary": "即时签发导出兑换挑战",
+      "authorization": "原申请 admin 且仍有权限；no-store；不延长72小时"
+    }
+  ],
+  "counts": {
+    "source": 62,
+    "supplemental": 44,
+    "total": 106
+  }
+}

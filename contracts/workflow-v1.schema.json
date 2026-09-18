@@ -1,0 +1,161 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WorkBuddy workflow definition schema version 1",
+  "type": "object",
+  "required": ["schema_version", "trigger", "nodes", "edges"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "trigger": {"$ref": "#/definitions/trigger"},
+    "inputs": {
+      "type": "object", "default": {}, "maxProperties": 100,
+      "propertyNames": {"$ref": "#/definitions/identifier"},
+      "additionalProperties": {"$ref": "#/definitions/inputDeclaration"}
+    },
+    "nodes": {
+      "type": "array", "minItems": 1, "maxItems": 100,
+      "items": {"$ref": "#/definitions/node"}
+    },
+    "edges": {
+      "type": "array", "maxItems": 4950, "uniqueItems": true,
+      "items": {
+        "type": "object", "required": ["from", "to"], "additionalProperties": false,
+        "properties": {
+          "from": {"$ref": "#/definitions/identifier"},
+          "to": {"$ref": "#/definitions/identifier"},
+          "when": {"type": "string", "enum": ["true", "false"]}
+        }
+      }
+    },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "max_steps": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+        "max_duration_sec": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 600},
+        "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 10485760, "default": 1048576},
+        "timeout_per_step_sec": {"type": "integer", "minimum": 1, "maximum": 600, "default": 120}
+      }
+    },
+    "output": {
+      "type": "object", "required": ["format", "destination"], "additionalProperties": false,
+      "properties": {
+        "format": {"type": "string", "enum": ["text", "json", "markdown", "file"]},
+        "destination": {"type": "string", "const": "user"}
+      },
+      "default": {"format": "json", "destination": "user"}
+    }
+  },
+  "definitions": {
+    "identifier": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+    "uuid": {"type": "string", "format": "uuid"},
+    "nonemptyString": {"type": "string", "minLength": 1, "maxLength": 200},
+    "cel": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "trigger": {
+      "type": "object", "required": ["type", "config"], "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "enum": ["manual", "cron", "webhook", "event"]},
+        "config": {"type": "object"}
+      },
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "manual"}}, "required": ["type"]},
+         "then": {"properties": {"config": {"type": "object", "maxProperties": 0}}}},
+        {"if": {"properties": {"type": {"const": "cron"}}, "required": ["type"]},
+         "then": {"properties": {"config": {
+           "type": "object", "required": ["cron_expression", "timezone"], "additionalProperties": false,
+           "properties": {
+             "cron_expression": {"type": "string", "minLength": 1, "maxLength": 100},
+             "timezone": {"type": "string", "minLength": 1, "maxLength": 100}
+           }}}}},
+        {"if": {"properties": {"type": {"const": "webhook"}}, "required": ["type"]},
+         "then": {"properties": {"config": {
+           "type": "object", "required": ["webhook_path"], "additionalProperties": false,
+           "properties": {"webhook_path": {"type": "string", "pattern": "^[a-z0-9-]{8,64}$"}}}}}},
+        {"if": {"properties": {"type": {"const": "event"}}, "required": ["type"]},
+         "then": {"properties": {"config": {
+           "type": "object", "required": ["event_type"], "additionalProperties": false,
+           "properties": {"event_type": {"$ref": "#/definitions/nonemptyString"}}}}}}
+      ]
+    },
+    "inputDeclaration": {
+      "type": "object", "required": ["type"], "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "enum": ["string", "integer", "number", "boolean", "object", "array", "file_ref"]},
+        "required": {"type": "boolean", "default": false},
+        "default": {},
+        "description": {"type": "string", "maxLength": 500},
+        "max_length": {"type": "integer", "minimum": 1, "maximum": 1000000}
+      },
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "string"}}}, "then": {"properties": {"default": {"type": "string"}}}},
+        {"if": {"properties": {"type": {"const": "integer"}}}, "then": {"properties": {"default": {"type": "integer"}}}},
+        {"if": {"properties": {"type": {"const": "number"}}}, "then": {"properties": {"default": {"type": "number"}}}},
+        {"if": {"properties": {"type": {"const": "boolean"}}}, "then": {"properties": {"default": {"type": "boolean"}}}},
+        {"if": {"properties": {"type": {"const": "object"}}}, "then": {"properties": {"default": {"type": "object"}}}},
+        {"if": {"properties": {"type": {"const": "array"}}}, "then": {"properties": {"default": {"type": "array"}}}},
+        {"if": {"properties": {"type": {"const": "file_ref"}}}, "then": {"properties": {"default": {"$ref": "#/definitions/uuid"}}}},
+        {"if": {"properties": {"type": {"enum": ["integer", "number", "boolean", "object", "array", "file_ref"]}}},
+         "then": {"not": {"required": ["max_length"]}}}
+      ]
+    },
+    "node": {
+      "type": "object", "required": ["id", "type", "name", "config"], "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/definitions/identifier"},
+        "type": {"type": "string", "enum": ["tool", "llm", "condition", "approval", "transform"]},
+        "name": {"type": "string", "minLength": 1, "maxLength": 100},
+        "config": {"type": "object"},
+        "save_as": {"$ref": "#/definitions/identifier"},
+        "retry": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "max_attempts": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1},
+            "backoff_sec": {"type": "integer", "minimum": 1, "maximum": 60, "default": 5}
+          }
+        }
+      },
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "tool"}}, "required": ["type"]},
+         "then": {"properties": {"config": {
+           "type": "object", "required": ["tool_name", "parameters"], "additionalProperties": false,
+           "properties": {
+             "tool_name": {"$ref": "#/definitions/nonemptyString"},
+             "parameters": {"type": "object"}
+           }}}}},
+        {"if": {"properties": {"type": {"const": "llm"}}, "required": ["type"]},
+         "then": {"properties": {"config": {
+           "type": "object", "required": ["prompt"], "additionalProperties": false,
+           "properties": {
+             "prompt": {"type": "string", "minLength": 1, "maxLength": 10000},
+             "model": {"$ref": "#/definitions/nonemptyString"},
+             "knowledge_base_ids": {"type": "array", "maxItems": 5, "uniqueItems": true,
+                                    "items": {"$ref": "#/definitions/uuid"}},
+             "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+             "max_tokens": {"type": "integer", "minimum": 1, "maximum": 128000}
+           }}}}},
+        {"if": {"properties": {"type": {"const": "condition"}}, "required": ["type"]},
+         "then": {"properties": {"config": {
+           "type": "object", "required": ["expression"], "additionalProperties": false,
+           "properties": {"expression": {"$ref": "#/definitions/cel"}}}}}},
+        {"if": {"properties": {"type": {"const": "approval"}}, "required": ["type"]},
+         "then": {"properties": {"config": {
+           "type": "object", "required": ["approval_message", "approver_user_ids"],
+           "additionalProperties": false,
+           "properties": {
+             "approval_message": {"type": "string", "minLength": 1, "maxLength": 500},
+             "approver_user_ids": {"type": "array", "minItems": 1, "maxItems": 10,
+                                   "uniqueItems": true, "items": {"$ref": "#/definitions/uuid"}},
+             "target_node_id": {"$ref": "#/definitions/identifier"},
+             "timeout_hours": {"type": "integer", "minimum": 1, "maximum": 168, "default": 24}
+           }}}}},
+        {"if": {"properties": {"type": {"const": "transform"}}, "required": ["type"]},
+         "then": {"properties": {"config": {
+           "type": "object", "required": ["input", "expression"], "additionalProperties": false,
+           "properties": {
+             "input": {},
+             "expression": {"$ref": "#/definitions/cel"},
+             "output_schema": {"type": ["object", "boolean"]}
+           }}}}}
+      ]
+    }
+  }
+}

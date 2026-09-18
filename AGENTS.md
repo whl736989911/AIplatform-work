@@ -1,5 +1,26 @@
 # AGENTS.md
 
+## WorkBuddy product overlay
+
+These rules override later Octop guidance only where they conflict.
+
+- Core upstream is TencentCloud/Octop `v1.0.0` at commit `6d6ee70deb48f6870e89dbf9ca820f7862eb6bcf`; provenance is locked in `contracts/upstream-lock.json`. Production never tracks `main`.
+- WorkBuddy is implemented by extending this Octop repository. Do not create a parallel backend, frontend, agent runtime, auth system, connector framework, knowledge stack, or memory engine.
+- Reuse `src/octop/` for backend/domain work, `dashboard/` for Web UI, Octop users/JWT/connectors/agents/harness-memory/knowledge features where their behavior satisfies the WorkBuddy contract.
+- The product contract is `WorkBuddy-开发文档-审计优化版.md` with SHA-256 `9410524281dca177aa23b8e105eb48a3e5b66ba5ec5cbcfea3560c96506d98f5` plus approved execution-plan decisions.
+- `contracts/workflow-v1.schema.json` is the only WorkBuddy workflow structure schema. `contracts/route-manifest.json` is the route coverage ledger: 62 source routes plus explicitly marked supplements.
+- WorkBuddy enterprise execution requires PostgreSQL. SQLite remains available for unaffected upstream Octop features but must fail closed for WorkBuddy tenant workflows; it is never an isolation fallback.
+- Tenant business access uses one audited transaction-context primitive. Tenant identity never comes from request bodies, headers other than verified login discovery, or queue payloads.
+- WorkBuddy tenant tables use `tenant_id`, compound ownership references, ENABLE RLS, FORCE RLS, and non-owner NOBYPASSRLS application roles. Authentication, dispatch, platform administration, migration, and restore credentials remain separate.
+- CEL is interpreter-only in an isolated bounded process. Python/JavaScript `eval` or `exec`, celpy `CompiledRunner`, host filesystem/network access, and arbitrary host functions are forbidden.
+- PostgreSQL is the workflow execution fact store. Redis messages are delivery hints, never authorization or durable state.
+- External writes use stable idempotency keys, fencing, approvals over final parameters/current credential revision, and reconciliation for unknown results.
+- Secrets, password hashes, raw tokens, approval challenges, webhook signing secrets, and credential material never enter logs, URLs, workflow definitions, or list/detail responses.
+- Cross-tenant or otherwise invisible resources return 404, not 403.
+- Historical workflow/tool/model/checklist revisions, approval evidence, usage events, audit records, and deletion-ledger entries are immutable.
+- Never mark model, industry, Linux recovery, real-device mobile, seven-day canary, monthly availability, legal, SBOM, image digest, or vulnerability gates passed without real evidence.
+
+
 Navigation guide for AI coding agents working in this repository.
 
 ## 1. Collaboration principles

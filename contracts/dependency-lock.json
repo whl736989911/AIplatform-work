@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "verified_at": "2026-09-18T06:28:00Z",
+  "runtime": {
+    "python": "3.12.14",
+    "python_package_lock": "uv.lock",
+    "python_sbom": "contracts/sbom/python.cdx.json",
+    "dashboard_package_lock": "dashboard/package-lock.json",
+    "dashboard_sbom": "contracts/sbom/dashboard.cdx.json"
+  },
+  "python_components": [
+    {
+      "name": "orcakit-harness-agent",
+      "version": "1.0.9",
+      "source": "https://github.com/TencentCloud/harness-agent",
+      "registry": "https://pypi.org/project/orcakit-harness-agent/1.0.9/",
+      "license": "MIT",
+      "wheel_sha256": "cf4ce4df7e163e0798e6240d6a05657ba6f6feb4cfed77eb6343d1bf0638b38b",
+      "sdist_sha256": "5c5dbf8490406d0ed509f632f178fdb2b148de89d8fa9e7aa3003d2647fac3e7",
+      "pypi_direct_vulnerabilities": []
+    },
+    {
+      "name": "harness-memory",
+      "version": "0.9.10",
+      "source": "https://github.com/TencentCloud/harness-memory",
+      "registry": "https://pypi.org/project/harness-memory/0.9.10/",
+      "license": "MIT",
+      "wheel_sha256": "352446508c7398a2798cc4017365b48c855bbcfd08fe2eee57dd2a6756713559",
+      "sdist_sha256": "d732ebd81e0fce44b3263f42e967895dec53d1bf7ac0efb10e7477b5920fde84",
+      "pypi_direct_vulnerabilities": []
+    },
+    {
+      "name": "harness-gateway",
+      "version": "0.9.7",
+      "source": "https://github.com/TencentCloud/harness-gateway",
+      "registry": "https://pypi.org/project/harness-gateway/0.9.7/",
+      "license": "MIT",
+      "wheel_sha256": "d88de111b7fab02334749337bcb3556862dcf96d80789bb376a824da84a6d2af",
+      "sdist_sha256": "cdbd343f446c96e0ea49cab23e9470c5f69803316e51362074032b4be89f1a86",
+      "pypi_direct_vulnerabilities": []
+    },
+    {
+      "name": "harness-browser",
+      "version": "0.7.8",
+      "source": "https://github.com/TencentCloud/harness-browser",
+      "registry": "https://pypi.org/project/harness-browser/0.7.8/",
+      "license": "MIT",
+      "wheel_sha256": "6f95d97109ac23ad389d74f725ce9bb7e34863188e8f1a31569b5f1f9d18f913",
+      "sdist_sha256": "7ffe4e4af8285df4598341bded14e1cb2769b835df6b1e729b603a8a2cacfc92",
+      "pypi_direct_vulnerabilities": []
+    },
+    {
+      "name": "cel-python",
+      "version": "0.5.0",
+      "source": "https://github.com/cloud-custodian/cel-python",
+      "registry": "https://pypi.org/project/cel-python/0.5.0/",
+      "license": "Apache-2.0",
+      "wheel_sha256": "d0f85008b89655c2bb18d797d2fa3f96f2ed80f4a3b43b0e8138c6646581e5f6",
+      "sdist_sha256": "3eb0a619e8df0f338d0430cda01427a742e77e3c433a1c7c3ebd409cd804c45a",
+      "pypi_direct_vulnerabilities": [],
+      "execution_policy": "celpy.InterpretedRunner only; CompiledRunner is forbidden"
+    }
+  ],
+  "container_components": [
+    {
+      "name": "postgres",
+      "tag": "17.6-bookworm",
+      "index_digest": "sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3",
+      "amd64_digest": "sha256:45cd22f8d32e189d245403954882f88e7a8714301fda80dab6da90f1265b25a3",
+      "source": "https://hub.docker.com/_/postgres",
+      "status": "source_locked_runtime_poc_blocked"
+    },
+    {
+      "name": "redis",
+      "tag": "7.4.5-alpine",
+      "index_digest": "sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08",
+      "amd64_digest": "sha256:0302cccee2b2043e61b497c8f4075467c5f7ba27a9f38be7e092634f2734baed",
+      "source": "https://hub.docker.com/_/redis",
+      "status": "source_locked_runtime_poc_blocked"
+    },
+    {
+      "name": "hashicorp-vault",
+      "tag": "2.1.1",
+      "index_digest": "sha256:47f14a6acb98f48d798a07df7c83f23a6e636e1cf724c5f8ff165cb32667a1e2",
+      "amd64_digest": "sha256:8af37ae9d45e4a0fac48ab700e0d99efc4c2d6cd84354a869f2147f1d3abab46",
+      "source": "https://hub.docker.com/r/hashicorp/vault",
+      "license": "BUSL-1.1",
+      "status": "source_locked_runtime_poc_and_legal_review_blocked"
+    }
+  ],
+  "model_components": [
+    {
+      "name": "BAAI/bge-m3",
+      "source": "https://huggingface.co/BAAI/bge-m3",
+      "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+      "license_label": "MIT",
+      "dense_dimensions": 1024,
+      "status": "source_locked_runtime_quality_and_full_license_review_blocked"
+    }
+  ],
+  "unresolved_gates": [
+    "Linux container engine unavailable on the current Windows workstation; PostgreSQL, Redis, and Vault runtime PoCs have not run.",
+    "No S3-compatible endpoint and workload credential are configured; object-storage runtime PoC remains blocked.",
+    "BAAI/bge-m3 weights have not been downloaded or benchmarked against the customer-labelled dataset.",
+    "CycloneDX lists the locked Python graph; transitive vulnerability, secret, and license scans still require the production CI scanners.",
+    "Vault BUSL-1.1 and bge-m3 distribution/use terms require recorded legal approval before production promotion."
+  ],
+  "policy": {
+    "floating_versions_allowed": false,
+    "silent_fallback_allowed": false,
+    "production_promotion_requires_all_relevant_gates": true
+  }
+}

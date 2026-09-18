@@ -17,23 +17,84 @@ from octop.infra.db.pool import DatabasePool
 from octop.infra.utils.ulid import new_ulid
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
-_SQL_STMT_RE = re.compile(r";\s*\n")
+_DOLLAR_QUOTE_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$")
 
 
 def _split_pg_sql(sql: str) -> list[str]:
-    parts = [p.strip() for p in _SQL_STMT_RE.split(sql)]
-    out: list[str] = []
-    for part in parts:
-        if not part:
+    """Split PostgreSQL statements without breaking quoted function bodies."""
+    statements: list[str] = []
+    start = 0
+    index = 0
+    quote: str | None = None
+    dollar_quote: str | None = None
+    line_comment = False
+    block_comment_depth = 0
+    while index < len(sql):
+        char = sql[index]
+        following = sql[index + 1] if index + 1 < len(sql) else ""
+
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            index += 1
             continue
-        # Drop leading full-line comments so header+DDL blocks are kept.
-        lines = part.splitlines()
-        while lines and (not lines[0].strip() or lines[0].lstrip().startswith("--")):
-            lines.pop(0)
-        cleaned = "\n".join(lines).strip()
-        if cleaned:
-            out.append(cleaned)
-    return out
+        if block_comment_depth:
+            if char == "/" and following == "*":
+                block_comment_depth += 1
+                index += 2
+            elif char == "*" and following == "/":
+                block_comment_depth -= 1
+                index += 2
+            else:
+                index += 1
+            continue
+        if dollar_quote is not None:
+            if sql.startswith(dollar_quote, index):
+                index += len(dollar_quote)
+                dollar_quote = None
+            else:
+                index += 1
+            continue
+        if quote is not None:
+            if char == quote:
+                if following == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+
+        if char == "-" and following == "-":
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and following == "*":
+            block_comment_depth = 1
+            index += 2
+            continue
+        if char in ("'", '"'):
+            quote = char
+            index += 1
+            continue
+        if char == "$":
+            match = _DOLLAR_QUOTE_RE.match(sql, index)
+            if match is not None:
+                dollar_quote = match.group(0)
+                index = match.end()
+                continue
+        if char == ";":
+            statement = sql[start:index].strip()
+            if statement:
+                statements.append(statement)
+            start = index + 1
+        index += 1
+
+    if quote is not None or dollar_quote is not None or block_comment_depth:
+        raise ValueError("unterminated quoted PostgreSQL migration statement")
+    trailing = sql[start:].strip()
+    if trailing:
+        statements.append(trailing)
+    return statements
 
 
 def _discover(dialect: str = "sqlite") -> list[tuple[int, Path]]:

@@ -104,3 +104,7 @@ scripts/dev-local-link.sh
 docs/superpowers/
 scripts/lh_image_install_octop_tencentos.sh
 .worktrees/
+
+# WorkBuddy local verification state
+.jspace/
+artifacts/

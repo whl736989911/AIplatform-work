@@ -28,4 +28,9 @@ COMMANDS: dict[str, tuple[str, str, str]] = {
     "backup": (".commands.backup", "backup", "Export and restore Octop backups."),
     "acp": (".commands.acp", "acp_cmd", "Run Octop agent as ACP server (stdio)."),
     "plugin": (".commands.plugin", "plugin", "Install and manage plugins."),
+    "workbuddy": (
+        ".commands.workbuddy",
+        "workbuddy",
+        "WorkBuddy contract and dependency probes.",
+    ),
 }

@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "core": {
+    "name": "Octop",
+    "repository": "https://github.com/TencentCloud/Octop.git",
+    "owner": "TencentCloud",
+    "release": "v1.0.0",
+    "commit": "6d6ee70deb48f6870e89dbf9ca820f7862eb6bcf",
+    "tree": "90c0df23a51dd011fce85829cb7ddd6c2dad5c20",
+    "published_at": "2026-09-14T02:48:02Z",
+    "prerelease": false,
+    "release_channel": "stable",
+    "commit_signature": {
+      "verified": true,
+      "reason": "valid"
+    },
+    "license": {
+      "spdx": "MIT",
+      "file": "LICENSE",
+      "verified_from_commit": true
+    },
+    "release_assets": {
+      "wheel": {
+        "name": "octop-1.0.0-py3-none-any.whl",
+        "sha256": "5578c9dbbbd6e19d74fb174073ed1165369ca90abe6e88b9342531799be45dc9"
+      },
+      "source_distribution": {
+        "name": "octop-1.0.0.tar.gz",
+        "sha256": "01fddb1d8a677fc698f0747c7fba2e05a8bd760e50b562b61c042da87fadaf56"
+      }
+    }
+  },
+  "policy": {
+    "tracking_branch": "workbuddy/v1.0.0",
+    "upstream_remote": "upstream",
+    "automatic_upstream_updates": false,
+    "upgrade_rule": "Review a newer stable release, its migrations, security changes, and affected WorkBuddy gates before rebasing. Never track main in production."
+  }
+}
