@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import now_ts
@@ -41,6 +41,8 @@ from octop.infra.workbuddy.workflow_compiler import (
     ACTIVATABLE_VERSION_ORIGINS,
     VERSION_ORIGINS,
     SemanticDecision,
+)
+from octop.infra.workbuddy.workflow_compiler import (
     definition_sha256 as workflow_definition_sha256,
 )
 
@@ -140,12 +142,8 @@ class WorkflowRecord:
             description=row["description"],
             status=str(row["status"]),
             revision=int(row["revision"]),
-            active_version_id=(
-                str(row["active_version_id"]) if row["active_version_id"] else None
-            ),
-            shadow_version_id=(
-                str(row["shadow_version_id"]) if row["shadow_version_id"] else None
-            ),
+            active_version_id=(str(row["active_version_id"]) if row["active_version_id"] else None),
+            shadow_version_id=(str(row["shadow_version_id"]) if row["shadow_version_id"] else None),
             created_by=int(row["created_by"]) if row["created_by"] is not None else None,
             created_by_membership_id=(
                 str(row["created_by_membership_id"]) if row["created_by_membership_id"] else None
@@ -305,9 +303,7 @@ class WorkBuddyWorkflowRepo:
         return WorkflowRecord.from_row(row) if row is not None else None
 
     @staticmethod
-    def _lock_revision(
-        conn: Any, tenant_id: str, workflow_id: str, expected_revision: int
-    ) -> int:
+    def _lock_revision(conn: Any, tenant_id: str, workflow_id: str, expected_revision: int) -> int:
         row = conn.execute(
             "SELECT revision FROM workbuddy_workflows "
             "WHERE tenant_id = ? AND workflow_id = ? FOR UPDATE",
@@ -366,7 +362,9 @@ class WorkBuddyWorkflowRepo:
                 tenant_id,
                 workflow_id,
                 version_number,
-                definition,
+                # The column is jsonb and psycopg cannot adapt a dict, so bind the
+                # serialized form the way the other WorkBuddy repos do.
+                json.dumps(dict(definition), sort_keys=True, separators=(",", ":")),
                 definition_sha256,
                 origin,
                 base_version_id,
@@ -516,9 +514,7 @@ class WorkBuddyWorkflowRepo:
             raise WorkflowInvalid(f"unsupported version origin {origin!r}")
         stored = self._require_definition(definition, definition_sha256)
         created_at = now_ts()
-        with self._connection(
-            tenant_id, user_id=created_by_user_id, conn=conn
-        ) as connection:
+        with self._connection(tenant_id, user_id=created_by_user_id, conn=conn) as connection:
             row = connection.execute(
                 f"INSERT INTO workbuddy_workflows (tenant_id, name, description, status, revision, "
                 f"created_by, created_by_membership_id, created_at, updated_at) "
@@ -573,9 +569,7 @@ class WorkBuddyWorkflowRepo:
         if origin not in VERSION_ORIGINS:
             raise WorkflowInvalid(f"unsupported version origin {origin!r}")
         stored = self._require_definition(definition, definition_sha256)
-        with self._connection(
-            tenant_id, user_id=created_by_user_id, conn=conn
-        ) as connection:
+        with self._connection(tenant_id, user_id=created_by_user_id, conn=conn) as connection:
             self._lock_revision(connection, tenant_id, workflow_id, expected_revision)
             version = self._insert_version(
                 connection,
@@ -687,12 +681,8 @@ class WorkBuddyWorkflowRepo:
     ) -> WorkflowVersionBundle:
         """Copy a historical snapshot into a new version and publish it."""
         workflow_id = _public_uuid(workflow_id, message="workflow not found")
-        source_version_id = _public_uuid(
-            source_version_id, message="workflow version not found"
-        )
-        with self._connection(
-            tenant_id, user_id=created_by_user_id, conn=conn
-        ) as connection:
+        source_version_id = _public_uuid(source_version_id, message="workflow version not found")
+        with self._connection(tenant_id, user_id=created_by_user_id, conn=conn) as connection:
             self._lock_revision(connection, tenant_id, workflow_id, expected_revision)
             source = connection.execute(
                 f"SELECT {VERSION_COLUMNS} FROM workbuddy_workflow_versions "
@@ -721,8 +711,7 @@ class WorkBuddyWorkflowRepo:
                 origin="rollback",
                 base_version_id=current.active_version_id if current is not None else None,
                 source_version_id=source_version_id,
-                change_summary=change_summary
-                or f"rollback to version {snapshot.version_number}",
+                change_summary=change_summary or f"rollback to version {snapshot.version_number}",
                 created_by_user_id=created_by_user_id,
                 created_by_membership_id=created_by_membership_id,
             )
@@ -741,9 +730,7 @@ class WorkBuddyWorkflowRepo:
             ).fetchone()
             if row is None:
                 raise RevisionConflict()
-        return WorkflowVersionBundle(
-            workflow=WorkflowRecord.from_row(row), version=version
-        )
+        return WorkflowVersionBundle(workflow=WorkflowRecord.from_row(row), version=version)
 
     def bind_tool(
         self,
@@ -886,9 +873,7 @@ class PostgresWorkflowSemanticResolver:
 
     def check_knowledge_base(self, knowledge_base_id: str) -> SemanticDecision:
         if self._user_id is None:
-            raise DependencyUnavailable(
-                "knowledge base resolution needs the calling user context"
-            )
+            raise DependencyUnavailable("knowledge base resolution needs the calling user context")
         row = self._one(
             "WITH RECURSIVE dept_chain(department_id) AS ("
             "SELECT m.department_id FROM workbuddy_tenant_members m "
