@@ -211,7 +211,7 @@ CREATE INDEX IF NOT EXISTS idx_workbuddy_tenant_model_grants_revision
 
 -- A credential row keeps its identity, steps one revision per write, and its
 -- revocation is terminal; only the descriptor and status columns may change.
-CREATE OR REPLACE FUNCTION workbuddy_catalog_guard_credential_mutation() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $wb$
+CREATE OR REPLACE FUNCTION workbuddy_catalog_guard_credential_mutation() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $wb$
 BEGIN
   IF NEW.credential_id <> OLD.credential_id OR NEW.tenant_id <> OLD.tenant_id OR NEW.created_at <> OLD.created_at OR NEW.owner_membership_id <> OLD.owner_membership_id THEN RAISE EXCEPTION 'workbuddy: credential identity is immutable' USING ERRCODE = '23514'; END IF; -- public id, tenant, creation stamp and owner never change
   IF OLD.status = 'revoked' AND NEW.status <> 'revoked' THEN RAISE EXCEPTION 'workbuddy: credential revocation is terminal' USING ERRCODE = '23514'; END IF; -- a revoked credential never comes back
@@ -221,7 +221,7 @@ END $wb$;
 
 -- Platform catalog rows are fixed revisions: the descriptor is frozen, deletes
 -- and truncates are rejected, and only a one-way revocation may pass.
-CREATE OR REPLACE FUNCTION workbuddy_catalog_guard_platform_revision() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $wb$
+CREATE OR REPLACE FUNCTION workbuddy_catalog_guard_platform_revision() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $wb$
 BEGIN
   IF TG_OP = 'DELETE' OR TG_OP = 'TRUNCATE' THEN RAISE EXCEPTION 'workbuddy: platform revisions are never removed' USING ERRCODE = '23514'; END IF; -- revisions are permanent
   IF (to_jsonb(NEW) - 'status' - 'revoked_at' - 'revoked_by_user_id') IS DISTINCT FROM (to_jsonb(OLD) - 'status' - 'revoked_at' - 'revoked_by_user_id') THEN RAISE EXCEPTION 'workbuddy: platform revision descriptor is immutable' USING ERRCODE = '23514'; END IF; -- adapter, keys and display metadata frozen
@@ -230,7 +230,7 @@ BEGIN
 END $wb$;
 
 -- Capability grants may only reference published tool or model revisions.
-CREATE OR REPLACE FUNCTION workbuddy_catalog_guard_capability_grant() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $wb$
+CREATE OR REPLACE FUNCTION workbuddy_catalog_guard_capability_grant() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $wb$
 DECLARE approved boolean; -- resolved revision state
 BEGIN
   IF TG_TABLE_NAME = 'workbuddy_tenant_tool_grants' THEN -- tool grant
@@ -243,7 +243,7 @@ BEGIN
 END $wb$;
 
 -- A tenant default model must itself be a published revision.
-CREATE OR REPLACE FUNCTION workbuddy_catalog_guard_capability_default() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $wb$
+CREATE OR REPLACE FUNCTION workbuddy_catalog_guard_capability_default() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $wb$
 DECLARE approved boolean; -- resolved revision state
 BEGIN
   IF NEW.default_model_revision_id IS NULL THEN RETURN NEW; END IF; -- no default configured

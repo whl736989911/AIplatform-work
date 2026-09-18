@@ -17,28 +17,28 @@
 
 -- ── Context helpers (fixed search_path; used by RLS policies and triggers) ────
 
-CREATE OR REPLACE FUNCTION workbuddy_system_context() RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $wb$ SELECT coalesce(current_setting('app.system', true), 'off') = 'on' $wb$;
+CREATE OR REPLACE FUNCTION workbuddy_system_context() RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $wb$ SELECT coalesce(current_setting('app.system', true), 'off') = 'on' $wb$;
 
-CREATE OR REPLACE FUNCTION workbuddy_current_tenant_id() RETURNS uuid LANGUAGE sql STABLE SET search_path = pg_catalog AS $wb$ SELECT nullif(current_setting('app.tenant_id', true), '')::uuid $wb$;
+CREATE OR REPLACE FUNCTION workbuddy_current_tenant_id() RETURNS uuid LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $wb$ SELECT nullif(current_setting('app.tenant_id', true), '')::uuid $wb$;
 
-CREATE OR REPLACE FUNCTION workbuddy_rls_visible(row_tenant_id uuid) RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog, public AS $wb$ SELECT coalesce(row_tenant_id IS NOT NULL AND (workbuddy_system_context() OR row_tenant_id = workbuddy_current_tenant_id()), false) $wb$;
+CREATE OR REPLACE FUNCTION workbuddy_rls_visible(row_tenant_id uuid) RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $wb$ SELECT coalesce(row_tenant_id IS NOT NULL AND (workbuddy_system_context() OR row_tenant_id = workbuddy_current_tenant_id()), false) $wb$;
 
-CREATE OR REPLACE FUNCTION workbuddy_department_max_depth() RETURNS integer LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $wb$ SELECT 8 $wb$;
+CREATE OR REPLACE FUNCTION workbuddy_department_max_depth() RETURNS integer LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path = pg_catalog AS $wb$ SELECT 8 $wb$;
 
 -- ── Guard triggers ───────────────────────────────────────────────────────────
 
-CREATE OR REPLACE FUNCTION workbuddy_guard_immutable_column() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $wb$
+CREATE OR REPLACE FUNCTION workbuddy_guard_immutable_column() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $wb$
 BEGIN
   IF to_jsonb(NEW) ->> TG_ARGV[0] IS DISTINCT FROM to_jsonb(OLD) ->> TG_ARGV[0] THEN RAISE EXCEPTION 'workbuddy: column % is immutable', TG_ARGV[0] USING ERRCODE = '23514'; END IF; -- public ids never change
   RETURN NEW; -- accepted
 END $wb$;
 
-CREATE OR REPLACE FUNCTION workbuddy_guard_append_only() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $wb$
+CREATE OR REPLACE FUNCTION workbuddy_guard_append_only() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $wb$
 BEGIN
   RAISE EXCEPTION 'workbuddy: % is append only', TG_TABLE_NAME USING ERRCODE = '42501'; -- governance trail is immutable
 END $wb$;
 
-CREATE OR REPLACE FUNCTION workbuddy_guard_quota_limit() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $wb$
+CREATE OR REPLACE FUNCTION workbuddy_guard_quota_limit() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $wb$
 DECLARE cap bigint; -- platform ceiling for the metric
 BEGIN
   SELECT hard_cap INTO cap FROM workbuddy_quota_metrics WHERE metric = NEW.metric; -- ceiling row
@@ -47,7 +47,7 @@ BEGIN
   RETURN NEW; -- accepted
 END $wb$;
 
-CREATE OR REPLACE FUNCTION workbuddy_guard_department_parent() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $wb$
+CREATE OR REPLACE FUNCTION workbuddy_guard_department_parent() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $wb$
 DECLARE ancestor uuid; depth integer := 0; -- climb cursor and counted levels
 BEGIN
   IF NEW.parent_department_id IS NULL THEN RETURN NEW; END IF; -- root departments need no walk
@@ -309,10 +309,13 @@ REVOKE ALL ON TABLE workbuddy_tenant_quotas FROM PUBLIC;
 REVOKE ALL ON TABLE workbuddy_quota_metrics FROM PUBLIC;
 REVOKE ALL ON TABLE workbuddy_tenant_audit_events FROM PUBLIC;
 
-REVOKE ALL ON FUNCTION workbuddy_system_context() FROM PUBLIC;
-REVOKE ALL ON FUNCTION workbuddy_current_tenant_id() FROM PUBLIC;
-REVOKE ALL ON FUNCTION workbuddy_rls_visible(uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION workbuddy_department_max_depth() FROM PUBLIC;
+-- RLS policies are evaluated as the querying role, so the predicate it calls
+-- must stay executable by that role; all three read only the session's own
+-- app.* settings, so PUBLIC execute exposes nothing beyond the row filter.
+GRANT EXECUTE ON FUNCTION workbuddy_system_context() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION workbuddy_current_tenant_id() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION workbuddy_rls_visible(uuid) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION workbuddy_department_max_depth() TO PUBLIC;
 REVOKE ALL ON FUNCTION workbuddy_guard_immutable_column() FROM PUBLIC;
 REVOKE ALL ON FUNCTION workbuddy_guard_append_only() FROM PUBLIC;
 REVOKE ALL ON FUNCTION workbuddy_guard_quota_limit() FROM PUBLIC;
