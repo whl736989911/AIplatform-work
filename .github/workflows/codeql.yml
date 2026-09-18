@@ -19,6 +19,12 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
+    # Uploading results needs code scanning, which private repositories only get
+    # with GitHub Advanced Security. Without it the scan itself succeeds and the
+    # upload fails with "Resource not accessible by integration", leaving a check
+    # that can never pass. Public forks keep scanning; a private deployment with
+    # GHAS can opt in by setting the CODEQL_ENABLED repository variable.
+    if: ${{ github.event.repository.private == false || vars.CODEQL_ENABLED == 'true' }}
     steps:
       - uses: actions/checkout@v4
 
