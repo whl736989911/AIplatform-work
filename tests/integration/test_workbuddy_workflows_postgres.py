@@ -80,10 +80,6 @@ def cyclic_definition() -> dict[str, Any]:
     return definition
 
 
-def _dsn() -> str:
-    return os.environ["OCTOP_TEST_DATABASE_URL"]
-
-
 def _seed_user(pool: Any, username: str) -> int:
     with pool.connect() as conn:
         row = conn.execute(
@@ -99,7 +95,7 @@ def pool() -> Iterator[Any]:
     from octop.infra.db.migrate import run_migrations
     from octop.infra.db.pool import PostgresPool
 
-    database = PostgresPool(_dsn())
+    database = PostgresPool(os.environ["OCTOP_TEST_DATABASE_URL"])
     try:
         with database.connect() as conn:
             conn.execute("DROP SCHEMA public CASCADE")
@@ -155,7 +151,7 @@ def _principal(tenant: dict[str, Any], *, role: str = "owner") -> WorkBuddyPrinc
 
 @pytest.fixture
 def app(pool: Any) -> FastAPI:
-    """The workflow router with the principal and server bound to this database."""
+    """The workflow router with the server bound to this database."""
     from octop.api.deps import get_server
 
     application = FastAPI()
@@ -329,6 +325,62 @@ async def test_candidate_versions_cannot_be_activated(
         refused.json()["error"]["code"]
         == ErrorCode.WORKBUDDY_WORKFLOW_VERSION_NOT_ACTIVATABLE.value
     )
+
+
+async def test_member_listing_hides_drafts_and_withdrawn_workflows(
+    app: FastAPI, pool: Any, tenants: dict[str, dict[str, Any]]
+) -> None:
+    """T07/T08: a plain member sees only published, unrevoked workflows.
+
+    The member branch of the listing route calls a repository helper the seeded
+    branch never defined, so this path raised AttributeError until the
+    integration test exercised it.
+    """
+    from octop.infra.db.repos.workbuddy_workflows import WorkBuddyWorkflowRepo
+
+    owner = _principal(tenants["a"])
+    tenant = tenants["a"]
+    workflow_ids: dict[str, str] = {}
+    version_ids: dict[str, str] = {}
+
+    async with _client(app, owner) as client:
+        for name in ("Published", "Draft only", "Withdrawn"):
+            created = await client.post(
+                "/workflows", json={"name": name, "definition": hello_definition()}
+            )
+            assert created.status_code == 201, created.text
+            workflow_ids[name] = created.json()["data"]["id"]
+            version_ids[name] = created.json()["data"]["version"]["id"]
+
+        for name in ("Published", "Withdrawn"):
+            detail = await client.get(f"/workflows/{workflow_ids[name]}")
+            activated = await client.post(
+                f"/workflows/{workflow_ids[name]}/activate",
+                headers={"If-Match": detail.headers["etag"]},
+                json={"version_id": version_ids[name]},
+            )
+            assert activated.status_code == 200, activated.text
+
+    WorkBuddyWorkflowRepo(pool).revoke_version(
+        tenant["tenant_id"],
+        workflow_ids["Withdrawn"],
+        None,
+        reason="withdrawn for review",
+        revoked_by_user_id=tenant["user_id"],
+        revoked_by_membership_id=tenant["member_id"],
+    )
+
+    member = _principal(tenants["a"], role="member")
+    async with _client(app, member) as client:
+        listing = await client.get("/workflows")
+        assert listing.status_code == 200, listing.text
+        visible = [item["name"] for item in listing.json()["data"]["items"]]
+
+    # Earlier tests in this module publish workflows in the same tenant, so the
+    # contract is what a member must not see, not an exact list.
+    assert "Published" in visible, visible
+    assert "Draft only" not in visible, visible
+    assert "Withdrawn" not in visible, visible
 
 
 async def test_cross_tenant_workflows_are_invisible(
