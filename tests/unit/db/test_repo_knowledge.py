@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.support.schema import CURRENT_SCHEMA_VERSION
 
 from octop.infra.db.migrate import run_migrations
 from octop.infra.db.pool import SqlitePool
@@ -50,7 +51,7 @@ def test_knowledge_tables_migrated(db: SqlitePool) -> None:
         "knowledge_bases",
         "knowledge_documents",
     }.issubset(names)
-    assert v == 14
+    assert v == CURRENT_SCHEMA_VERSION
     assert "knowledge_base_members" not in names
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(knowledge_bases)").fetchall()}
     assert "knowledge_base_id" in cols

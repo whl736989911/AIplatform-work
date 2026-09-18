@@ -187,6 +187,8 @@ def build_app(server: OctopServer) -> FastAPI:
         usage,
         users,
         voice,
+        workbuddy_catalog,
+        workbuddy_identity,
         workspace,
     )
     from octop.api.routers.filesystem import router as filesystem_router
@@ -205,6 +207,8 @@ def build_app(server: OctopServer) -> FastAPI:
             _RouterMount(auth.router, "/api/auth", ["auth"]),
             _RouterMount(auth_oidc.router, "/api/auth", ["auth"]),
             _RouterMount(invites.public_router, "/api/auth/invite", ["auth"]),
+            _RouterMount(workbuddy_identity.router, "/api/v1", ["workbuddy"]),
+            _RouterMount(workbuddy_catalog.router, "/api/v1", ["workbuddy"]),
             _RouterMount(preferences.router, "/api", ["auth"]),
             _RouterMount(i18n.router, "/api", ["i18n"]),
             _RouterMount(health.router, "/api/health", ["health"]),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import jwt
@@ -32,21 +32,40 @@ def sign_token(
     uname: str,
     role: str,
     ttl_seconds: int = 86400,
+    extra_claims: Mapping[str, Any] | None = None,
 ) -> str:
     now = int(time.time())
-    payload = {
+    payload: dict[str, Any] = {
         "sub": str(sub),
         "uname": uname,
         "role": role,
         "iat": now,
         "exp": now + ttl_seconds,
     }
+    if extra_claims:
+        # WorkBuddy adds tenant context (`tnt`/`tslug`) and the platform
+        # management audience (`aud`). Reverse these defaults before any caller
+        # supplied claim so a caller can never silently retarget `sub`/`exp`.
+        payload.update({k: v for k, v in extra_claims.items() if k not in payload})
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
-def decode_token(secret: bytes, token: str) -> dict[str, Any]:
+def decode_token(
+    secret: bytes,
+    token: str,
+    *,
+    audience: str | None = None,
+    verify_audience: bool = True,
+) -> dict[str, Any]:
+    options = None if verify_audience else {"verify_aud": False}
     try:
-        payload = jwt.decode(token, secret, algorithms=["HS256"])
+        payload = jwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            audience=audience,
+            options=options,
+        )
         if "sub" in payload:
             payload["sub"] = int(payload["sub"])
         return payload
@@ -54,6 +73,25 @@ def decode_token(secret: bytes, token: str) -> dict[str, Any]:
         raise TokenExpired() from exc
     except jwt.InvalidTokenError as exc:
         raise InvalidToken(str(exc)) from exc
+
+
+def decode_claims(
+    server: OctopServer,
+    token: str,
+    *,
+    secret_key: str = "jwt",
+    audience: str | None = None,
+) -> dict[str, Any]:
+    """Decode a JWT payload, optionally requiring the ``aud`` claim ``audience``.
+
+    Low-level: raises :class:`InvalidToken` / :class:`TokenExpired`, so callers
+    decide whether a bad audience is 401 or 403.
+    """
+    assert server.services is not None
+    secret = server.services.secret_repo.get(secret_key)
+    if secret is None:
+        raise OctopError(ErrorCode.INTERNAL_ERROR, "jwt secret missing")
+    return decode_token(secret, token, audience=audience)
 
 
 # Sliding renew: when remaining life is below this fraction of configured TTL,
@@ -69,10 +107,14 @@ _JWT_EXEMPT_PREFIXES = (
     "/api/i18n/",
     "/api/connectors/oauth/callback",
     "/api/internal/mcp/",
+    # WorkBuddy public webhooks: the route verifies the signature itself.
+    "/api/v1/webhooks/",
 )
 _JWT_EXEMPT_EXACT = (
     "/api/health",
     "/api/auth/login",
+    "/api/v1/auth/login",
+    "/api/v1/auth/register",
     "/api/auth/oidc/status",
     "/api/auth/oidc/start",
     "/api/auth/oidc/callback",
@@ -127,7 +169,10 @@ def _decode(server: OctopServer, token: str) -> dict[str, Any]:
     if secret is None:
         raise OctopError(ErrorCode.INTERNAL_ERROR, "jwt secret missing")
     try:
-        return decode_token(secret, token)
+        # Audience is a resource-level concern: this establishes *who* the caller
+        # is, so a token that carries `aud` (e.g. WorkBuddy platform management)
+        # must still resolve here. Routes that need an audience verify it.
+        return decode_token(secret, token, verify_audience=False)
     except TokenExpired as exc:
         raise OctopError(ErrorCode.TOKEN_EXPIRED, "token expired") from exc
     except InvalidToken as exc:
