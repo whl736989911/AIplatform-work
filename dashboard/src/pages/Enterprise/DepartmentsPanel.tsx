@@ -42,7 +42,10 @@ interface DepartmentFormValues {
 }
 
 /** A department may not become its own ancestor. */
-function collectSubtree(departments: Department[], rootId: string): Set<string> {
+function collectSubtree(
+  departments: Department[],
+  rootId: string,
+): Set<string> {
   const childrenByParent = new Map<string | null, Department[]>();
   for (const item of departments) {
     const siblings = childrenByParent.get(item.parent_id);
@@ -92,7 +95,8 @@ export default function DepartmentsPanel({
   }, [departments]);
 
   const blockedIds = useMemo(
-    () => (editing ? collectSubtree(departments, editing.id) : new Set<string>()),
+    () =>
+      editing ? collectSubtree(departments, editing.id) : new Set<string>(),
     [departments, editing],
   );
 
@@ -158,7 +162,9 @@ export default function DepartmentsPanel({
   const setStatus = async (row: Department, status: string) => {
     try {
       const updated = await enterpriseApi.updateDepartment(row.id, { status });
-      setData((prev) => prev.map((item) => (item.id === row.id ? updated : item)));
+      setData((prev) =>
+        prev.map((item) => (item.id === row.id ? updated : item)),
+      );
       message.success(t("tenantGovernance.departments.statusSaved"));
     } catch (err) {
       message.error(
@@ -180,7 +186,9 @@ export default function DepartmentsPanel({
       key: "parent",
       width: 200,
       render: (parentId: string | null) =>
-        parentId ? nameById.get(parentId) ?? parentId : (
+        parentId ? (
+          nameById.get(parentId) ?? parentId
+        ) : (
           <Text type="secondary">{t("tenantGovernance.departments.root")}</Text>
         ),
     },

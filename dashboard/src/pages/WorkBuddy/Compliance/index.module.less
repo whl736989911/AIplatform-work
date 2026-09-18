@@ -1,0 +1,83 @@
+/* 合规 (/workbuddy/compliance) — checklists share the AdvancedSettings tab layout. */
+
+.panel {
+  width: 100%;
+  min-width: 0;
+}
+
+.centered {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.notice {
+  margin-bottom: 16px;
+}
+
+.sectionBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--fn-border-primary);
+}
+
+.rowHint {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.timeline {
+  margin-top: 8px;
+}
+
+.revision {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rulePreview {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ruleMore {
+  list-style: none;
+  margin-left: -20px;
+  color: var(--fn-text-quaternary, #999);
+  font-size: 12px;
+}
+
+.ruleList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ruleRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.ruleRow :global(.ant-form-item) {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 12px;
+}
+
+.ruleDetail {
+  max-width: 240px;
+}
+
+.ruleDetailList {
+  margin: 12px 0 0;
+  padding-left: 20px;
+  line-height: 1.7;
+}

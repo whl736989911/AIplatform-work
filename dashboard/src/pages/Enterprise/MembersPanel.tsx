@@ -82,8 +82,7 @@ export default function MembersPanel({
   }, [departments]);
 
   const departmentOptions = useMemo(
-    () =>
-      departments.map((item) => ({ value: item.id, label: item.name })),
+    () => departments.map((item) => ({ value: item.id, label: item.name })),
     [departments],
   );
 
@@ -105,13 +104,17 @@ export default function MembersPanel({
     setSaving(true);
     try {
       const body: TenantUserUpdate = {
-        display_name: values.display_name?.trim() ? values.display_name.trim() : null,
+        display_name: values.display_name?.trim()
+          ? values.display_name.trim()
+          : null,
         role: values.role,
         department_id: values.department_id ?? null,
         status: values.status === "suspended" ? "suspended" : "active",
       };
       const updated = await enterpriseApi.updateUser(editing.id, body);
-      setData((prev) => prev.map((row) => (row.id === updated.id ? updated : row)));
+      setData((prev) =>
+        prev.map((row) => (row.id === updated.id ? updated : row)),
+      );
       message.success(t("tenantGovernance.members.updateSuccess"));
       setEditing(null);
     } catch (err) {
@@ -123,13 +126,12 @@ export default function MembersPanel({
     }
   };
 
-  const setStatus = async (
-    row: TenantUser,
-    status: TenantUserStatus,
-  ) => {
+  const setStatus = async (row: TenantUser, status: TenantUserStatus) => {
     try {
       const updated = await enterpriseApi.updateUser(row.id, { status });
-      setData((prev) => prev.map((item) => (item.id === row.id ? updated : item)));
+      setData((prev) =>
+        prev.map((item) => (item.id === row.id ? updated : item)),
+      );
       message.success(t("tenantGovernance.members.statusSaved"));
     } catch (err) {
       message.error(

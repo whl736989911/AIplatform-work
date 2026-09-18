@@ -19,6 +19,13 @@ import {
   Shield,
   PanelsTopLeft,
   Building2,
+  BookOpen,
+  Workflow,
+  ShieldCheck,
+  Lightbulb,
+  Store,
+  ClipboardCheck,
+  FileClock,
 } from "lucide-react";
 import type { OctopUser } from "../api/modules/auth";
 import { navAllowed, userCan } from "../utils/permissions";
@@ -64,6 +71,13 @@ export const SIDEBAR_GROUPED_NAV_KEYS = [
   "admin-security",
   "admin-advanced",
   "agent-config",
+  "workbuddy-knowledge",
+  "workbuddy-workflows",
+  "workbuddy-approvals",
+  "workbuddy-proposals",
+  "workbuddy-marketplace",
+  "workbuddy-compliance",
+  "workbuddy-lifecycle",
 ] as const;
 
 const GROUPED_NAV_KEY_SET = new Set<string>(SIDEBAR_GROUPED_NAV_KEYS);
@@ -114,6 +128,56 @@ export function buildNavSections(
       ],
     },
   ];
+
+  // WorkBuddy console: every authenticated tenant member reaches these pages —
+  // the server decides what each tenant role may read or change, and the pages
+  // render the server's answer (including "not available yet" while a backend
+  // slice is still unmerged) instead of guessing locally.
+  const workbuddyItems: NavItem[] = [
+    {
+      key: "workbuddy-knowledge",
+      path: "/workbuddy/knowledge",
+      icon: <BookOpen size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyKnowledge",
+    },
+    {
+      key: "workbuddy-workflows",
+      path: "/workbuddy/workflows",
+      icon: <Workflow size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyWorkflows",
+    },
+    {
+      key: "workbuddy-approvals",
+      path: "/workbuddy/approvals",
+      icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyApprovals",
+    },
+    {
+      key: "workbuddy-proposals",
+      path: "/workbuddy/proposals",
+      icon: <Lightbulb size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyProposals",
+    },
+    {
+      key: "workbuddy-marketplace",
+      path: "/workbuddy/marketplace",
+      icon: <Store size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyMarketplace",
+    },
+    {
+      key: "workbuddy-compliance",
+      path: "/workbuddy/compliance",
+      icon: <ClipboardCheck size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyCompliance",
+    },
+    {
+      key: "workbuddy-lifecycle",
+      path: "/workbuddy/lifecycle",
+      icon: <FileClock size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyLifecycle",
+    },
+  ];
+  sections.push({ groupKey: "nav.workbuddy", items: workbuddyItems });
 
   const settingsItems: NavItem[] = [
     {

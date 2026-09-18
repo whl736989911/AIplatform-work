@@ -107,7 +107,11 @@ export default function CapabilitiesPanel() {
         message.success(t("tenantGovernance.capabilities.saveSuccess"));
       } catch (err) {
         message.error(
-          apiErrorMessage(err, t("tenantGovernance.capabilities.saveFailed"), t),
+          apiErrorMessage(
+            err,
+            t("tenantGovernance.capabilities.saveFailed"),
+            t,
+          ),
         );
       } finally {
         setSaving(false);

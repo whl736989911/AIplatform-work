@@ -1,0 +1,88 @@
+/* 改进建议 (/workbuddy/proposals) — list, detail and evidence panels. */
+
+.notice {
+  margin-bottom: 16px;
+}
+
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 0;
+  margin-bottom: 16px;
+}
+
+.centered {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.sectionBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--fn-border-primary);
+}
+
+.sectionTitleRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fn-text-primary);
+}
+
+.subTitle {
+  margin: 16px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fn-text-secondary);
+}
+
+.sectionHint {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mono {
+  font-family: var(
+    --fn-font-mono,
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace
+  );
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.codeInput textarea,
+textarea.codeInput {
+  font-family: var(
+    --fn-font-mono,
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace
+  );
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.checklistFail {
+  color: var(--fn-color-danger, #cf1322);
+}
+
+.selectedRow {
+  background: var(--fn-bg-elevated, rgba(22, 119, 255, 0.06));
+}

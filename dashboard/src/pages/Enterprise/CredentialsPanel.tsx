@@ -142,7 +142,11 @@ export default function CredentialsPanel({
         setGrants((await enterpriseApi.listGrants(credential.id)).items);
       } catch (err) {
         message.error(
-          apiErrorMessage(err, t("tenantGovernance.credentials.grantsFailed"), t),
+          apiErrorMessage(
+            err,
+            t("tenantGovernance.credentials.grantsFailed"),
+            t,
+          ),
         );
       } finally {
         setGrantsLoading(false);
@@ -168,7 +172,9 @@ export default function CredentialsPanel({
         connector_type: values.connector_type.trim(),
         display_name: values.display_name.trim(),
         secret: parseSecretInput(values.secret),
-        allowed_scopes: (values.allowed_scopes ?? []).map((scope) => scope.trim()),
+        allowed_scopes: (values.allowed_scopes ?? []).map((scope) =>
+          scope.trim(),
+        ),
       };
       const created = await enterpriseApi.createCredential(body);
       setData((prev) => [created, ...prev]);
@@ -210,7 +216,9 @@ export default function CredentialsPanel({
   const revoke = async (row: ConnectorCredential) => {
     try {
       const updated = await enterpriseApi.revokeCredential(row.id);
-      setData((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      setData((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
       message.success(t("tenantGovernance.credentials.revokeSuccess"));
     } catch (err) {
       message.error(
@@ -303,7 +311,9 @@ export default function CredentialsPanel({
       width: 220,
       render: (scopes: string[]) =>
         scopes.length === 0 ? (
-          <Text type="secondary">{t("tenantGovernance.credentials.noScopes")}</Text>
+          <Text type="secondary">
+            {t("tenantGovernance.credentials.noScopes")}
+          </Text>
         ) : (
           <Space size={4} wrap>
             {scopes.map((scope) => (
@@ -334,7 +344,9 @@ export default function CredentialsPanel({
       width: 260,
       render: (_value, row) =>
         row.status === "revoked" ? (
-          <Text type="secondary">{t("tenantGovernance.credentials.revokedHint")}</Text>
+          <Text type="secondary">
+            {t("tenantGovernance.credentials.revokedHint")}
+          </Text>
         ) : (
           <Space size={2} wrap>
             <Button
@@ -473,7 +485,9 @@ export default function CredentialsPanel({
             rules={[
               {
                 required: true,
-                message: t("tenantGovernance.credentials.connectorTypeRequired"),
+                message: t(
+                  "tenantGovernance.credentials.connectorTypeRequired",
+                ),
               },
             ]}
           >
@@ -576,7 +590,9 @@ export default function CredentialsPanel({
               optionFilterProp="label"
               value={grantUserId}
               onChange={setGrantUserId}
-              placeholder={t("tenantGovernance.credentials.grantUserPlaceholder")}
+              placeholder={t(
+                "tenantGovernance.credentials.grantUserPlaceholder",
+              )}
               options={userOptions}
               style={{ flex: 1, minWidth: 0 }}
             />
