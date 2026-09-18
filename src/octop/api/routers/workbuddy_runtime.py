@@ -53,7 +53,7 @@ def _service(server: Any) -> WorkBuddyRuntimeService:
         raise OctopError(ErrorCode.SETUP_REQUIRED, _DATABASE_NOT_CONFIGURED, status=503)
     db = getattr(services, "db", None)
     if not isinstance(db, DatabasePool) or db.dialect != "postgresql":
-        raise OctopError(ErrorCode.WORKBUDDY_POSTGRES_REQUIRED, _POSTGRES_REQUIRED)
+        raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _POSTGRES_REQUIRED)
     return WorkBuddyRuntimeService(db)
 
 
@@ -72,7 +72,7 @@ def _uuid(value: str, *, field: str) -> str:
     try:
         return str(uuid.UUID(value))
     except (ValueError, AttributeError, TypeError):
-        raise OctopError(ErrorCode.NOT_FOUND, f"{field} not found") from None
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, f"{field} not found") from None
 
 
 class ExecuteBody(BaseModel):

@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -82,7 +83,7 @@ _TEMPLATE_RE = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
 
 
 def _not_found(message: str = "workbuddy resource not found") -> OctopError:
-    return OctopError(ErrorCode.NOT_FOUND, message)
+    return OctopError(ErrorCode.RESOURCE_NOT_FOUND, message)
 
 
 def _invalid(message: str) -> OctopError:
@@ -148,6 +149,9 @@ class StepOutcome:
     error_code: str | None = None
     error_message: str | None = None
     replayed: bool = False
+    skip_reason: str | None = None
+    started_at: float | None = None
+    duration_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +160,7 @@ class EdgeOutcome:
     target: str
     branch: str | None
     taken: bool
+    failed: bool = False
 
 
 class UnresolvedToolOutcome(Exception):
@@ -580,30 +585,39 @@ def run_graph(
 
     resolved: dict[str, int] = {node.id: 0 for node in graph.nodes}
     taken_in: dict[str, int] = {node.id: 0 for node in graph.nodes}
+    failed_in: dict[str, int] = {node.id: 0 for node in graph.nodes}
     processed: set[str] = set()
     node_results: dict[str, Any] = {}
     bindings: dict[str, Any] = {}
     results: dict[str, Any] = {}
     steps: list[StepOutcome] = []
     edge_outcomes: list[EdgeOutcome] = []
-    failure: StepOutcome | None = None
+    failure: StepOutcome | None = None  # only the step-limit guard stops a run
     node_failures: list[StepOutcome] = []
     approval_candidates: dict[str, tuple[tuple[int, str | None], ...]] = {}
     waiting_node: str | None = None
     reconciliation_node: str | None = None
     executed = 0
 
-    def resolve_edge(edge: GraphEdge, taken: bool) -> None:
+    def resolve_edge(edge: GraphEdge, taken: bool, *, failed: bool = False) -> None:
         resolved[edge.target] += 1
         if taken:
             taken_in[edge.target] += 1
+        if failed:
+            failed_in[edge.target] += 1
         edge_outcomes.append(
-            EdgeOutcome(source=edge.source, target=edge.target, branch=edge.when, taken=taken)
+            EdgeOutcome(
+                source=edge.source,
+                target=edge.target,
+                branch=edge.when,
+                taken=taken,
+                failed=failed,
+            )
         )
 
-    def propagate_skip(node: GraphNode) -> None:
+    def propagate_skip(node: GraphNode, *, failed: bool = False) -> None:
         for edge in graph.outgoing(node.id):
-            resolve_edge(edge, False)
+            resolve_edge(edge, False, failed=failed)
 
     def propagate_taken(node: GraphNode) -> None:
         for edge in graph.outgoing(node.id):
@@ -621,7 +635,10 @@ def run_graph(
         error_code: str | None = None,
         error_message: str | None = None,
         replayed: bool = False,
+        skip_reason: str | None = None,
+        timing: tuple[float, int] | None = None,
     ) -> StepOutcome:
+        started_at, duration_ms = timing if timing is not None else (None, None)
         outcome = StepOutcome(
             node_id=node.id,
             node_type=node.type,
@@ -631,6 +648,9 @@ def run_graph(
             error_code=error_code,
             error_message=error_message,
             replayed=replayed,
+            skip_reason=skip_reason,
+            started_at=started_at,
+            duration_ms=duration_ms,
         )
         steps.append(outcome)
         return outcome
@@ -687,10 +707,22 @@ def run_graph(
         mode, node = action
         if mode == "skip":
             processed.add(node.id)
-            record(node, "skipped")
-            propagate_skip(node)
+            # A node whose only incoming edges were inactive was not selected; one
+            # behind a failure is skipped because its upstream failed.
+            reason = "upstream_failed" if failed_in[node.id] else "not_selected"
+            record(node, "skipped", skip_reason=reason)
+            propagate_skip(node, failed=reason == "upstream_failed")
             continue
         processed.add(node.id)
+        started = time.monotonic()
+        started_epoch = time.time()
+
+        # Bound as defaults: the closure must carry this iteration's clock.
+        def elapsed(
+            started_epoch: float = started_epoch, started: float = started
+        ) -> tuple[float, int]:
+            return started_epoch, int((time.monotonic() - started) * 1000)
+
         executed += 1
         if executed > graph.max_steps:
             failure = StepOutcome(
@@ -706,13 +738,17 @@ def run_graph(
         if node.type in {"transform", "condition"}:
             expression = node.expression
             if expression is None:
-                failure = record(
-                    node,
-                    "failed",
-                    error_code=ErrorCode.WORKBUDDY_VALIDATION_FAILED.value,
-                    error_message=f"{node.type} node '{node.id}' has no CEL expression",
+                node_failures.append(
+                    record(
+                        node,
+                        "failed",
+                        error_code=ErrorCode.WORKBUDDY_VALIDATION_FAILED.value,
+                        error_message=f"{node.type} node '{node.id}' has no CEL expression",
+                        timing=elapsed(),
+                    )
                 )
-                break
+                propagate_skip(node, failed=True)
+                continue
             try:
                 rendered = (
                     render_template(
@@ -727,39 +763,55 @@ def run_graph(
                     node,
                 )
             except OctopError as exc:
-                failure = record(
-                    node, "failed", error_code=exc.code.value, error_message=exc.message
-                )
-                break
-            if node.type == "condition":
-                if not isinstance(value, bool):
-                    failure = record(
+                node_failures.append(
+                    record(
                         node,
                         "failed",
-                        error_code=ErrorCode.WORKBUDDY_VALIDATION_FAILED.value,
-                        error_message=(
-                            f"condition node '{node.id}' did not evaluate to a boolean"
-                        ),
+                        error_code=exc.code.value,
+                        error_message=exc.message,
+                        timing=elapsed(),
                     )
-                    break
+                )
+                propagate_skip(node, failed=True)
+                continue
+            if node.type == "condition":
+                if not isinstance(value, bool):
+                    node_failures.append(
+                        record(
+                            node,
+                            "failed",
+                            error_code=ErrorCode.WORKBUDDY_VALIDATION_FAILED.value,
+                            error_message=(
+                                f"condition node '{node.id}' did not evaluate to a boolean"
+                            ),
+                            timing=elapsed(),
+                        )
+                    )
+                    # A condition that cannot choose marks both edges failed.
+                    propagate_skip(node, failed=True)
+                    continue
                 branch = "true" if value else "false"
                 selected = [edge for edge in graph.outgoing(node.id) if edge.when == branch]
                 if len(selected) != 1:
-                    failure = record(
-                        node,
-                        "failed",
-                        error_code=ErrorCode.WORKBUDDY_VALIDATION_FAILED.value,
-                        error_message=(
-                            f"condition node '{node.id}' has no unique '{branch}' branch"
-                        ),
+                    node_failures.append(
+                        record(
+                            node,
+                            "failed",
+                            error_code=ErrorCode.WORKBUDDY_VALIDATION_FAILED.value,
+                            error_message=(
+                                f"condition node '{node.id}' has no unique '{branch}' branch"
+                            ),
+                            timing=elapsed(),
+                        )
                     )
-                    break
+                    propagate_skip(node, failed=True)
+                    continue
                 store(node, {"branch": branch})
-                record(node, "success", output={"branch": branch})
+                record(node, "success", output={"branch": branch}, timing=elapsed())
                 propagate_branch(node, branch)
                 continue
             store(node, value)
-            record(node, "success", output=value)
+            record(node, "success", output=value, timing=elapsed())
             propagate_taken(node)
             continue
 
@@ -780,25 +832,30 @@ def run_graph(
                             error_message=(
                                 f"approval node '{node.id}' has no eligible approver"
                             ),
+                            timing=elapsed(),
                         )
                     )
-                    propagate_skip(node)
+                    propagate_skip(node, failed=True)
                     continue
                 if candidates:
                     approval_candidates[node.id] = candidates
                 waiting_node = node.id
-                record(node, "waiting_approval")
+                record(node, "waiting_approval", timing=elapsed())
                 break
             if decision == "rejected":
-                failure = record(
-                    node,
-                    "failed",
-                    error_code="WORKBUDDY_APPROVAL_REJECTED",
-                    error_message=f"approval node '{node.id}' was rejected",
+                node_failures.append(
+                    record(
+                        node,
+                        "failed",
+                        error_code="WORKBUDDY_APPROVAL_REJECTED",
+                        error_message=f"approval node '{node.id}' was rejected",
+                        timing=elapsed(),
+                    )
                 )
-                break
+                propagate_skip(node, failed=True)
+                continue
             store(node, {"decision": "approved"})
-            record(node, "success", output={"decision": "approved"})
+            record(node, "success", output={"decision": "approved"}, timing=elapsed())
             propagate_taken(node)
             continue
 
@@ -816,7 +873,7 @@ def run_graph(
                     replayed=True,
                 )
             )
-            propagate_skip(node)
+            propagate_skip(node, failed=True)
             continue
         try:
             activation = _activation(graph, node, inputs=inputs, bindings=bindings)
@@ -832,16 +889,23 @@ def run_graph(
             # The write may or may not have happened. Park the step: downstream
             # stays unrunnable until an operator reconciles the evidence, and the
             # tool is never called again for this attempt.
-            record(node, "waiting_reconciliation", output=outcome.facts())
+            record(node, "waiting_reconciliation", output=outcome.facts(), timing=elapsed())
             reconciliation_node = node.id
             break
         except OctopError as exc:
-            failure = record(
-                node, "failed", error_code=exc.code.value, error_message=exc.message
+            node_failures.append(
+                record(
+                    node,
+                    "failed",
+                    error_code=exc.code.value,
+                    error_message=exc.message,
+                    timing=elapsed(),
+                )
             )
-            break
+            propagate_skip(node, failed=True)
+            continue
         store(node, value)
-        record(node, "success", output=value)
+        record(node, "success", output=value, timing=elapsed())
         propagate_taken(node)
 
     if reconciliation_node is not None:
@@ -996,6 +1060,10 @@ class StepRunView:
     status: str
     save_as: str | None
     error_code: str | None
+    skip_reason: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_ms: int | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -1004,6 +1072,10 @@ class StepRunView:
             "attempt": self.attempt,
             "status": self.status,
             "save_as": self.save_as,
+            "skip_reason": self.skip_reason,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "duration_ms": self.duration_ms,
             "error_code": self.error_code,
         }
 
@@ -1306,7 +1378,7 @@ class WorkBuddyRuntimeService:
         require_postgres(self._db)
         if self._db.dialect != "postgresql":  # pragma: no cover - defensive
             raise OctopError(
-                ErrorCode.WORKBUDDY_POSTGRES_REQUIRED,
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
                 "WorkBuddy tenant workflows require PostgreSQL; SQLite fails closed",
             )
 
@@ -1325,12 +1397,12 @@ class WorkBuddyRuntimeService:
         status = self._repo.tenant_status(actor.tenant_id)
         if status is not None and status != "active":
             raise OctopError(
-                ErrorCode.WORKBUDDY_TENANT_SUSPENDED,
+                ErrorCode.TENANT_SUSPENDED,
                 "tenant is suspended: new starts are blocked",
             )
         if actor.suspended:
             raise OctopError(
-                ErrorCode.WORKBUDDY_TENANT_SUSPENDED,
+                ErrorCode.TENANT_SUSPENDED,
                 "tenant is suspended: new starts are blocked",
             )
 
@@ -1372,12 +1444,12 @@ class WorkBuddyRuntimeService:
         approvers, _timeout = approval_requirements(node)
         if not approvers:
             raise OctopError(
-                ErrorCode.WORKBUDDY_APPROVAL_NOT_CONFIGURED,
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
                 f"approval node '{node.id}' has no configured approvers",
             )
         if self._approver_resolver is None:
             raise OctopError(
-                ErrorCode.WORKBUDDY_APPROVAL_NOT_CONFIGURED,
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
                 "approver resolution is not configured for this deployment",
             )
         resolved = {
@@ -1436,7 +1508,7 @@ class WorkBuddyRuntimeService:
         )
         if used + reserved + amount > limit:
             raise OctopError(
-                ErrorCode.WORKBUDDY_QUOTA_EXCEEDED,
+                ErrorCode.QUOTA_EXCEEDED,
                 f"tenant quota '{quota_key}' would be exceeded",
             )
 
@@ -1476,7 +1548,9 @@ class WorkBuddyRuntimeService:
                 output=step.output,
                 error_code=step.error_code,
                 error_message=step.error_message,
-                duration_ms=0 if step.status == "waiting_approval" else None,
+                skip_reason=step.skip_reason,
+                started_at=step.started_at,
+                duration_ms=step.duration_ms,
                 conn=conn,
             )
         for edge in run.edges:
@@ -1523,7 +1597,7 @@ class WorkBuddyRuntimeService:
             return None
         if existing.idempotency_hash != request_hash:
             raise OctopError(
-                ErrorCode.WORKBUDDY_IDEMPOTENCY_CONFLICT,
+                ErrorCode.IDEMPOTENCY_CONFLICT,
                 "idempotency key was already used with a different request",
             )
         return existing
@@ -1991,6 +2065,10 @@ class WorkBuddyRuntimeService:
                 status=step.status,
                 save_as=step.save_as,
                 error_code=step.error_code,
+                skip_reason=step.skip_reason,
+                started_at=_iso(step.started_at),
+                finished_at=_iso(step.finished_at),
+                duration_ms=step.duration_ms,
             )
             for step in self._repo.list_step_runs(ctx, execution_id)
         ]
@@ -2015,7 +2093,7 @@ class WorkBuddyRuntimeService:
             # once the evidence is reconciled.
             if not self._repo.request_cancel_deferred(ctx, execution_id):
                 raise OctopError(
-                    ErrorCode.WORKBUDDY_EXECUTION_NOT_CANCELLABLE,
+                    ErrorCode.STATE_CONFLICT,
                     "cancel was already requested for this execution",
                 )
             self._audit(
@@ -2030,7 +2108,7 @@ class WorkBuddyRuntimeService:
             return _execution_view(updated)
         if not self._repo.request_cancel(ctx, execution_id):
             raise OctopError(
-                ErrorCode.WORKBUDDY_EXECUTION_NOT_CANCELLABLE,
+                ErrorCode.STATE_CONFLICT,
                 "execution is already finished",
             )
         self._repo.invalidate_pending_approvals(ctx, execution_id)
@@ -2058,7 +2136,7 @@ class WorkBuddyRuntimeService:
         approval = self._load_approval(actor, approval_request_id)
         if approval.status != "pending":
             raise OctopError(
-                ErrorCode.WORKBUDDY_APPROVAL_INVALID,
+                ErrorCode.APPROVAL_ALREADY_DECIDED,
                 "approval request is no longer pending",
             )
         token = secrets.token_urlsafe(32)
@@ -2068,9 +2146,10 @@ class WorkBuddyRuntimeService:
         if not self._repo.issue_approval_challenge(
             ctx, approval_request_id, token_hash=token_hash, expires_at=expires_at
         ):
+            # The request moved between the read and the CAS.
             raise OctopError(
-                ErrorCode.WORKBUDDY_APPROVAL_INVALID,
-                "approval request is no longer pending",
+                ErrorCode.STATE_CONFLICT,
+                "approval request changed while the challenge was issued",
             )
         self._audit(
             actor,
@@ -2100,14 +2179,22 @@ class WorkBuddyRuntimeService:
             )
         if execution.status != "waiting_approval":
             raise OctopError(
-                ErrorCode.WORKBUDDY_EXECUTION_NOT_RESUMABLE,
+                ErrorCode.STATE_CONFLICT,
                 "execution is not waiting for an approval decision",
             )
         approval = self._load_approval(actor, approval_request_id)
-        if approval.execution_id != execution_id or approval.status != "pending":
+        if approval.execution_id != execution_id:
+            raise _not_found("approval request does not belong to this execution")
+        # The decision must belong to the very version the execution locked.
+        if approval.locked_workflow_version_id != execution.workflow_version_id:
             raise OctopError(
-                ErrorCode.WORKBUDDY_APPROVAL_INVALID,
-                "approval request does not match a pending decision for this execution",
+                ErrorCode.APPROVAL_VERSION_MISMATCH,
+                "approval request was bound to a different workflow version",
+            )
+        if approval.status != "pending":
+            raise OctopError(
+                ErrorCode.APPROVAL_ALREADY_DECIDED,
+                "approval request has already been decided",
             )
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         ctx = self._ctx(actor)
@@ -2115,7 +2202,7 @@ class WorkBuddyRuntimeService:
             ctx, approval_request_id, token_hash=token_hash
         ):
             raise OctopError(
-                ErrorCode.WORKBUDDY_APPROVAL_INVALID,
+                ErrorCode.APPROVAL_TOKEN_INVALID,
                 "approval token is invalid, expired, or already used",
             )
         if not self._repo.decide_candidate(
@@ -2124,7 +2211,10 @@ class WorkBuddyRuntimeService:
             user_id=actor.user_id,
             decision=decision,
         ):
-            raise _not_found()
+            raise OctopError(
+                ErrorCode.FORBIDDEN_NOT_APPROVER,
+                "this user is not a pending candidate for the approval",
+            )
         decided = self._repo.count_decided_approvals(ctx, approval_request_id)
         if decision == "rejected":
             self._repo.settle_approval_request(
@@ -2436,7 +2526,7 @@ class WorkBuddyRuntimeService:
             if existing is not None:
                 if existing.request_hash != request_hash:
                     raise OctopError(
-                        ErrorCode.WORKBUDDY_IDEMPOTENCY_CONFLICT,
+                        ErrorCode.IDEMPOTENCY_CONFLICT,
                         "idempotency key was already used with a different request",
                     )
                 return _job_view(existing)

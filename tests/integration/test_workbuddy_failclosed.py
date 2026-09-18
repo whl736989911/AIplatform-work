@@ -17,7 +17,7 @@ from tests.support.auth import bootstrap_admin
 
 pytestmark = pytest.mark.asyncio
 
-_POSTGRES_REQUIRED = ErrorCode.WORKBUDDY_POSTGRES_REQUIRED.value
+_POSTGRES_REQUIRED = ErrorCode.DEPENDENCY_UNAVAILABLE.value
 
 
 @pytest.fixture

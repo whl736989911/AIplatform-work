@@ -591,7 +591,7 @@ class FakeIdentityRepo:
                 )
             if int(limit) > int(rows[metric]["hard_cap"]):
                 raise FakeStoreError(
-                    ErrorCode.WORKBUDDY_QUOTA_EXCEEDED,
+                    ErrorCode.QUOTA_EXCEEDED,
                     f"limit for {metric} exceeds the platform hard cap",
                 )
             rows[metric]["limit"] = int(limit)
@@ -765,7 +765,7 @@ async def test_sqlite_control_plane_fails_closed(tmp_path: Path) -> None:
                 headers=BASE_HEADERS,
             )
         assert r.status_code == 503
-        assert r.json()["error"]["code"] == "WORKBUDDY_POSTGRES_REQUIRED"
+        assert r.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
     finally:
         await srv.stop()
 
@@ -984,7 +984,7 @@ async def test_forged_tenant_header_cannot_change_context(wb: Any) -> None:
         "/api/v1/tenant-context", headers={**_auth(token), "X-Tenant-Slug": "globex"}
     )
     assert forged.status_code == 403
-    assert forged.json()["error"]["code"] == "WORKBUDDY_TENANT_MISMATCH"
+    assert forged.json()["error"]["code"] == "FORBIDDEN_RESOURCE_ACTION"
     assert wb.globex["tenant_id"] not in forged.text
 
     # A header on its own never selects a tenant: no credentials, no context.
@@ -994,14 +994,14 @@ async def test_forged_tenant_header_cannot_change_context(wb: Any) -> None:
 
 async def test_membership_gates_deny_empty_and_suspended_members(wb: Any) -> None:
     r = await wb.client.get("/api/v1/tenant-context", headers=_auth(_token(wb.srv, wb.stranger)))
-    assert (r.status_code, r.json()["error"]["code"]) == (403, "WORKBUDDY_MEMBERSHIP_REQUIRED")
+    assert (r.status_code, r.json()["error"]["code"]) == (403, "FORBIDDEN_ROLE")
 
     r = await wb.client.get("/api/v1/tenant-context", headers=_auth(_token(wb.srv, wb.suspended)))
     assert (r.status_code, r.json()["error"]["code"]) == (403, "WORKBUDDY_MEMBER_DISABLED")
 
     wb.acme["status"] = "suspended"
     r = await wb.client.get("/api/v1/users", headers=_auth(_owner_token(wb)))
-    assert (r.status_code, r.json()["error"]["code"]) == (403, "WORKBUDDY_TENANT_SUSPENDED")
+    assert (r.status_code, r.json()["error"]["code"]) == (403, "TENANT_SUSPENDED")
 
 
 async def test_octop_admin_is_not_tenant_admin(wb: Any) -> None:
@@ -1039,7 +1039,7 @@ async def test_platform_routes_require_platform_audience(wb: Any) -> None:
     r = await wb.client.post("/api/v1/tenants", json=create_body, headers=owner_headers)
     assert (r.status_code, r.json()["error"]["code"]) == (
         403,
-        "WORKBUDDY_PLATFORM_AUDIENCE_REQUIRED",
+        "FORBIDDEN_ROLE",
     )
     for method, path in (
         ("POST", f"/api/v1/tenants/{wb.acme['tenant_id']}/suspend"),
@@ -1048,7 +1048,7 @@ async def test_platform_routes_require_platform_audience(wb: Any) -> None:
         r = await wb.client.request(method, path, headers=owner_headers)
         assert (r.status_code, r.json()["error"]["code"]) == (
             403,
-            "WORKBUDDY_PLATFORM_AUDIENCE_REQUIRED",
+            "FORBIDDEN_ROLE",
         ), path
     # Even an Octop platform admin needs the explicit audience.
     r = await wb.client.post(
@@ -1057,7 +1057,7 @@ async def test_platform_routes_require_platform_audience(wb: Any) -> None:
     )
     assert (r.status_code, r.json()["error"]["code"]) == (
         403,
-        "WORKBUDDY_PLATFORM_AUDIENCE_REQUIRED",
+        "FORBIDDEN_ROLE",
     )
 
 
@@ -1184,7 +1184,7 @@ async def test_scoped_misses_return_404(wb: Any) -> None:
     for method, path, body in cases:
         r = await wb.client.request(method, path, json=body, headers=headers)
         assert r.status_code == 404, path
-        assert r.json()["error"]["code"] == "NOT_FOUND"
+        assert r.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
 
 
 async def test_tenant_summary_is_member_safe_and_scoped(wb: Any) -> None:
@@ -1306,8 +1306,8 @@ async def test_quota_updates_enforce_platform_hard_caps(wb: Any) -> None:
     over = await wb.client.put(
         "/api/v1/tenant-quotas", json={"quotas": {"users": 101}}, headers=headers
     )
-    assert over.status_code == 409
-    assert over.json()["error"]["code"] == "WORKBUDDY_QUOTA_EXCEEDED"
+    assert over.status_code == 429
+    assert over.json()["error"]["code"] == "QUOTA_EXCEEDED"
     assert "set_quotas" not in wb.repo.calls
     assert wb.repo.quotas_for(wb.acme["tenant_id"])["users"] == 25
 

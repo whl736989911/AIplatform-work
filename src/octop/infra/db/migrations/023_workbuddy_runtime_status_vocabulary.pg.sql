@@ -30,6 +30,15 @@ ALTER TABLE workbuddy_step_runs ADD CONSTRAINT workbuddy_step_runs_status_check
   CHECK (status IN ('queued', 'running', 'waiting_approval', 'waiting_reconciliation',
                     'success', 'failed', 'skipped', 'canceled'));
 
+-- A skipped step says why: it was not selected, or its upstream failed.
+ALTER TABLE workbuddy_step_runs ADD COLUMN skip_reason text;
+ALTER TABLE workbuddy_step_runs
+  ADD CONSTRAINT workbuddy_step_runs_skip_reason_check
+    CHECK (
+      skip_reason IS NULL
+      OR (skip_reason IN ('not_selected', 'upstream_failed') AND status = 'skipped')
+    );
+
 -- The partial index over open executions has to name the new queued state.
 DROP INDEX IF EXISTS idx_wb_executions_open;
 CREATE INDEX idx_wb_executions_open ON workbuddy_executions (tenant_id, status)

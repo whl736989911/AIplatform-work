@@ -273,6 +273,23 @@ def schema_path() -> Path | None:
     return None
 
 
+def _reject_non_local_references(node: Any, *, path: str) -> None:
+    """Every ``$ref`` in a tenant-supplied schema must stay inside that schema."""
+    if isinstance(node, Mapping):
+        reference = node.get("$ref")
+        if isinstance(reference, str) and not reference.startswith("#"):
+            raise WorkflowCompileError(
+                WORKFLOW_SCHEMA_INVALID,
+                f"output_schema may not reference {reference!r}; only local references are allowed",
+                path=path,
+            )
+        for value in node.values():
+            _reject_non_local_references(value, path=path)
+    elif isinstance(node, list):
+        for value in node:
+            _reject_non_local_references(value, path=path)
+
+
 def _assert_local_references(node: Any, *, pointer: str = "#") -> None:
     """Reject every non-local ``$ref``: schemas are resolved locally only."""
     if isinstance(node, Mapping):
@@ -573,6 +590,33 @@ class _Compiler:
 
     # -- graph ------------------------------------------------------------- #
 
+
+    @staticmethod
+    def _check_embedded_schema(schema: Any, *, path: str) -> None:
+        """Validate a node's embedded Draft 7 result schema.
+
+        The contract requires a metaschema check at save time and forbids
+        network ``$ref``, file access, and unbounded reference expansion, so the
+        schema must be self-contained: every reference stays local to it, which
+        also bounds expansion by the document itself.
+        """
+        if schema is None or isinstance(schema, bool):
+            return
+        if not isinstance(schema, Mapping):
+            raise WorkflowCompileError(
+                WORKFLOW_SCHEMA_INVALID, "output_schema must be a schema object or boolean",
+                path=path,
+            )
+        _reject_non_local_references(schema, path=path)
+        try:
+            Draft7Validator.check_schema(schema)
+        except SchemaError as exc:
+            raise WorkflowCompileError(
+                WORKFLOW_SCHEMA_INVALID,
+                f"output_schema is not a valid Draft 7 schema: {exc.message}",
+                path=path,
+            ) from exc
+
     def check_node_identity(self) -> None:
         seen: dict[str, str] = {}
         for node in self.nodes:
@@ -820,6 +864,10 @@ class _Compiler:
                 expression = str(config.get("expression") or "")
                 expression_path = f"nodes.{node_id}.config.expression"
                 self.cel_evidence[expression_path] = _probe_cel(expression, path=expression_path)
+                self._check_embedded_schema(
+                    config.get("output_schema"),
+                    path=f"nodes.{node_id}.config.output_schema",
+                )
                 for kind, name in iter_cel_references(expression):
                     self._check_reference(
                         kind, name, node_id=node_id, path=expression_path, scope="cel"

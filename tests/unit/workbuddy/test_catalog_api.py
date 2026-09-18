@@ -632,7 +632,7 @@ def test_grant_to_an_unknown_or_foreign_member_is_404(server: Any, repo: _FakeCa
                 server=server,
             )
         )
-    assert caught.value.code == ErrorCode.NOT_FOUND
+    assert caught.value.code == ErrorCode.RESOURCE_NOT_FOUND
     assert repo.grants == []
 
 
@@ -670,7 +670,7 @@ def test_declared_external_secret_backend_fails_closed_without_persisting(
     monkeypatch.setenv(catalog._SECRET_BACKEND_ENV, "vault")
     with pytest.raises(OctopError) as caught:
         _create_credential(server)
-    assert caught.value.code == ErrorCode.WORKBUDDY_SECRET_BACKEND_UNAVAILABLE
+    assert caught.value.code == ErrorCode.DEPENDENCY_UNAVAILABLE
     assert caught.value.status == 503
     assert secret_store.values == {}
     assert [call for call, _, _ in repo.calls if call == "create_credential"] == []
@@ -682,7 +682,7 @@ def test_vault_address_alone_fails_closed(
     monkeypatch.setenv(catalog._VAULT_ADDR_ENV, "https://vault.internal")
     with pytest.raises(OctopError) as caught:
         _create_credential(server)
-    assert caught.value.code == ErrorCode.WORKBUDDY_SECRET_BACKEND_UNAVAILABLE
+    assert caught.value.code == ErrorCode.DEPENDENCY_UNAVAILABLE
     assert [call for call, _, _ in repo.calls if call == "create_credential"] == []
 
 
@@ -691,7 +691,7 @@ def test_missing_local_secret_store_fails_closed(repo: _FakeCatalogRepo) -> None
     server.services.secret_repo = None
     with pytest.raises(OctopError) as caught:
         _create_credential(server)
-    assert caught.value.code == ErrorCode.WORKBUDDY_SECRET_BACKEND_UNAVAILABLE
+    assert caught.value.code == ErrorCode.DEPENDENCY_UNAVAILABLE
     assert [call for call, _, _ in repo.calls if call == "create_credential"] == []
 
 
@@ -703,7 +703,7 @@ def test_sqlite_control_plane_fails_closed(server: _FakeServer) -> None:
                 request=_request(), principal=_principal(), server=server
             )
         )
-    assert caught.value.code == ErrorCode.WORKBUDDY_POSTGRES_REQUIRED
+    assert caught.value.code == ErrorCode.DEPENDENCY_UNAVAILABLE
     assert caught.value.status == 503
 
 
@@ -759,7 +759,7 @@ def test_foreign_and_malformed_credentials_are_404(server: Any, repo: _FakeCatal
     ):
         with pytest.raises(OctopError) as caught:
             _run(call())
-        assert caught.value.code == ErrorCode.NOT_FOUND
+        assert caught.value.code == ErrorCode.RESOURCE_NOT_FOUND
         assert caught.value.status == 404
 
 
@@ -788,7 +788,7 @@ def test_tenant_admin_revokes_but_does_not_rotate_someone_elses_credential(
                 server=server,
             )
         )
-    assert caught.value.code == ErrorCode.NOT_FOUND
+    assert caught.value.code == ErrorCode.RESOURCE_NOT_FOUND
 
 
 def test_cross_tenant_credential_is_not_visible(
@@ -820,7 +820,7 @@ def test_platform_routes_reject_a_tenant_token_without_audience(
     token = _jwt(audience=None)
     response = _run(_platform_request("/platform/tools", token=token))
     assert response.status_code == 403
-    assert response.json()["error"]["code"] == "WORKBUDDY_PLATFORM_AUDIENCE_REQUIRED"
+    assert response.json()["error"]["code"] == "FORBIDDEN_ROLE"
 
 
 def test_platform_publish_succeeds_with_explicit_platform_audience(
@@ -921,7 +921,7 @@ def test_capability_update_replaces_allowances_and_refuses_unapproved(
     assert kwargs["actor_member_id"] == OWNER_MEMBER
 
     repo.capability_failure = WorkBuddyRevisionRevoked(
-        code="WORKBUDDY_CAPABILITY_NOT_APPROVED", message="revision is not approved"
+        code="FORBIDDEN_ROLE", message="revision is not approved"
     )
     with pytest.raises(OctopError) as caught:
         _run(
@@ -932,7 +932,7 @@ def test_capability_update_replaces_allowances_and_refuses_unapproved(
                 server=server,
             )
         )
-    assert caught.value.code == ErrorCode.WORKBUDDY_CAPABILITY_NOT_APPROVED
+    assert caught.value.code == ErrorCode.FORBIDDEN_ROLE
     assert caught.value.status == 403
 
     repo.capability_failure = WorkBuddyCasConflict(
@@ -961,7 +961,7 @@ def test_capability_default_must_be_an_approved_model(server: Any, repo: _FakeCa
                 server=server,
             )
         )
-    assert caught.value.code == ErrorCode.WORKBUDDY_CAPABILITY_NOT_APPROVED
+    assert caught.value.code == ErrorCode.FORBIDDEN_ROLE
     assert [call for call, _, _ in repo.calls if call == "update_capabilities"] == []
 
 

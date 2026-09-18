@@ -79,21 +79,21 @@ class WorkflowNotFound(WorkBuddyWorkflowError):
     """The workflow is absent, or invisible to this tenant (never 403)."""
 
     def __init__(self, message: str = "workflow not found") -> None:
-        super().__init__(ErrorCode.NOT_FOUND.value, message)
+        super().__init__(ErrorCode.RESOURCE_NOT_FOUND.value, message)
 
 
 class WorkflowVersionNotFound(WorkBuddyWorkflowError):
     """The version is absent, or belongs to another workflow or tenant."""
 
     def __init__(self, message: str = "workflow version not found") -> None:
-        super().__init__(ErrorCode.WORKBUDDY_WORKFLOW_VERSION_NOT_FOUND.value, message)
+        super().__init__(ErrorCode.RESOURCE_NOT_FOUND.value, message)
 
 
 class RevisionConflict(WorkBuddyWorkflowError):
     """A compare-and-swap on ``workbuddy_workflows.revision`` lost."""
 
     def __init__(self, message: str = "workflow revision conflict") -> None:
-        super().__init__(ErrorCode.WORKBUDDY_WORKFLOW_REVISION_CONFLICT.value, message)
+        super().__init__(ErrorCode.WF_VERSION_CONFLICT.value, message)
 
 
 class VersionNotActivatable(WorkBuddyWorkflowError):
@@ -107,14 +107,14 @@ class WorkflowInvalid(WorkBuddyWorkflowError):
     """The request cannot produce a valid immutable version."""
 
     def __init__(self, message: str = "workflow definition is invalid") -> None:
-        super().__init__(ErrorCode.WORKBUDDY_WORKFLOW_INVALID.value, message)
+        super().__init__(ErrorCode.WF_INVALID_SCHEMA.value, message)
 
 
 class DependencyUnavailable(WorkBuddyWorkflowError):
     """A required dependency (table, resolver) could not be proven."""
 
     def __init__(self, message: str = "workflow dependency is unavailable") -> None:
-        super().__init__(ErrorCode.WORKBUDDY_DEPENDENCY_UNAVAILABLE.value, message)
+        super().__init__(ErrorCode.DEPENDENCY_UNAVAILABLE.value, message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -867,7 +867,7 @@ class PostgresWorkflowSemanticResolver:
             )
             if row is None:
                 return SemanticDecision.refused(
-                    ErrorCode.WORKBUDDY_MODEL_NOT_CONFIGURED.value,
+                    ErrorCode.MODEL_NOT_CONFIGURED.value,
                     "no default model is configured for this tenant",
                 )
             return SemanticDecision.allowed()
@@ -879,7 +879,7 @@ class PostgresWorkflowSemanticResolver:
         )
         if row is None:
             return SemanticDecision.refused(
-                ErrorCode.WORKBUDDY_MODEL_NOT_CONFIGURED.value,
+                ErrorCode.MODEL_NOT_CONFIGURED.value,
                 f"model {model!r} is not approved for this tenant",
             )
         return SemanticDecision.allowed()

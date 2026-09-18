@@ -180,6 +180,7 @@ class StepRunRow:
     execution_id: str
     node_id: str
     node_type: str
+    skip_reason: str | None
     attempt: int
     status: str
     save_as: str | None
@@ -187,6 +188,7 @@ class StepRunRow:
     error_code: str | None
     error_message: str | None
     fence: int
+    duration_ms: int | None
     started_at: Any
     finished_at: Any
 
@@ -197,6 +199,7 @@ class StepRunRow:
             execution_id=str(row["execution_id"]),
             node_id=str(row["node_id"]),
             node_type=str(row["node_type"]),
+            skip_reason=row["skip_reason"],
             attempt=int(row["attempt"]),
             status=str(row["status"]),
             save_as=row["save_as"],
@@ -204,6 +207,7 @@ class StepRunRow:
             error_code=row["error_code"],
             error_message=row["error_message"],
             fence=int(row["fence"]),
+            duration_ms=row["duration_ms"],
             started_at=row["started_at"],
             finished_at=row["finished_at"],
         )
@@ -871,19 +875,25 @@ class WorkBuddyRuntimeRepo:
         error_code: str | None = None,
         error_message: str | None = None,
         duration_ms: int | None = None,
+        skip_reason: str | None = None,
+        started_at: float | None = None,
         step_run_id: str | None = None,
         conn: Any | None = None,
     ) -> str:
         rid = step_run_id or new_runtime_id()
         finished_at = "now()" if status in {"success", "failed", "skipped"} else "NULL"
+        # ``started_at`` is the wall clock the engine measured before the node ran,
+        # so a step's window is its own and not the moment the run was persisted.
+        started = "to_timestamp(?)" if started_at is not None else "now()"
+        started_param: tuple[Any, ...] = (float(started_at),) if started_at is not None else ()
         with runtime_transaction(self._db, ctx, conn) as c:
             c.execute(
                 f"""
                 INSERT INTO workbuddy_step_runs(
                     id, tenant_id, execution_id, node_id, node_type, attempt, status, save_as,
                     input_sha256, output_sha256, output, error_code, error_message,
-                    fence, duration_ms, finished_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {finished_at})
+                    fence, duration_ms, skip_reason, started_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {started}, {finished_at})
                 """,
                 (
                     rid,
@@ -901,6 +911,8 @@ class WorkBuddyRuntimeRepo:
                     error_message,
                     fence,
                     duration_ms,
+                    skip_reason,
+                    *started_param,
                 ),
             )
         return rid

@@ -202,7 +202,7 @@ async def test_hello_workflow_roundtrip_and_version_cas(
             json={"definition": hello_definition(), "base_version_id": first_version},
         )
         assert missing.status_code == 428
-        assert missing.json()["error"]["code"] == ErrorCode.WORKBUDDY_PRECONDITION_REQUIRED.value
+        assert missing.json()["error"]["code"] == ErrorCode.PRECONDITION_REQUIRED.value
 
         stale = await client.put(
             f"/workflows/{workflow_id}",
@@ -210,7 +210,7 @@ async def test_hello_workflow_roundtrip_and_version_cas(
             json={"definition": hello_definition(), "base_version_id": first_version},
         )
         assert stale.status_code == 409
-        assert stale.json()["error"]["code"] == ErrorCode.WORKBUDDY_WORKFLOW_REVISION_CONFLICT.value
+        assert stale.json()["error"]["code"] == ErrorCode.WF_VERSION_CONFLICT.value
 
         saved = await client.put(
             f"/workflows/{workflow_id}",
@@ -414,7 +414,7 @@ async def test_invalid_definition_is_rejected_before_persistence(
             "/workflow-definitions/validate", json={"definition": cyclic_definition()}
         )
         assert validate.status_code == 422
-        assert validate.json()["error"]["code"] == ErrorCode.WORKBUDDY_WORKFLOW_INVALID.value
+        assert validate.json()["error"]["code"] == ErrorCode.WF_INVALID_SCHEMA.value
 
         before = await client.get("/workflows")
         created = await client.post(

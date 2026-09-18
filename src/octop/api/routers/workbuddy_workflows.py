@@ -8,8 +8,8 @@ PostgreSQL transaction so a failed save can never leave a partial version.
 
 Concurrency is an explicit HTTP contract: ``PUT``/``activate``/``rollback``
 require an ``If-Match`` header carrying the workflow's ETag.  A missing header
-is 428 (:data:`ErrorCode.WORKBUDDY_PRECONDITION_REQUIRED`); a stale one is 409
-(:data:`ErrorCode.WORKBUDDY_WORKFLOW_REVISION_CONFLICT`) and nothing is written.
+is 428 (:data:`ErrorCode.PRECONDITION_REQUIRED`); a stale one is 409
+(:data:`ErrorCode.WF_VERSION_CONFLICT`) and nothing is written.
 
 Ordinary members only ever receive published minimal projections (identity,
 status and the published input specification); full definitions, version
@@ -115,7 +115,7 @@ def _public_id(value: str, detail: str) -> str:
     try:
         return str(uuid.UUID(str(value)))
     except (AttributeError, TypeError, ValueError) as exc:
-        raise OctopError(ErrorCode.NOT_FOUND, detail) from exc
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, detail) from exc
 
 
 def _repo(server: Any) -> WorkBuddyWorkflowRepo:
@@ -135,18 +135,18 @@ def _refusal(exc: Exception) -> OctopError:
     code = str(getattr(exc, "code", "") or "")
     message = str(getattr(exc, "message", "") or exc)
     if isinstance(exc, WorkBuddyPostgresRequiredError):
-        return OctopError(ErrorCode.WORKBUDDY_POSTGRES_REQUIRED, message)
+        return OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, message)
     if isinstance(exc, WorkBuddyContextError):
-        return OctopError(ErrorCode.WORKBUDDY_WORKFLOW_INVALID, message)
+        return OctopError(ErrorCode.WF_INVALID_SCHEMA, message)
     if isinstance(exc, (WorkBuddyWorkflowError, WorkflowCompileError)):
         try:
             return OctopError(ErrorCode(code), message)
         except ValueError:
-            return OctopError(ErrorCode.WORKBUDDY_WORKFLOW_INVALID, message)
+            return OctopError(ErrorCode.WF_INVALID_SCHEMA, message)
     # Anything unexpected still fails closed, but it must not disappear: an
     # opaque 503 once hid a jsonb binding error from every test.
     logger.exception("unhandled workflow store failure", exc_info=exc)
-    return OctopError(ErrorCode.WORKBUDDY_DEPENDENCY_UNAVAILABLE, _STORE_UNAVAILABLE)
+    return OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _STORE_UNAVAILABLE)
 
 
 def _etag(record: WorkflowRecord) -> str:
@@ -157,10 +157,10 @@ def _etag(record: WorkflowRecord) -> str:
 def _require_if_match(request: Request, record: WorkflowRecord) -> None:
     header = (request.headers.get("if-match") or "").strip()
     if not header:
-        raise OctopError(ErrorCode.WORKBUDDY_PRECONDITION_REQUIRED, _IF_MATCH_REQUIRED)
+        raise OctopError(ErrorCode.PRECONDITION_REQUIRED, _IF_MATCH_REQUIRED)
     candidates = {candidate.strip() for candidate in header.split(",")}
     if _etag(record) not in candidates:
-        raise OctopError(ErrorCode.WORKBUDDY_WORKFLOW_REVISION_CONFLICT, _IF_MATCH_STALE)
+        raise OctopError(ErrorCode.WF_VERSION_CONFLICT, _IF_MATCH_STALE)
 
 
 def _is_owner(record: WorkflowRecord, principal: WorkBuddyPrincipal) -> bool:
@@ -177,7 +177,7 @@ def _load_workflow(
         principal.tenant_id, _public_id(workflow_id, _WORKFLOW_NOT_FOUND), conn=conn
     )
     if record is None:
-        raise OctopError(ErrorCode.NOT_FOUND, _WORKFLOW_NOT_FOUND)
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, _WORKFLOW_NOT_FOUND)
     return record
 
 
@@ -187,7 +187,7 @@ def _load_managed_workflow(
     """Creator or tenant admin only; everyone else sees a uniform 404."""
     record = _load_workflow(repo, principal, workflow_id, conn=conn)
     if not principal.is_admin and not _is_owner(record, principal):
-        raise OctopError(ErrorCode.NOT_FOUND, _WORKFLOW_NOT_FOUND)
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, _WORKFLOW_NOT_FOUND)
     return record
 
 
@@ -412,7 +412,7 @@ async def get_workflow(
     response.headers["ETag"] = _etag(record)
     if not managed:
         if record.status != "active" or record.active_version_id is None:
-            raise OctopError(ErrorCode.NOT_FOUND, _WORKFLOW_NOT_FOUND)
+            raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, _WORKFLOW_NOT_FOUND)
         return workbuddy_envelope(request, _member_detail(record, active))
     payload = {
         **_admin_payload(record),
@@ -618,7 +618,7 @@ async def get_workflow_version(
             _public_id(version_id, _VERSION_NOT_FOUND),
         )
         if version is None:
-            raise OctopError(ErrorCode.WORKBUDDY_WORKFLOW_VERSION_NOT_FOUND, _VERSION_NOT_FOUND)
+            raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, _VERSION_NOT_FOUND)
     except OctopError:
         raise
     except Exception as exc:  # noqa: BLE001

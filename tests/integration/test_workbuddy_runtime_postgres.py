@@ -299,6 +299,8 @@ async def test_condition_branches_and_joins_once(
             )
             assert steps[taken]["status"] == "success", steps
             assert steps[untaken]["status"] == "skipped", steps
+            # A branch nobody selected was not chosen, not blocked.
+            assert steps[untaken]["skip_reason"] == "not_selected", steps
             # The join merges both branches and must run once, not twice.
             assert [s for s in data["steps"] if s["node_id"] == "join"].__len__() == 1, steps
 
@@ -335,7 +337,7 @@ async def test_idempotency_key_replays_and_conflicts(
             json={"inputs": {"who": "twice"}},
         )
         assert conflict.status_code == 409, conflict.text
-        assert conflict.json()["error"]["code"] == ErrorCode.WORKBUDDY_IDEMPOTENCY_CONFLICT.value
+        assert conflict.json()["error"]["code"] == ErrorCode.IDEMPOTENCY_CONFLICT.value
 
 
 async def test_terminal_execution_cannot_be_cancelled(
@@ -353,7 +355,7 @@ async def test_terminal_execution_cannot_be_cancelled(
         assert cancelled.status_code == 409, cancelled.text
         assert (
             cancelled.json()["error"]["code"]
-            == ErrorCode.WORKBUDDY_EXECUTION_NOT_CANCELLABLE.value
+            == ErrorCode.STATE_CONFLICT.value
         )
 
 
@@ -374,7 +376,7 @@ async def test_suspended_tenant_cannot_start_new_executions(
             )
         assert refused.status_code == 403, refused.text
         assert refused.json()["error"]["code"] in {
-            ErrorCode.WORKBUDDY_TENANT_SUSPENDED.value,
+            ErrorCode.TENANT_SUSPENDED.value,
             ErrorCode.TENANT_SUSPENDED.value,
         }
     finally:
@@ -416,6 +418,9 @@ async def test_approval_round_trip_and_single_consumption(
 
         settled = await client.get(f"/executions/{execution_id}")
         assert settled.json()["data"]["status"] in {"success", "running"}, settled.text
+        step = settled.json()["data"]["steps"][0]
+        assert step["duration_ms"] is not None, step
+        assert step["started_at"] and step["finished_at"], step
 
         replay = await client.post(
             f"/executions/{execution_id}/resume",
@@ -742,6 +747,7 @@ async def test_confirmed_failure_terminates_without_retrying(
     steps = {step["node_id"]: step for step in settled["steps"]}
     assert steps["submit"]["status"] == "failed", steps
     assert steps["after"]["status"] == "skipped", steps
+    assert steps["after"]["skip_reason"] == "upstream_failed", steps
     assert len(lost_response.calls) == 1, lost_response.calls
 
 
