@@ -172,7 +172,7 @@ class WorkBuddyLifecycleRepo:
                 int(expected_version),
             ),
         )
-        return cursor.rowcount == 1
+        return int(cursor.rowcount) == 1
 
     def update_export_job_failed(
         self,
@@ -191,9 +191,11 @@ class WorkBuddyLifecycleRepo:
             """,
             (failure_reason, int(updated_at), str(export_job_id), str(tenant_id)),
         )
-        return cursor.rowcount == 1
+        return int(cursor.rowcount) == 1
 
-    def get_export_job(self, conn: Any, *, tenant_id: str, export_job_id: str) -> dict[str, Any] | None:
+    def get_export_job(
+        self, conn: Any, *, tenant_id: str, export_job_id: str
+    ) -> dict[str, Any] | None:
         return _row_dict(
             conn.execute(
                 "SELECT * FROM workbuddy_export_jobs WHERE export_job_id = ? AND tenant_id = ?",
@@ -201,7 +203,9 @@ class WorkBuddyLifecycleRepo:
             ).fetchone()
         )
 
-    def list_export_jobs(self, conn: Any, *, tenant_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    def list_export_jobs(
+        self, conn: Any, *, tenant_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
         return _rows(
             conn.execute(
                 """
@@ -241,7 +245,9 @@ class WorkBuddyLifecycleRepo:
             ),
         )
 
-    def list_export_artifacts(self, conn: Any, *, tenant_id: str, export_job_id: str) -> list[dict[str, Any]]:
+    def list_export_artifacts(
+        self, conn: Any, *, tenant_id: str, export_job_id: str
+    ) -> list[dict[str, Any]]:
         return _rows(
             conn.execute(
                 """
@@ -253,7 +259,9 @@ class WorkBuddyLifecycleRepo:
             ).fetchall()
         )
 
-    def fetch_tenant_rows(self, conn: Any, *, table: str, columns: Sequence[str], limit: int) -> list[dict[str, Any]]:
+    def fetch_tenant_rows(
+        self, conn: Any, *, table: str, columns: Sequence[str], limit: int
+    ) -> list[dict[str, Any]]:
         """Read one tenant table (RLS restricts the rows) with a hard row ceiling."""
         if not columns:
             return []
@@ -265,7 +273,9 @@ class WorkBuddyLifecycleRepo:
             ).fetchall()
         )
 
-    def expire_export_jobs(self, conn: Any, *, now: int, tenant_id: str | None = None) -> list[dict[str, Any]]:
+    def expire_export_jobs(
+        self, conn: Any, *, now: int, tenant_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Drop payloads past their redeem window, keep the manifest as evidence."""
         where = "redeem_expires_at <= ? AND status IN ('ready', 'redeemed')"
         params: list[Any] = [int(now)]
@@ -274,7 +284,8 @@ class WorkBuddyLifecycleRepo:
             params.append(str(tenant_id))
         jobs = _rows(
             conn.execute(
-                f"SELECT export_job_id, tenant_id FROM workbuddy_export_jobs WHERE {where}", tuple(params)
+                f"SELECT export_job_id, tenant_id FROM workbuddy_export_jobs WHERE {where}",
+                tuple(params),
             ).fetchall()
         )
         for job in jobs:
@@ -349,7 +360,9 @@ class WorkBuddyLifecycleRepo:
         )
         return int(cursor.rowcount)
 
-    def get_redeem_token(self, conn: Any, *, tenant_id: str, token_sha256: str) -> dict[str, Any] | None:
+    def get_redeem_token(
+        self, conn: Any, *, tenant_id: str, token_sha256: str
+    ) -> dict[str, Any] | None:
         return _row_dict(
             conn.execute(
                 """
@@ -379,10 +392,16 @@ class WorkBuddyLifecycleRepo:
             """,
             (int(consumed_at), consumed_by, str(tenant_id), token_sha256, int(consumed_at)),
         )
-        return cursor.rowcount == 1
+        return int(cursor.rowcount) == 1
 
     def mark_export_redeemed(
-        self, conn: Any, *, tenant_id: str, export_job_id: str, redeemed_by: int | None, redeemed_at: int
+        self,
+        conn: Any,
+        *,
+        tenant_id: str,
+        export_job_id: str,
+        redeemed_by: int | None,
+        redeemed_at: int,
     ) -> bool:
         cursor = conn.execute(
             """
@@ -393,7 +412,7 @@ class WorkBuddyLifecycleRepo:
             """,
             (int(redeemed_at), redeemed_by, int(redeemed_at), str(tenant_id), str(export_job_id)),
         )
-        return cursor.rowcount == 1
+        return int(cursor.rowcount) == 1
 
     # ── deletion requests ───────────────────────────────────────────────
 
@@ -415,7 +434,8 @@ class WorkBuddyLifecycleRepo:
                policy_sha256, policy_expires_at, updated_at)
             VALUES (?, 'cooling_off', ?, ?, ?, ?, ?, ?)
             RETURNING deletion_request_id, tenant_id, stage, version, requested_at,
-                      cooling_off_ends_at, purge_due_at, purged_at
+                      cooling_off_ends_at, policy_sha256, policy_expires_at,
+                      purge_due_at, purged_at
             """,
             (
                 str(tenant_id),
@@ -457,7 +477,9 @@ class WorkBuddyLifecycleRepo:
             ).fetchone()
         )
 
-    def list_deletion_requests(self, conn: Any, *, tenant_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    def list_deletion_requests(
+        self, conn: Any, *, tenant_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
         return _rows(
             conn.execute(
                 """
@@ -497,7 +519,7 @@ class WorkBuddyLifecycleRepo:
                 int(cancelled_at),
             ),
         )
-        return cursor.rowcount == 1
+        return int(cursor.rowcount) == 1
 
     def due_deletion_requests(self, conn: Any, *, now: int) -> list[dict[str, Any]]:
         """Requests whose cooling-off ended (archive) or whose retention expired (purge)."""
@@ -543,7 +565,7 @@ class WorkBuddyLifecycleRepo:
                 int(expected_version),
             ),
         )
-        return cursor.rowcount == 1
+        return int(cursor.rowcount) == 1
 
     def mark_deletion_purged(
         self,
@@ -571,7 +593,7 @@ class WorkBuddyLifecycleRepo:
                 int(expected_version),
             ),
         )
-        return cursor.rowcount == 1
+        return int(cursor.rowcount) == 1
 
     # ── legal holds ─────────────────────────────────────────────────────
 
@@ -634,7 +656,7 @@ class WorkBuddyLifecycleRepo:
                 str(tenant_id),
             ),
         )
-        return cursor.rowcount == 1
+        return int(cursor.rowcount) == 1
 
     def count_active_legal_holds(
         self, conn: Any, *, tenant_id: str, deletion_request_id: str | None = None
@@ -644,10 +666,14 @@ class WorkBuddyLifecycleRepo:
         if deletion_request_id is not None:
             where += " AND (deletion_request_id = ? OR deletion_request_id IS NULL)"
             params.append(str(deletion_request_id))
-        row = conn.execute(f"SELECT count(*) AS total FROM workbuddy_legal_holds WHERE {where}", tuple(params)).fetchone()
+        row = conn.execute(
+            f"SELECT count(*) AS total FROM workbuddy_legal_holds WHERE {where}", tuple(params)
+        ).fetchone()
         return int((_row_dict(row) or {"total": 0})["total"])
 
-    def list_legal_holds(self, conn: Any, *, tenant_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    def list_legal_holds(
+        self, conn: Any, *, tenant_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
         return _rows(
             conn.execute(
                 """
@@ -697,7 +723,9 @@ class WorkBuddyLifecycleRepo:
             raise RuntimeError("archive insert returned no row")
         return row
 
-    def get_archive(self, conn: Any, *, tenant_id: str, deletion_request_id: str) -> dict[str, Any] | None:
+    def get_archive(
+        self, conn: Any, *, tenant_id: str, deletion_request_id: str
+    ) -> dict[str, Any] | None:
         return _row_dict(
             conn.execute(
                 """
@@ -708,7 +736,9 @@ class WorkBuddyLifecycleRepo:
             ).fetchone()
         )
 
-    def clear_archive_payload(self, conn: Any, *, tenant_id: str, deletion_request_id: str, purged_at: int) -> int:
+    def clear_archive_payload(
+        self, conn: Any, *, tenant_id: str, deletion_request_id: str, purged_at: int
+    ) -> int:
         cursor = conn.execute(
             """
             UPDATE workbuddy_tenant_archives
@@ -868,7 +898,9 @@ class WorkBuddyLifecycleRepo:
 
     # ── purge and coverage ──────────────────────────────────────────────
 
-    def delete_tenant_rows(self, conn: Any, *, tenant_id: str, tables: Sequence[str]) -> dict[str, int]:
+    def delete_tenant_rows(
+        self, conn: Any, *, tenant_id: str, tables: Sequence[str]
+    ) -> dict[str, int]:
         """Delete every row of ``tenant_id`` in ``tables`` (children first) and count it."""
         deleted: dict[str, int] = {}
         for table in tables:
@@ -878,7 +910,39 @@ class WorkBuddyLifecycleRepo:
             deleted[str(table)] = int(cursor.rowcount)
         return deleted
 
-    def tenant_row_counts(self, conn: Any, *, tenant_id: str, tables: Sequence[str]) -> dict[str, int]:
+    def delete_tenant_rows_batched(
+        self, conn: Any, *, tenant_id: str, tables: Sequence[str]
+    ) -> dict[str, int]:
+        """Empty cyclic tables in one statement and count what each one dropped.
+
+        A foreign-key cycle cannot be emptied table by table: whichever table
+        went first would still be referenced by the other.  PostgreSQL checks
+        immediate constraints only once the whole statement is done, so removing
+        the group together leaves nothing to violate.  Data-modifying CTEs run
+        exactly once whether or not the final query reads them, which is what
+        makes the per-table counts observable here.
+        """
+        if not tables:
+            return {}
+        deletes = ", ".join(
+            f"d{index} AS (DELETE FROM {_quote_ident(table)} WHERE tenant_id = ? RETURNING 1)"
+            for index, table in enumerate(tables)
+        )
+        projection = ", ".join(
+            f"(SELECT count(*) FROM d{index}) AS c{index}" for index in range(len(tables))
+        )
+        row = _row_dict(
+            conn.execute(
+                f"WITH {deletes} SELECT {projection}",
+                tuple(str(tenant_id) for _ in tables),
+            ).fetchone()
+        )
+        counts = row or {}
+        return {str(table): int(counts[f"c{index}"]) for index, table in enumerate(tables)}
+
+    def tenant_row_counts(
+        self, conn: Any, *, tenant_id: str, tables: Sequence[str]
+    ) -> dict[str, int]:
         """Rows still present per table — the post-purge (and post-restore) coverage check."""
         counts: dict[str, int] = {}
         for table in tables:

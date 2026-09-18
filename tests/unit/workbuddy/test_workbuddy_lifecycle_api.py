@@ -56,7 +56,9 @@ def _app(principal: _Principal, *, admin_denied: bool = False) -> FastAPI:
 
             if getattr(call, "__module__", "") == workbuddy_identity.__name__:
 
-                def _principal_dep(_denied: bool = admin_denied, _principal: Any = principal) -> Any:
+                def _principal_dep(
+                    _denied: bool = admin_denied, _principal: Any = principal
+                ) -> Any:
                     async def _resolve_principal() -> Any:
                         if _denied:
                             raise OctopError(ErrorCode.FORBIDDEN, "workbuddy admin role required")
@@ -65,9 +67,10 @@ def _app(principal: _Principal, *, admin_denied: bool = False) -> FastAPI:
                     return _resolve_principal
 
                 overrides[call] = _principal_dep()
-            elif getattr(call, "__module__", "") == "octop.api.deps" and getattr(
-                call, "__name__", ""
-            ) == "get_server":
+            elif (
+                getattr(call, "__module__", "") == "octop.api.deps"
+                and getattr(call, "__name__", "") == "get_server"
+            ):
                 overrides[call] = lambda: SimpleNamespace()
     app.dependency_overrides.update(overrides)
     return app
@@ -188,8 +191,15 @@ async def test_missing_tenant_reports_not_found(
     assert response.json()["error"]["code"] == ErrorCode.NOT_FOUND.value
 
 
-async def test_manifest_response_is_no_store(principal: _Principal, monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = {"export_job_id": str(uuid.uuid4()), "status": "ready", "manifest": {}, "manifest_sha256": "a" * 64}
+async def test_manifest_response_is_no_store(
+    principal: _Principal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = {
+        "export_job_id": str(uuid.uuid4()),
+        "status": "ready",
+        "manifest": {},
+        "manifest_sha256": "a" * 64,
+    }
     monkeypatch.setattr(policy, "read_export_manifest", lambda repo, **kwargs: payload)
     async with _client(_app(principal)) as client:
         response = await client.get(f"/api/v1/exports/{payload['export_job_id']}/manifest")

@@ -95,7 +95,9 @@ def test_redact_row_keeps_relational_ids_and_json_types() -> None:
 
 
 def test_secret_bearing_tables_are_excluded_whole() -> None:
-    assert policy.excluded_table_category("workbuddy_connector_credentials") == "credential_metadata"
+    assert (
+        policy.excluded_table_category("workbuddy_connector_credentials") == "credential_metadata"
+    )
     assert policy.excluded_table_category("secrets") == "secret_material"
     assert policy.excluded_table_category("vault_leases") == "vault_reference"
     assert policy.excluded_table_category("workbuddy_tenant_members") is None
@@ -185,7 +187,9 @@ def test_gate_refuses_unsigned_mismatched_and_expired_policies() -> None:
         policy.load_compliance_policy(tenant, environ=other_tenant)
     assert mismatch.value.code is ErrorCode.COMPLIANCE_GATE_CLOSED
 
-    expired = _signed_env(_live_policy(tenant_id=tenant, approved_at=now - 900, expires_at=now - 10))
+    expired = _signed_env(
+        _live_policy(tenant_id=tenant, approved_at=now - 900, expires_at=now - 10)
+    )
     with pytest.raises(OctopError) as stale:
         policy.load_compliance_policy(tenant, environ=expired, now=now)
     assert stale.value.code is ErrorCode.COMPLIANCE_GATE_CLOSED
@@ -207,7 +211,9 @@ def test_signed_policy_authorises_only_its_tenant() -> None:
 # ── ledger, tombstone and restore replay ────────────────────────────────────
 
 
-def _entry(sequence: int, previous: str | None, entry_type: str = "deletion_requested") -> policy.LedgerEntry:
+def _entry(
+    sequence: int, previous: str | None, entry_type: str = "deletion_requested"
+) -> policy.LedgerEntry:
     payload = {"deletion_request_id": f"r-{sequence}"}
     payload_sha256 = policy.ledger_payload_sha256(payload)
     created_at = 1_700_000_000 + sequence
@@ -314,6 +320,23 @@ def test_purge_order_refuses_cycles() -> None:
     assert failure.value.code is ErrorCode.DEPENDENCY_UNAVAILABLE
 
 
+def test_purge_plan_batches_a_foreign_key_cycle() -> None:
+    plan = policy.plan_tenant_purge(["a", "b", "c"], {"a": {"b"}, "b": {"a"}})
+    assert plan.order == ("c",)
+    assert plan.batched == ("a", "b")
+    assert set(plan.tables) == {"a", "b", "c"}
+
+
+def test_purge_plan_treats_self_references_as_leaves() -> None:
+    plan = policy.plan_tenant_purge(
+        ["workbuddy_departments", "workbuddy_tenant_members"],
+        {"workbuddy_departments": {"workbuddy_departments"}},
+    )
+    assert plan.batched == ()
+    assert set(plan.order) == {"workbuddy_departments", "workbuddy_tenant_members"}
+    assert policy.order_purge_tables(["t"], {"t": {"t"}}) == ["t"]
+
+
 def test_purge_evidence_tables_are_never_deleted() -> None:
     assert policy.purge_protects("workbuddy_deletion_ledger")
     assert policy.purge_protects("workbuddy_tenant_tombstones")
@@ -362,9 +385,11 @@ def test_deletion_cancel_is_limited_to_the_cooling_off_window() -> None:
 def test_workbuddy_transaction_fails_closed_on_sqlite(tmp_path: object) -> None:
     pool = SqlitePool(tmp_path / "octop.db")  # type: ignore[operator]
     try:
-        with pytest.raises(WorkBuddyPostgresRequiredError):
-            with workbuddy_transaction(pool, WorkBuddyDbContext.for_tenant(str(uuid.uuid4()))):
-                raise AssertionError("SQLite must never open a WorkBuddy transaction")
+        with (
+            pytest.raises(WorkBuddyPostgresRequiredError),
+            workbuddy_transaction(pool, WorkBuddyDbContext.for_tenant(str(uuid.uuid4()))),
+        ):
+            raise AssertionError("SQLite must never open a WorkBuddy transaction")
     finally:
         pool.close()
 

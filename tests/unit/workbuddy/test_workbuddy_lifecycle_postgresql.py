@@ -15,6 +15,7 @@ from collections.abc import Iterator
 
 import psycopg
 import pytest
+from tests.support.postgresql import requires_postgresql
 
 from octop.infra.db.migrate import run_migrations
 from octop.infra.db.pool import PostgresPool
@@ -22,7 +23,6 @@ from octop.infra.db.repos.workbuddy_lifecycle import WorkBuddyLifecycleRepo
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext, workbuddy_transaction
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy import lifecycle as policy
-from tests.support.postgresql import requires_postgresql
 
 pytestmark = [pytest.mark.postgresql, requires_postgresql]
 
@@ -49,7 +49,18 @@ def pool() -> Iterator[PostgresPool]:
 
 
 @pytest.fixture
-def tenant(pool: PostgresPool) -> Iterator[dict[str, str]]:
+def tenant(pool: PostgresPool) -> dict[str, str]:
+    """One tenant-owned dataset per test.
+
+    Deliberately no teardown: every lifecycle path appends to the append-only
+    deletion ledger (and, after a purge, the tombstone), and both tables
+    reference ``workbuddy_tenants`` with ``ON DELETE RESTRICT`` — a tenant that
+    was exercised here is immortal by design.  The module-scoped ``pool``
+    fixture resets the schema instead, as
+    ``tests/integration/test_workbuddy_isolation_postgres.py`` does.  Per-test
+    uniqueness (slug, username, invitation token hash) is what keeps the tests
+    independent within a run.
+    """
     now = int(time.time())
     suffix = uuid.uuid4().hex[:8]
     with workbuddy_transaction(pool, WorkBuddyDbContext.platform()) as conn:
@@ -83,13 +94,9 @@ def tenant(pool: PostgresPool) -> Iterator[dict[str, str]]:
               (tenant_id, email, email_normalized, token_hash, expires_at, created_at)
             VALUES (?, 'invitee@example.com', 'invitee@example.com', ?, ?, ?)
             """,
-            (tenant_id, "f" * 64, now + DAY, now),
+            (tenant_id, uuid.uuid4().hex + uuid.uuid4().hex, now + DAY, now),
         )
-    yield {"tenant_id": tenant_id, "user_id": str(user_id)}
-    with workbuddy_transaction(pool, WorkBuddyDbContext.platform(tenant_id=tenant_id)) as conn:
-        conn.execute("DELETE FROM workbuddy_invitations WHERE tenant_id = ?", (tenant_id,))
-        conn.execute("DELETE FROM workbuddy_tenant_members WHERE tenant_id = ?", (tenant_id,))
-        conn.execute("DELETE FROM workbuddy_tenants WHERE tenant_id = ?", (tenant_id,))
+    return {"tenant_id": tenant_id, "user_id": str(user_id)}
 
 
 def _signed_policy_env(tenant_id: str) -> dict[str, str]:
@@ -132,7 +139,9 @@ def _verify_ledger(repo: WorkBuddyLifecycleRepo, tenant_id: str) -> list[str]:
     return [entry.entry_type for entry in entries]
 
 
-def test_export_is_redacted_verifiable_and_redeemed_once(pool: PostgresPool, tenant: dict[str, str]) -> None:
+def test_export_is_redacted_verifiable_and_redeemed_once(
+    pool: PostgresPool, tenant: dict[str, str]
+) -> None:
     repo = WorkBuddyLifecycleRepo(pool)
     tenant_id = tenant["tenant_id"]
     issue = policy.start_tenant_export(repo, tenant_id=tenant_id, user_id=int(tenant["user_id"]))
@@ -149,7 +158,9 @@ def test_export_is_redacted_verifiable_and_redeemed_once(pool: PostgresPool, ten
     download = policy.redeem_export(
         repo, tenant_id=tenant_id, user_id=int(tenant["user_id"]), token=issue.redeem_token
     )
-    invitation_rows = next(item for item in download.tables if item["name"] == "workbuddy_invitations")
+    invitation_rows = next(
+        item for item in download.tables if item["name"] == "workbuddy_invitations"
+    )
     assert invitation_rows["rows"], "the tenant's own rows are exported"
     assert all("token_hash" not in row for row in invitation_rows["rows"])
     assert invitation_rows["content_sha256"] == policy.sha256_text(
@@ -243,15 +254,22 @@ def test_purge_keeps_tombstone_evidence_and_blocks_resurrection(
     assert policy.verify_purge_coverage(repo, tenant_id=tenant_id) == {}
 
     entry_types = _verify_ledger(repo, tenant_id)
-    for expected in ("deletion_requested", "archive_created", "usage_linkage_anonymized", "purge_completed"):
+    for expected in (
+        "deletion_requested",
+        "archive_created",
+        "usage_linkage_anonymized",
+        "purge_completed",
+    ):
         assert expected in entry_types
 
-    with pytest.raises(psycopg.Error):
-        with workbuddy_transaction(pool, WorkBuddyDbContext.platform(tenant_id=tenant_id)) as conn:
-            conn.execute(
-                "UPDATE workbuddy_deletion_ledger SET entry_type = 'tampered' WHERE tenant_id = ?",
-                (tenant_id,),
-            )
+    with (
+        pytest.raises(psycopg.Error),
+        workbuddy_transaction(pool, WorkBuddyDbContext.platform(tenant_id=tenant_id)) as conn,
+    ):
+        conn.execute(
+            "UPDATE workbuddy_deletion_ledger SET entry_type = 'tampered' WHERE tenant_id = ?",
+            (tenant_id,),
+        )
 
     with workbuddy_transaction(pool, WorkBuddyDbContext.platform(tenant_id=tenant_id)) as conn:
         conn.execute(
@@ -260,7 +278,7 @@ def test_purge_keeps_tombstone_evidence_and_blocks_resurrection(
               (tenant_id, email, email_normalized, token_hash, expires_at, created_at)
             VALUES (?, 'restored@example.com', 'restored@example.com', ?, ?, ?)
             """,
-            (tenant_id, "a" * 64, now, now),
+            (tenant_id, "a" * 64, now + DAY, now),
         )
     replay = policy.replay_deletion_ledger(repo, tenant_id=tenant_id)
     assert replay.action == policy.RESTORE_ACTION_REPURGE

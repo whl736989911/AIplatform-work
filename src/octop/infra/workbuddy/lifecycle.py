@@ -60,6 +60,7 @@ __all__ = [
     "ExportTable",
     "ExportTableExclusion",
     "LedgerEntry",
+    "PurgePlan",
     "RedeemToken",
     "RestoreReplayPlan",
     "Tombstone",
@@ -77,6 +78,7 @@ __all__ = [
     "load_compliance_policy",
     "manifest_sha256",
     "order_purge_tables",
+    "plan_tenant_purge",
     "policy_digest",
     "purge_protects",
     "redeem_token_failure",
@@ -204,9 +206,7 @@ def column_is_exportable(column_name: str) -> bool:
         return False
     if any(fragment in lowered for fragment in _EXCLUDED_COLUMN_FRAGMENTS):
         return False
-    if lowered.endswith(_EXCLUDED_HASH_SUFFIXES):
-        return False
-    return True
+    return not lowered.endswith(_EXCLUDED_HASH_SUFFIXES)
 
 
 def exportable_columns(columns: Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -443,9 +443,7 @@ def _decode_policy_document(raw: str, key_raw: str | None) -> dict[str, Any]:
         raise compliance_gate_closed("key_missing")
     try:
         encoded = raw.strip()
-        document = json.loads(
-            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
-        )
+        document = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
     except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
         raise compliance_gate_closed("malformed") from exc
     if not isinstance(document, dict):
@@ -459,7 +457,9 @@ def _decode_policy_document(raw: str, key_raw: str | None) -> dict[str, Any]:
     return document
 
 
-def _policy_from_document(document: Mapping[str, Any], tenant_id: str, now: int) -> CompliancePolicy:
+def _policy_from_document(
+    document: Mapping[str, Any], tenant_id: str, now: int
+) -> CompliancePolicy:
     try:
         version = int(document["version"])
         policy = CompliancePolicy(
@@ -800,17 +800,39 @@ def purge_protects(table_name: str) -> bool:
     return table_name.strip().lower() in PURGE_EVIDENCE_TABLES
 
 
-def order_purge_tables(
+@dataclass(frozen=True)
+class PurgePlan:
+    """How one tenant's non-evidence rows are emptied.
+
+    ``order`` is safe one table at a time (children before the rows they
+    reference).  ``batched`` holds the tables that sit on a foreign-key cycle:
+    no single-table order can empty them, because whichever table went first
+    would still be referenced by the other.  They are therefore emptied together
+    in one statement, where PostgreSQL checks every immediate constraint only
+    once the statement as a whole is done.
+    """
+
+    order: tuple[str, ...]
+    batched: tuple[str, ...]
+
+    @property
+    def tables(self) -> tuple[str, ...]:
+        """Every table this plan touches, in deletion order."""
+        return self.order + self.batched
+
+
+def plan_tenant_purge(
     tables: Iterable[str],
     dependencies: Mapping[str, Iterable[str]],
-) -> list[str]:
-    """Order tenant tables so children are deleted before the rows they reference.
+) -> PurgePlan:
+    """Split tenant tables into a deletion order plus whatever is left cyclic.
 
     ``dependencies`` maps a table to the tables its foreign keys reference (the
     shape returned by ``WorkBuddyLifecycleRepo.table_dependencies``).  A table
-    that no remaining table references is a leaf and is deleted first.  Cycles
-    are refused instead of silently skipped: an un-orderable purge would leave
-    tenant rows behind.
+    that no remaining table references is a leaf and is deleted first.  A table
+    that references itself is a leaf as well: a single ``DELETE`` empties it and
+    the self-reference goes away with the rows.  Anything still unpeelable is
+    returned as one ``batched`` group.
     """
     remaining = {str(name) for name in tables}
     order: list[str] = []
@@ -819,18 +841,35 @@ def order_purge_tables(
             str(parent)
             for name in remaining
             for parent in dependencies.get(name, ())
-            if str(parent) in remaining
+            if str(parent) in remaining and str(parent) != name
         }
         leaves = sorted(name for name in remaining if name not in referenced)
         if not leaves:
-            raise OctopError(
-                ErrorCode.DEPENDENCY_UNAVAILABLE,
-                "tenant purge is blocked by a cyclic table dependency",
-                details={"tables": sorted(remaining)},
-            )
+            break
         order.extend(leaves)
         remaining.difference_update(leaves)
-    return order
+    return PurgePlan(order=tuple(order), batched=tuple(sorted(remaining)))
+
+
+def order_purge_tables(
+    tables: Iterable[str],
+    dependencies: Mapping[str, Iterable[str]],
+) -> list[str]:
+    """Strict deletion order: a foreign-key cycle is refused, never skipped.
+
+    This is the ordering-only contract.  Callers that can empty a cycle in a
+    single statement use :func:`plan_tenant_purge` instead; callers that cannot
+    must treat a cycle as a defect, because silently dropping it would leave
+    tenant rows behind.
+    """
+    plan = plan_tenant_purge(tables, dependencies)
+    if plan.batched:
+        raise OctopError(
+            ErrorCode.DEPENDENCY_UNAVAILABLE,
+            "tenant purge is blocked by a cyclic table dependency",
+            details={"tables": list(plan.batched)},
+        )
+    return list(plan.order)
 
 
 # ── anonymized usage linkage ────────────────────────────────────────────────
@@ -853,7 +892,7 @@ def usage_subject_sha256(salt_secret: bytes, subject_kind: str, subject_id: str)
             "unknown usage subject kind",
             details={"subject_kind": str(subject_kind)},
         )
-    body = f"{subject_kind}:{str(subject_id).strip()}".encode("utf-8")
+    body = f"{subject_kind}:{str(subject_id).strip()}".encode()
     return hmac.new(salt_secret, body, hashlib.sha256).hexdigest()
 
 
@@ -1060,7 +1099,9 @@ def _tenant_ctx(tenant_id: str, *, user_id: int | None = None) -> WorkBuddyDbCon
     return WorkBuddyDbContext.for_tenant(tenant_id, user_id=user_id)
 
 
-def _platform_ctx(tenant_id: str | None = None, *, user_id: int | None = None) -> WorkBuddyDbContext:
+def _platform_ctx(
+    tenant_id: str | None = None, *, user_id: int | None = None
+) -> WorkBuddyDbContext:
     return WorkBuddyDbContext.platform(tenant_id=tenant_id, user_id=user_id)
 
 
@@ -1094,7 +1135,9 @@ def _export_view(row: Mapping[str, Any]) -> ExportView:
 def tombstone_from_row(row: Mapping[str, Any]) -> Tombstone:
     """Rebuild the tombstone record, including its evidence table list."""
     try:
-        evidence = tuple(str(name) for name in json.loads(str(row.get("retained_evidence") or "[]")))
+        evidence = tuple(
+            str(name) for name in json.loads(str(row.get("retained_evidence") or "[]"))
+        )
     except ValueError:
         evidence = ()
     return Tombstone(
@@ -1105,7 +1148,9 @@ def tombstone_from_row(row: Mapping[str, Any]) -> Tombstone:
         ledger_head_sha256=str(row["ledger_head_sha256"]),
         ledger_entry_count=int(row["ledger_entry_count"]),
         archive_sha256=row.get("archive_sha256"),
-        archive_row_total=None if row.get("archive_row_total") is None else int(row["archive_row_total"]),
+        archive_row_total=None
+        if row.get("archive_row_total") is None
+        else int(row["archive_row_total"]),
         usage_linkage_sha256=row.get("usage_linkage_sha256"),
         purged_tables=int(row.get("purged_tables") or 0),
         purged_rows=int(row.get("purged_rows") or 0),
@@ -1284,10 +1329,24 @@ def start_tenant_export(
                     "export job state changed while it was being built",
                 )
     except ExportTooLargeError:
-        _fail_export(repo, ctx, tenant_id=tenant_id, export_job_id=str(job["export_job_id"]), reason="row_ceiling_exceeded", now=moment)
+        _fail_export(
+            repo,
+            ctx,
+            tenant_id=tenant_id,
+            export_job_id=str(job["export_job_id"]),
+            reason="row_ceiling_exceeded",
+            now=moment,
+        )
         raise
     except Exception:
-        _fail_export(repo, ctx, tenant_id=tenant_id, export_job_id=str(job["export_job_id"]), reason="export_build_failed", now=moment)
+        _fail_export(
+            repo,
+            ctx,
+            tenant_id=tenant_id,
+            export_job_id=str(job["export_job_id"]),
+            reason="export_build_failed",
+            now=moment,
+        )
         raise
     token = issue_redeem_token()
     with repo.transaction(ctx) as conn:
@@ -1349,7 +1408,11 @@ def _fail_export(
 ) -> None:
     with repo.transaction(ctx) as conn:
         repo.update_export_job_failed(
-            conn, tenant_id=tenant_id, export_job_id=export_job_id, failure_reason=reason, updated_at=now
+            conn,
+            tenant_id=tenant_id,
+            export_job_id=export_job_id,
+            failure_reason=reason,
+            updated_at=now,
         )
 
 
@@ -1408,7 +1471,9 @@ def redeem_export(
                 "export job is not ready to redeem",
             )
         manifest = json.loads(str(job["manifest_json"]))
-        artifacts = repo.list_export_artifacts(conn, tenant_id=tenant_id, export_job_id=export_job_id)
+        artifacts = repo.list_export_artifacts(
+            conn, tenant_id=tenant_id, export_job_id=export_job_id
+        )
         entries = {str(entry["name"]): entry for entry in manifest.get("tables", [])}
         tables: list[dict[str, Any]] = []
         for artifact in artifacts:
@@ -1483,8 +1548,12 @@ def expire_exports(repo: Any, *, tenant_id: str | None = None, now: int | None =
 # ── deletion requests ───────────────────────────────────────────────────────
 
 
-def _deletion_row(repo: Any, conn: Any, *, tenant_id: str, deletion_request_id: str) -> dict[str, Any]:
-    row = repo.get_deletion_request(conn, tenant_id=tenant_id, deletion_request_id=deletion_request_id)
+def _deletion_row(
+    repo: Any, conn: Any, *, tenant_id: str, deletion_request_id: str
+) -> dict[str, Any]:
+    row: dict[str, Any] | None = repo.get_deletion_request(
+        conn, tenant_id=tenant_id, deletion_request_id=deletion_request_id
+    )
     if row is None:
         raise OctopError(
             ErrorCode.NOT_FOUND,
@@ -1574,7 +1643,9 @@ def read_deletion_request(
     moment = int(now if now is not None else time.time())
     ctx = _tenant_ctx(tenant_id)
     with repo.transaction(ctx) as conn:
-        row = _deletion_row(repo, conn, tenant_id=tenant_id, deletion_request_id=deletion_request_id)
+        row = _deletion_row(
+            repo, conn, tenant_id=tenant_id, deletion_request_id=deletion_request_id
+        )
         return _deletion_view(repo, conn, row, now=moment)
 
 
@@ -1591,7 +1662,9 @@ def cancel_tenant_deletion(
     moment = int(now if now is not None else time.time())
     ctx = _tenant_ctx(tenant_id, user_id=user_id)
     with repo.transaction(ctx) as conn:
-        row = _deletion_row(repo, conn, tenant_id=tenant_id, deletion_request_id=deletion_request_id)
+        row = _deletion_row(
+            repo, conn, tenant_id=tenant_id, deletion_request_id=deletion_request_id
+        )
         if str(row["stage"]) != "cooling_off" or moment >= int(row["cooling_off_ends_at"]):
             raise OctopError(
                 ErrorCode.DELETION_CANCEL_WINDOW_CLOSED,
@@ -1623,7 +1696,9 @@ def cancel_tenant_deletion(
             actor_label=None,
             created_at=moment,
         )
-        updated = _deletion_row(repo, conn, tenant_id=tenant_id, deletion_request_id=deletion_request_id)
+        updated = _deletion_row(
+            repo, conn, tenant_id=tenant_id, deletion_request_id=deletion_request_id
+        )
         return _deletion_view(repo, conn, updated, now=moment)
 
 
@@ -1713,32 +1788,28 @@ def release_tenant_legal_hold(
 
 
 def _active_hold(conn: Any, repo: Any, row: Mapping[str, Any]) -> bool:
-    return (
-        repo.count_active_legal_holds(
-            conn,
-            tenant_id=str(row["tenant_id"]),
-            deletion_request_id=str(row["deletion_request_id"]),
-        )
-        > 0
+    holds: int = repo.count_active_legal_holds(
+        conn,
+        tenant_id=str(row["tenant_id"]),
+        deletion_request_id=str(row["deletion_request_id"]),
     )
+    return holds > 0
 
 
-def _purge_table_order(repo: Any, conn: Any, *, tenant_id: str) -> tuple[list[str], dict[str, int]]:
-    """Ordered, evidence-free tenant tables plus their pre-delete row counts."""
+def _purge_table_order(repo: Any, conn: Any, *, tenant_id: str) -> tuple[PurgePlan, dict[str, int]]:
+    """Purge plan over the evidence-free tenant tables plus pre-delete row counts."""
     tables = [table for table in repo.tenant_tables(conn) if not purge_protects(table)]
-    order = order_purge_tables(tables, repo.table_dependencies(conn))
-    before = repo.tenant_row_counts(conn, tenant_id=tenant_id, tables=order)
-    return order, before
+    plan = plan_tenant_purge(tables, repo.table_dependencies(conn))
+    before = repo.tenant_row_counts(conn, tenant_id=tenant_id, tables=plan.tables)
+    return plan, before
 
 
-def _archive_tenant(
-    repo: Any, conn: Any, *, row: Mapping[str, Any], now: int
-) -> dict[str, Any]:
+def _archive_tenant(repo: Any, conn: Any, *, row: Mapping[str, Any], now: int) -> dict[str, Any]:
     """Freeze the tenant snapshot (same redaction rules as an export) for retention."""
     tenant_id = str(row["tenant_id"])
     request_id = str(row["deletion_request_id"])
     exported, excluded, payloads = _collect_redacted_tables(repo, conn)
-    archive = {
+    archive: dict[str, Any] = {
         "schema": EXPORT_SCHEMA,
         "redaction_rules_version": REDACTION_RULES_VERSION,
         "tenant_id": tenant_id,
@@ -1751,7 +1822,9 @@ def _archive_tenant(
             "rows": sum(entry.row_count for entry in exported),
         },
     }
-    payload_json = canonical_json({"manifest": archive, "tables": {name: json.loads(body) for name, body in payloads}})
+    payload_json = canonical_json(
+        {"manifest": archive, "tables": {name: json.loads(body) for name, body in payloads}}
+    )
     archive_sha256 = sha256_text(payload_json)
     repo.insert_archive(
         conn,
@@ -1797,9 +1870,7 @@ def _archive_tenant(
     return {"archive_sha256": archive_sha256, "row_total": int(archive["totals"]["rows"])}
 
 
-def _purge_tenant(
-    repo: Any, conn: Any, *, row: Mapping[str, Any], now: int
-) -> PurgeReport:
+def _purge_tenant(repo: Any, conn: Any, *, row: Mapping[str, Any], now: int) -> PurgeReport:
     """Delete tenant data, destroy linkage salts, chain the ledger and tombstone it."""
     tenant_id = str(row["tenant_id"])
     request_id = str(row["deletion_request_id"])
@@ -1809,8 +1880,12 @@ def _purge_tenant(
             "an active legal hold blocks the purge",
             details={"deletion_request_id": request_id},
         )
-    order, before = _purge_table_order(repo, conn, tenant_id=tenant_id)
-    deleted = repo.delete_tenant_rows(conn, tenant_id=tenant_id, tables=order)
+    plan, before = _purge_table_order(repo, conn, tenant_id=tenant_id)
+    deleted = repo.delete_tenant_rows(conn, tenant_id=tenant_id, tables=plan.order)
+    if plan.batched:
+        deleted.update(
+            repo.delete_tenant_rows_batched(conn, tenant_id=tenant_id, tables=plan.batched)
+        )
     salts_destroyed = repo.destroy_usage_salts(conn, tenant_id=tenant_id, destroyed_at=now)
     links_purged = repo.mark_usage_links_purged(conn, tenant_id=tenant_id, purged_at=now)
     linkage = repo.usage_linkage_digest_input(conn, tenant_id=tenant_id)
@@ -1875,7 +1950,9 @@ def _purge_tenant(
         ledger_head_sha256=str(head["entry_sha256"]),
         ledger_entry_count=entry_count,
         archive_sha256=None if archive_sha256 is None else str(archive_sha256),
-        archive_row_total=None if row.get("archive_row_total") is None else int(row["archive_row_total"]),
+        archive_row_total=None
+        if row.get("archive_row_total") is None
+        else int(row["archive_row_total"]),
         usage_linkage_sha256=usage_linkage_sha256,
         purged_tables=purged_tables,
         purged_rows=rows_deleted,
@@ -1883,7 +1960,9 @@ def _purge_tenant(
         tombstone_sha256=digest,
         created_at=now,
     )
-    repo.clear_archive_payload(conn, tenant_id=tenant_id, deletion_request_id=request_id, purged_at=now)
+    repo.clear_archive_payload(
+        conn, tenant_id=tenant_id, deletion_request_id=request_id, purged_at=now
+    )
     if not repo.mark_deletion_purged(
         conn,
         tenant_id=tenant_id,
@@ -1896,7 +1975,7 @@ def _purge_tenant(
             ErrorCode.DELETION_REQUEST_CONFLICT,
             "the deletion request changed while it was being purged",
         )
-    remaining = repo.tenant_row_counts(conn, tenant_id=tenant_id, tables=order)
+    remaining = repo.tenant_row_counts(conn, tenant_id=tenant_id, tables=plan.tables)
     leftovers = {table: count for table, count in remaining.items() if count > 0}
     if leftovers:
         raise OctopError(
@@ -1942,7 +2021,9 @@ def advance_deletion_lifecycle(repo: Any, *, now: int | None = None) -> Lifecycl
                 _purge_tenant(repo, conn, row=row, now=moment)
                 purged.append(request_id)
             del tenant_id
-    return LifecycleReport(archived=tuple(archived), purged=tuple(purged), skipped_legal_hold=tuple(held))
+    return LifecycleReport(
+        archived=tuple(archived), purged=tuple(purged), skipped_legal_hold=tuple(held)
+    )
 
 
 def replay_deletion_ledger(repo: Any, *, tenant_id: str, now: int | None = None) -> ReplayReport:
@@ -1982,8 +2063,14 @@ def replay_deletion_ledger(repo: Any, *, tenant_id: str, now: int | None = None)
                 ledger_sequence=0,
                 ledger_head_sha256=None,
             )
-        order = order_purge_tables(tables, repo.table_dependencies(conn))
-        deleted = repo.delete_tenant_rows(conn, tenant_id=tenant_id, tables=order)
+        purge_plan = plan_tenant_purge(tables, repo.table_dependencies(conn))
+        deleted = repo.delete_tenant_rows(conn, tenant_id=tenant_id, tables=purge_plan.order)
+        if purge_plan.batched:
+            deleted.update(
+                repo.delete_tenant_rows_batched(
+                    conn, tenant_id=tenant_id, tables=purge_plan.batched
+                )
+            )
         repo.destroy_usage_salts(conn, tenant_id=tenant_id, destroyed_at=moment)
         repo.mark_usage_links_purged(conn, tenant_id=tenant_id, purged_at=moment)
         rows_deleted = sum(deleted.values())
