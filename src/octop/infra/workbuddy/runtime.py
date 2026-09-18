@@ -16,12 +16,11 @@ delivery hints derived from those rows.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from octop.infra.db.pool import DatabasePool
@@ -35,7 +34,6 @@ from octop.infra.db.repos.workbuddy_runtime import (
     JobRow,
     NotificationRow,
     ReconciliationRow,
-    StepRunRow,
     WorkBuddyRuntimeRepo,
     canonical_json,
     new_runtime_id,
@@ -53,8 +51,8 @@ from octop.infra.workbuddy.workflow_compiler import (
 )
 
 NODE_TYPES = frozenset({"tool", "llm", "condition", "approval", "transform"})
-TERMINAL_EXECUTION_STATUSES = frozenset({"succeeded", "failed", "partial", "cancelled"})
-CANCELLABLE_EXECUTION_STATUSES = ("pending", "running", "waiting_approval")
+TERMINAL_EXECUTION_STATUSES = frozenset({"success", "failed", "partial", "canceled"})
+CANCELLABLE_EXECUTION_STATUSES = ("queued", "running", "waiting_approval")
 APPROVAL_TOKEN_TTL_SECONDS = 120
 DEFAULT_MAX_STEPS = 50
 MAX_STEPS_CAP = 200
@@ -63,7 +61,7 @@ MAX_WORKFLOW_INPUT_BYTES = 1_048_576
 MAX_DEFINITION_NODES = 100
 MAX_DEFINITION_EDGES = 4_950
 
-APPROVAL_DECISIONS = frozenset({"approve", "reject"})
+APPROVAL_DECISIONS = frozenset({"approved", "rejected"})
 RECONCILIATION_STATUSES = frozenset({"matched", "mismatched", "unresolved"})
 
 # Restricted one-pass template placeholder, matching the compiler's grammar.
@@ -164,6 +162,9 @@ class GraphRun:
     error_code: str | None = None
     error_message: str | None = None
     waiting_approval_node_id: str | None = None
+    approval_candidates: dict[str, tuple[tuple[int, str | None], ...]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,7 +326,7 @@ def _iso(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value.astimezone(timezone.utc).isoformat()
+        return value.astimezone(UTC).isoformat()
     return str(value)
 
 
@@ -502,6 +503,7 @@ def run_graph(
     replay: ReplayState | None = None,
     decisions: Mapping[str, str] | None = None,
     effects: SideEffectPort | None = None,
+    resolve_approvers: Callable[[GraphNode], Sequence[tuple[int, str | None]]] | None = None,
     execution_id: str = "",
 ) -> GraphRun:
     """Execute the graph once, deterministically, and aggregate the outcome.
@@ -530,6 +532,8 @@ def run_graph(
     steps: list[StepOutcome] = []
     edge_outcomes: list[EdgeOutcome] = []
     failure: StepOutcome | None = None
+    node_failures: list[StepOutcome] = []
+    approval_candidates: dict[str, tuple[tuple[int, str | None], ...]] = {}
     waiting_node: str | None = None
     executed = 0
 
@@ -601,7 +605,7 @@ def run_graph(
             branch = str(raw)
         store(node, value)
         processed.add(node.id)
-        record(node, "succeeded", output=value, replayed=True)
+        record(node, "success", output=value, replayed=True)
         if branch is None:
             propagate_taken(node)
         else:
@@ -695,21 +699,41 @@ def run_graph(
                     )
                     break
                 store(node, {"branch": branch})
-                record(node, "succeeded", output={"branch": branch})
+                record(node, "success", output={"branch": branch})
                 propagate_branch(node, branch)
                 continue
             store(node, value)
-            record(node, "succeeded", output=value)
+            record(node, "success", output=value)
             propagate_taken(node)
             continue
 
         if node.type == "approval":
             decision = decisions.get(node.id)
             if decision not in APPROVAL_DECISIONS:
+                candidates = tuple(resolve_approvers(node)) if resolve_approvers else ()
+                if resolve_approvers is not None and not candidates:
+                    # Nobody can decide this approval, so parking the execution
+                    # would strand it forever. The node fails in place: its own
+                    # downstream is skipped while independent branches keep
+                    # running, and no approval request or token is ever created.
+                    node_failures.append(
+                        record(
+                            node,
+                            "failed",
+                            error_code=ErrorCode.APPROVAL_NO_VALID_APPROVER.value,
+                            error_message=(
+                                f"approval node '{node.id}' has no eligible approver"
+                            ),
+                        )
+                    )
+                    propagate_skip(node)
+                    continue
+                if candidates:
+                    approval_candidates[node.id] = candidates
                 waiting_node = node.id
                 record(node, "waiting_approval")
                 break
-            if decision == "reject":
+            if decision == "rejected":
                 failure = record(
                     node,
                     "failed",
@@ -717,8 +741,8 @@ def run_graph(
                     error_message=f"approval node '{node.id}' was rejected",
                 )
                 break
-            store(node, {"decision": "approve"})
-            record(node, "succeeded", output={"decision": "approve"})
+            store(node, {"decision": "approved"})
+            record(node, "success", output={"decision": "approved"})
             propagate_taken(node)
             continue
 
@@ -740,7 +764,7 @@ def run_graph(
             )
             break
         store(node, value)
-        record(node, "succeeded", output=value)
+        record(node, "success", output=value)
         propagate_taken(node)
 
     if waiting_node is not None:
@@ -750,9 +774,10 @@ def run_graph(
             edges=tuple(edge_outcomes),
             outputs=dict(results),
             waiting_approval_node_id=waiting_node,
+            approval_candidates=approval_candidates,
         )
     if failure is not None:
-        succeeded = sum(1 for step in steps if step.status == "succeeded")
+        succeeded = sum(1 for step in steps if step.status == "success")
         return GraphRun(
             status="partial" if succeeded else "failed",
             steps=tuple(steps),
@@ -761,8 +786,19 @@ def run_graph(
             error_code=failure.error_code,
             error_message=failure.error_message,
         )
+    if node_failures:
+        succeeded = sum(1 for step in steps if step.status == "success")
+        first = node_failures[0]
+        return GraphRun(
+            status="partial" if succeeded else "failed",
+            steps=tuple(steps),
+            edges=tuple(edge_outcomes),
+            outputs=dict(results),
+            error_code=first.error_code,
+            error_message=first.error_message,
+        )
     return GraphRun(
-        status="succeeded",
+        status="success",
         steps=tuple(steps),
         edges=tuple(edge_outcomes),
         outputs=dict(results),
@@ -1224,11 +1260,8 @@ class WorkBuddyRuntimeService:
             int(user_id): department_id
             for user_id, department_id in self._approver_resolver(actor.tenant_id, approvers)
         }
-        if not resolved:
-            raise OctopError(
-                ErrorCode.WORKBUDDY_APPROVAL_NOT_CONFIGURED,
-                f"approval node '{node.id}' has no eligible approver in this tenant",
-            )
+        # An empty resolution is not an error here: the caller decides between a
+        # node-scoped failure (nobody valid) and parking the execution.
         return sorted(resolved.items())
 
     def _audit(
@@ -1357,7 +1390,7 @@ class WorkBuddyRuntimeService:
         conn: Any = None,
     ) -> ExecutionRow | None:
         """Return the recorded execution for an idempotency key or raise on mismatch."""
-        if not key:
+        if not key or scope is None:
             return None
         existing = self._repo.get_execution_by_idempotency(
             self._ctx(actor), tenant_id=actor.tenant_id, scope=scope, key=key, conn=conn
@@ -1440,7 +1473,9 @@ class WorkBuddyRuntimeService:
                 trigger_type=trigger_type,
                 inputs=payload,
                 created_by_user_id=actor.user_id,
-                idempotency_scope=idempotency_scope,
+                # ``workbuddy_executions`` requires the scope and the key to be
+                # present together, so a run without a key carries neither.
+                idempotency_scope=idempotency_scope if idempotency_key else None,
                 idempotency_key=idempotency_key,
                 idempotency_hash=idempotency_hash,
                 conn=conn,
@@ -1488,7 +1523,7 @@ class WorkBuddyRuntimeService:
     def _replay_state(self, ctx: WorkBuddyDbContext, execution_id: str) -> ReplayState:
         steps = self._repo.list_step_runs(ctx, execution_id)
         return ReplayState(
-            outputs={step.node_id: step.output for step in steps if step.status == "succeeded"},
+            outputs={step.node_id: step.output for step in steps if step.status == "success"},
             skipped=frozenset(step.node_id for step in steps if step.status == "skipped"),
         )
 
@@ -1523,7 +1558,7 @@ class WorkBuddyRuntimeService:
             ctx,
             execution_id,
             status="running",
-            expected_status=("pending", "waiting_approval"),
+            expected_status=("queued", "waiting_approval"),
             mark_started=True,
         )
         run = run_graph(
@@ -1533,6 +1568,7 @@ class WorkBuddyRuntimeService:
             decisions=decisions,
             effects=self._effects,
             execution_id=execution_id,
+            resolve_approvers=lambda node: self._resolved_candidates(actor, node),
         )
         self._finalize(
             actor,
@@ -1587,12 +1623,18 @@ class WorkBuddyRuntimeService:
                 conn=conn,
             )
             if run.status == "waiting_approval" and run.waiting_approval_node_id is not None:
-                self._open_approval(actor, execution, run.waiting_approval_node_id, conn=conn)
+                self._open_approval(
+                    actor,
+                    execution,
+                    run.waiting_approval_node_id,
+                    run.approval_candidates.get(run.waiting_approval_node_id, ()),
+                    conn=conn,
+                )
                 self._repo.update_execution_status(
                     ctx,
                     execution.id,
                     status="waiting_approval",
-                    expected_status=("running", "pending"),
+                    expected_status=("running", "queued"),
                     conn=conn,
                 )
                 return
@@ -1600,7 +1642,7 @@ class WorkBuddyRuntimeService:
                 ctx,
                 execution.id,
                 status=run.status,
-                expected_status=("running", "pending", "waiting_approval"),
+                expected_status=("running", "queued", "waiting_approval"),
                 error_code=run.error_code,
                 error_message=run.error_message,
                 outputs=run.outputs,
@@ -1611,7 +1653,7 @@ class WorkBuddyRuntimeService:
                 self._repo.settle_quota_reservation(
                     ctx,
                     reservation_id,
-                    status="committed" if run.status == "succeeded" else "released",
+                    status="committed" if run.status == "success" else "released",
                     conn=conn,
                 )
             self._repo.record_quota_usage(
@@ -1648,7 +1690,7 @@ class WorkBuddyRuntimeService:
                 action="execution.finish",
                 resource_type="execution",
                 resource_id=execution.id,
-                outcome="allowed" if run.status == "succeeded" else "failed",
+                outcome="allowed" if run.status == "success" else "failed",
                 details={"status": run.status, "error_code": run.error_code},
                 conn=conn,
             )
@@ -1666,6 +1708,7 @@ class WorkBuddyRuntimeService:
         actor: RuntimeActor,
         execution: ExecutionRow,
         node_id: str,
+        candidates: Sequence[tuple[int, str | None]],
         *,
         conn: Any,
     ) -> str:
@@ -1675,7 +1718,6 @@ class WorkBuddyRuntimeService:
         if node is None:
             raise _invalid("approval node is not part of the locked workflow version")
         approvers, timeout_hours = approval_requirements(node)
-        candidates = self._resolved_candidates(actor, node)
         required = len(candidates)
         params = {
             "node_id": node_id,
@@ -1754,10 +1796,10 @@ class WorkBuddyRuntimeService:
             "pending",
             "running",
             "waiting_approval",
-            "succeeded",
+            "success",
             "failed",
             "partial",
-            "cancelled",
+            "canceled",
         }:
             raise _invalid("unknown execution status filter")
         tenant_scope = scope == "tenant"
@@ -1798,7 +1840,7 @@ class WorkBuddyRuntimeService:
             )
             for step in self._repo.list_step_runs(ctx, execution_id)
         ]
-        edges = [
+        edges: list[Mapping[str, Any]] = [
             {
                 "from": edge.edge_from,
                 "to": edge.edge_to,
@@ -1830,7 +1872,7 @@ class WorkBuddyRuntimeService:
             tenant_id=actor.tenant_id,
             topic="workbuddy.execution.finished",
             dedupe_key=f"{execution_id}:cancelled",
-            payload={"execution_id": execution_id, "status": "cancelled"},
+            payload={"execution_id": execution_id, "status": "canceled"},
         )
         updated = self._repo.get_execution(ctx, execution_id)
         if updated is None:
@@ -1848,7 +1890,7 @@ class WorkBuddyRuntimeService:
             )
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=APPROVAL_TOKEN_TTL_SECONDS)
+        expires_at = datetime.now(UTC) + timedelta(seconds=APPROVAL_TOKEN_TTL_SECONDS)
         ctx = self._ctx(actor)
         if not self._repo.issue_approval_challenge(
             ctx, approval_request_id, token_hash=token_hash, expires_at=expires_at
@@ -1876,7 +1918,7 @@ class WorkBuddyRuntimeService:
     ) -> ExecutionView:
         self._require_postgres()
         if decision not in APPROVAL_DECISIONS:
-            raise _invalid("decision must be 'approve' or 'reject'")
+            raise _invalid("decision must be 'approved' or 'rejected'")
         execution = self._load_execution(actor, execution_id)
         if execution.status != "waiting_approval":
             raise OctopError(
@@ -1902,16 +1944,16 @@ class WorkBuddyRuntimeService:
             ctx,
             approval_request_id,
             user_id=actor.user_id,
-            decision="approved" if decision == "approve" else "rejected",
+            decision=decision,
         ):
             raise _not_found()
         decided = self._repo.count_decided_approvals(ctx, approval_request_id)
-        if decision == "reject":
+        if decision == "rejected":
             self._repo.settle_approval_request(
                 ctx,
                 approval_request_id,
                 status="rejected",
-                decision="reject",
+                decision="rejected",
                 decided_by_user_id=actor.user_id,
                 decided_approvals=decided,
             )
@@ -1920,7 +1962,7 @@ class WorkBuddyRuntimeService:
                 ctx,
                 approval_request_id,
                 status="approved",
-                decision="approve",
+                decision="approved",
                 decided_by_user_id=actor.user_id,
                 decided_approvals=decided,
             )
@@ -1953,9 +1995,9 @@ class WorkBuddyRuntimeService:
         decisions: dict[str, str] = {}
         for row in rows:
             if row.status == "approved":
-                decisions[row.node_id] = "approve"
+                decisions[row.node_id] = "approved"
             elif row.status == "rejected":
-                decisions[row.node_id] = "reject"
+                decisions[row.node_id] = "rejected"
         return decisions
 
     # -- reconciliations ----------------------------------------------------
@@ -1974,7 +2016,7 @@ class WorkBuddyRuntimeService:
         if status not in RECONCILIATION_STATUSES:
             raise _invalid("reconciliation status is not supported")
         execution = self._load_execution(actor, execution_id)
-        if execution.status in {"succeeded", "cancelled", "failed"}:
+        if execution.status in {"success", "canceled", "failed"}:
             raise OctopError(
                 ErrorCode.WORKBUDDY_RECONCILIATION_CONFLICT,
                 "execution is in a state that does not accept reconciliation",
@@ -2013,7 +2055,7 @@ class WorkBuddyRuntimeService:
             self._repo.update_execution_status(
                 ctx,
                 execution_id,
-                status="succeeded",
+                status="success",
                 expected_status=("partial",),
                 mark_finished=True,
             )
@@ -2149,7 +2191,7 @@ class WorkBuddyRuntimeService:
     ) -> JobView:
         """Settlement of a job fact; allowed while the tenant is suspended."""
         self._require_postgres()
-        if status not in {"succeeded", "failed", "cancelled"}:
+        if status not in {"success", "failed", "canceled"}:
             raise _invalid("job completion status is not supported")
         ctx = self._ctx(actor)
         self._repo.finish_job(
@@ -2301,7 +2343,7 @@ class WorkBuddyRuntimeService:
         self._require_postgres()
         ctx = self._ctx(actor)
         window_days = max(1, min(int(days), 365))
-        since = datetime.now(timezone.utc) - timedelta(days=window_days)
+        since = datetime.now(UTC) - timedelta(days=window_days)
         by_status = self._repo.execution_counts(
             ctx,
             tenant_id=actor.tenant_id,

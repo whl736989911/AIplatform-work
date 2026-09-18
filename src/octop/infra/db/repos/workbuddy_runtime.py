@@ -42,6 +42,20 @@ def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _jsonb(value: Any) -> Any:
+    """Bind a value destined for a jsonb column.
+
+    psycopg cannot adapt a dict or list, so mappings and sequences are sent as
+    JSON text; strings and NULL pass through untouched. Without this every write
+    to a jsonb column fails with "cannot adapt type 'dict'".
+    """
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
 def _row_value(row: Mapping[str, Any], key: str, default: Any = None) -> Any:
     try:
         value = row[key]
@@ -134,7 +148,7 @@ class ExecutionRow:
 
     @property
     def is_terminal(self) -> bool:
-        return self.status in {"succeeded", "failed", "partial", "cancelled"}
+        return self.status in {"success", "failed", "partial", "canceled"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +331,7 @@ class JobRow:
     progress: int
     execution_id: str | None
     requested_by_user_id: int | None
+    request_hash: str | None
     result: Any
     error_code: str | None
     error_message: str | None
@@ -337,6 +352,7 @@ class JobRow:
                 if row["requested_by_user_id"] is not None
                 else None
             ),
+            request_hash=row["request_hash"],
             result=row["result"],
             error_code=row["error_code"],
             error_message=row["error_message"],
@@ -555,7 +571,7 @@ class WorkBuddyRuntimeRepo:
                     id, tenant_id, workflow_id, workflow_version_id, workflow_version_hash,
                     definition_snapshot, status, trigger_type, idempotency_scope,
                     idempotency_key, idempotency_hash, inputs, created_by_user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rid,
@@ -563,12 +579,12 @@ class WorkBuddyRuntimeRepo:
                     workflow_id,
                     workflow_version_id,
                     workflow_version_hash,
-                    dict(definition_snapshot),
+                    _jsonb(definition_snapshot),
                     trigger_type,
                     idempotency_scope,
                     idempotency_key,
                     idempotency_hash,
-                    dict(inputs),
+                    _jsonb(inputs),
                     created_by_user_id,
                 ),
             )
@@ -633,7 +649,7 @@ class WorkBuddyRuntimeRepo:
                     id, tenant_id, workflow_id, workflow_version_id, workflow_version_hash,
                     definition_snapshot, status, trigger_type, idempotency_scope,
                     idempotency_key, idempotency_hash, inputs, created_by_user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (tenant_id, idempotency_scope, idempotency_key)
                   WHERE idempotency_key IS NOT NULL DO NOTHING
                 """,
@@ -643,12 +659,12 @@ class WorkBuddyRuntimeRepo:
                     workflow_id,
                     workflow_version_id,
                     workflow_version_hash,
-                    dict(definition_snapshot),
+                    _jsonb(definition_snapshot),
                     trigger_type,
                     idempotency_scope,
                     idempotency_key,
                     idempotency_hash,
-                    dict(inputs),
+                    _jsonb(inputs),
                     created_by_user_id,
                 ),
             )
@@ -736,7 +752,7 @@ class WorkBuddyRuntimeRepo:
             params.append(error_message)
         if outputs is not None:
             assignments.append("outputs = ?")
-            params.append(dict(outputs))
+            params.append(_jsonb(outputs))
         if mark_started:
             assignments.append("started_at = COALESCE(started_at, now())")
         if mark_finished:
@@ -763,7 +779,7 @@ class WorkBuddyRuntimeRepo:
             cursor = c.execute(
                 """
                 UPDATE workbuddy_executions
-                SET status = 'cancelled', cancel_requested_at = now(), finished_at = now()
+                SET status = 'canceled', cancel_requested_at = now(), finished_at = now()
                 WHERE id = ? AND status IN ('pending', 'running', 'waiting_approval')
                 """,
                 (execution_id,),
@@ -794,7 +810,7 @@ class WorkBuddyRuntimeRepo:
                     id, tenant_id, execution_id, kind, node_id, sha256, size_bytes, content
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (rid, tenant_id, execution_id, kind, node_id, sha256, size_bytes, content),
+                (rid, tenant_id, execution_id, kind, node_id, sha256, size_bytes, _jsonb(content)),
             )
         return rid
 
@@ -835,7 +851,7 @@ class WorkBuddyRuntimeRepo:
         conn: Any | None = None,
     ) -> str:
         rid = step_run_id or new_runtime_id()
-        finished_at = "now()" if status in {"succeeded", "failed", "skipped"} else "NULL"
+        finished_at = "now()" if status in {"success", "failed", "skipped"} else "NULL"
         with runtime_transaction(self._db, ctx, conn) as c:
             c.execute(
                 f"""
@@ -856,7 +872,7 @@ class WorkBuddyRuntimeRepo:
                     save_as,
                     input_sha256,
                     output_sha256,
-                    output,
+                    _jsonb(output),
                     error_code,
                     error_message,
                     fence,
@@ -946,7 +962,7 @@ class WorkBuddyRuntimeRepo:
                     node_id,
                     required_approvals,
                     params_sha256,
-                    params,
+                    _jsonb(params),
                     locked_workflow_version_id,
                     locked_workflow_version_hash,
                 ),
@@ -1190,7 +1206,7 @@ class WorkBuddyRuntimeRepo:
                     node_id,
                     status,
                     external_ref,
-                    evidence,
+                    _jsonb(evidence),
                     evidence_sha256,
                     int(recorded_by_user_id),
                 ),
@@ -1344,7 +1360,7 @@ class WorkBuddyRuntimeRepo:
                 INSERT INTO workbuddy_outbox(id, tenant_id, topic, dedupe_key, payload)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (rid, tenant_id, topic, dedupe_key, dict(payload)),
+                (rid, tenant_id, topic, dedupe_key, _jsonb(payload)),
             )
         return rid
 
@@ -1628,7 +1644,7 @@ class WorkBuddyRuntimeRepo:
                     resource_type,
                     resource_id,
                     outcome,
-                    dict(details or {}),
+                    _jsonb(details or {}),
                 ),
             )
         return rid
@@ -1791,7 +1807,7 @@ class WorkBuddyRuntimeRepo:
                     id, tenant_id, session_id, role, content, model_revision, usage
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (rid, tenant_id, session_id, role, content, model_revision, usage),
+                (rid, tenant_id, session_id, role, _jsonb(content), model_revision, _jsonb(usage)),
             )
             c.execute(
                 """

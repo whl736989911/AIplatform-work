@@ -472,7 +472,7 @@ def test_semantic_resolution_fails_closed_and_surfaces_codes() -> None:
     assert caught.value.code == WORKFLOW_MODEL_NOT_CONFIGURED
 
 
-def test_approver_refusal_uses_pointed_code_and_path() -> None:
+def test_publish_requires_at_least_one_valid_approver() -> None:
     definition = {
         "schema_version": 1,
         "trigger": manual_trigger(),
@@ -498,12 +498,25 @@ def test_approver_refusal_uses_pointed_code_and_path() -> None:
             return None
 
         def check_approver(self, user_id):
+            if user_id == APPROVER:
+                return None
             return SemanticDecision.refused(WORKFLOW_APPROVER_INVALID, "not a tenant member")
 
     with pytest.raises(WorkflowCompileError) as caught:
+        # Every declared approver has left the tenant.
+        definition["nodes"][0]["config"]["approver_user_ids"] = ["9d1e5b3c-7a42-4f18-8c62-5b0d9e3a7f21"]
         compile_workflow_definition(definition, resolver=Resolver())
-    assert caught.value.code == WORKFLOW_APPROVER_INVALID
-    assert caught.value.path == "nodes.approve.config.approver_user_ids[0]"
+    # Nobody can approve, so the version must not reach a tenant.
+    assert caught.value.code == "APPROVAL_NO_VALID_APPROVER"
+    assert caught.value.path == "nodes.approve.config.approver_user_ids"
+
+    # A departed colleague is tolerated as long as someone else can still decide.
+    definition["nodes"][0]["config"]["approver_user_ids"] = [
+        APPROVER,
+        "8b7d4c2a-19f5-4a33-9c5e-2f7b6d0a1e44",
+    ]
+    compiled = compile_workflow_definition(definition, resolver=Resolver())
+    assert compiled.definition_sha256
 
 
 def test_stored_definition_hash_round_trip() -> None:

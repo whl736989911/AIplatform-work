@@ -38,6 +38,7 @@ from typing import Any, Protocol, runtime_checkable
 from jsonschema import Draft7Validator, FormatChecker
 from jsonschema.exceptions import SchemaError, ValidationError
 
+from octop.infra.errors import ErrorCode
 from octop.infra.workbuddy.cel_sandbox import CELSandboxError, evaluate_cel
 
 WORKFLOW_SCHEMA_VERSION = 1
@@ -68,7 +69,6 @@ WORKFLOW_EDGE_UNEXPECTED_WHEN = "WORKFLOW_EDGE_UNEXPECTED_WHEN"
 WORKFLOW_CONDITION_EDGES = "WORKFLOW_CONDITION_EDGES"
 WORKFLOW_APPROVAL_EDGES = "WORKFLOW_APPROVAL_EDGES"
 WORKFLOW_APPROVAL_TARGET = "WORKFLOW_APPROVAL_TARGET"
-WORKFLOW_FAN_OUT = "WORKFLOW_FAN_OUT"
 WORKFLOW_ENTRY_COUNT = "WORKFLOW_ENTRY_COUNT"
 WORKFLOW_CYCLE = "WORKFLOW_CYCLE"
 WORKFLOW_UNREACHABLE = "WORKFLOW_UNREACHABLE"
@@ -656,12 +656,8 @@ class _Compiler:
                         path=f"nodes.{node_id}.config.expression",
                     )
                 continue
-            if len(explicit) > 1:
-                raise WorkflowCompileError(
-                    WORKFLOW_FAN_OUT,
-                    f"node {node_id!r} has {len(explicit)} outgoing edges; only condition nodes branch",
-                    path=f"nodes.{node_id}",
-                )
+            # Every outgoing edge of a non-condition node is activated, so
+            # several of them are a parallel split rather than an error.
             approval_target = self._approval_target(node)
             if approval_target is None:
                 continue
@@ -875,12 +871,19 @@ class _Compiler:
                         path=f"nodes.{node_id}.config.knowledge_base_ids[{index}]",
                     )
             elif node_type == "approval":
-                for index, approver in enumerate(config.get("approver_user_ids") or []):
-                    self._apply_decision(
-                        resolver.check_approver(str(approver)),
-                        fallback_code=WORKFLOW_APPROVER_INVALID,
-                        fallback_message="approver is not an active member of this tenant",
-                        path=f"nodes.{node_id}.config.approver_user_ids[{index}]",
+                # Only "nobody can approve" blocks a publish: a declared approver
+                # who has left is tolerated here and surfaces at run time as a
+                # node failure (APPROVAL_NO_VALID_APPROVER) instead.
+                valid = 0
+                for approver in config.get("approver_user_ids") or []:
+                    decision = resolver.check_approver(str(approver))
+                    if decision is None or decision.ok:
+                        valid += 1
+                if not valid:
+                    raise WorkflowCompileError(
+                        ErrorCode.APPROVAL_NO_VALID_APPROVER.value,
+                        f"approval node {node_id!r} has no valid approver in this tenant",
+                        path=f"nodes.{node_id}.config.approver_user_ids",
                     )
         return "passed"
 

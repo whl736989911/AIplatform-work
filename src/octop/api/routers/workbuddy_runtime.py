@@ -25,6 +25,7 @@ from octop.api.routers.workbuddy_identity import (
     workbuddy_envelope,
     workbuddy_principal,
 )
+from octop.infra.db.pool import DatabasePool
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.runtime import (
     APPROVAL_DECISIONS,
@@ -50,7 +51,7 @@ def _service(server: Any) -> WorkBuddyRuntimeService:
     if services is None:
         raise OctopError(ErrorCode.SETUP_REQUIRED, _DATABASE_NOT_CONFIGURED, status=503)
     db = getattr(services, "db", None)
-    if getattr(db, "dialect", "") != "postgresql":
+    if not isinstance(db, DatabasePool) or db.dialect != "postgresql":
         raise OctopError(ErrorCode.WORKBUDDY_POSTGRES_REQUIRED, _POSTGRES_REQUIRED)
     return WorkBuddyRuntimeService(db)
 
