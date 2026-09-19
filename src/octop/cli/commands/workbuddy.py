@@ -44,6 +44,47 @@ def cel(expression: str, context_json: str) -> None:
     click.echo(json.dumps({"status": "passed", **result.to_dict()}, ensure_ascii=False))
 
 
+@workbuddy.command("worker")
+@click.option(
+    "--worker-id",
+    default=None,
+    help="Lease holder name; defaults to host:pid:random.",
+)
+def worker(worker_id: str | None) -> None:
+    """Run accepted executions from the PostgreSQL control plane.
+
+    This is the worker tier of the published topology. A single-process install
+    already hosts it inside the server; a deployment that scales the execution
+    tier separately sets ``OCTOP_WORKBUDDY_WORKER=off`` on the API and runs this
+    command instead.
+    """
+    import asyncio
+
+    from octop.config import load_config
+    from octop.infra.db.factory import open_database
+    from octop.infra.db.migrate import run_migrations
+    from octop.infra.utils.env_file import apply_env_file, env_file_path
+    from octop.infra.utils.paths import PathLayout
+    from octop.infra.workbuddy.worker import serve_worker
+
+    paths = PathLayout.from_env()
+    paths.ensure_root()
+    apply_env_file(env_file_path(paths.root))
+    config = load_config(paths.config)
+    db = open_database(config, paths)
+    if db.dialect != "postgresql":
+        _fail(
+            "DEPENDENCY_UNAVAILABLE",
+            "the execution worker needs the PostgreSQL control plane",
+        )
+        return
+    try:
+        run_migrations(db)
+        asyncio.run(serve_worker(db, worker_id=worker_id))
+    finally:
+        db.close()
+
+
 @workbuddy.command("dependencies")
 def dependencies() -> None:
     """Probe locked components and configured external dependencies as secret-free JSON."""

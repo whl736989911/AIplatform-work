@@ -134,7 +134,17 @@ BIND_HOST="${OCTOP_BIND_HOST:-0.0.0.0}"
 BIND_PORT="${OCTOP_PORT:-8088}"
 export OCTOP_BIND_HOST="$BIND_HOST" OCTOP_PORT="$BIND_PORT"
 
-printf '{"status":"starting","service":"app","database":"postgresql","object_storage":{%s},"vault":{%s}}\n' \
-    "$storage_state" "$vault_state"
+# --- which tier this container is --------------------------------------------
+# The published topology separates the API (no in-process execution state) from
+# the worker that claims and runs executions. Both tiers build the same DSN from
+# the same secret files; only the process they exec differs.
+DEPLOY_SERVICE="${OCTOP_DEPLOY_SERVICE:-app}"
+
+printf '{"status":"starting","service":"%s","database":"postgresql","object_storage":{%s},"vault":{%s}}\n' \
+    "$DEPLOY_SERVICE" "$storage_state" "$vault_state"
+
+if [ "$DEPLOY_SERVICE" = "worker" ]; then
+    exec octop workbuddy-worker
+fi
 
 exec octop run --host "$BIND_HOST" --port "$BIND_PORT"

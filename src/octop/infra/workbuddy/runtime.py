@@ -32,12 +32,14 @@ from octop.infra.db.repos.workbuddy_runtime import (
     AuditLogRow,
     ChatMessageRow,
     ChatSessionRow,
+    ExecutionClaim,
     ExecutionRow,
     JobRow,
     NotificationRow,
     ReconciliationRow,
     WorkBuddyRuntimeRepo,
     canonical_json,
+    execution_lease_name,
     new_runtime_id,
     require_postgres,
     runtime_transaction,
@@ -1318,10 +1320,16 @@ class ProposalCanaryDirectory:
 @dataclass(frozen=True, slots=True)
 class RuntimeActor:
     tenant_id: str
-    user_id: int
+    user_id: int | None
     role: str
     tenant_status: str
     department_id: str | None = None
+    # ``kind`` names the audit actor explicitly for actors that are not members
+    # (the worker runs an execution on the platform's behalf).
+    kind: str | None = None
+    # A platform actor is not bounded by the per-user ownership rule that scopes
+    # ordinary members to the work they started.
+    platform: bool = False
 
     @property
     def is_admin(self) -> bool:
@@ -1329,7 +1337,17 @@ class RuntimeActor:
 
     @property
     def actor_kind(self) -> str:
-        return "admin" if self.is_admin else "member"
+        return self.kind or ("admin" if self.is_admin else "member")
+
+    @property
+    def acting_user_id(self) -> int:
+        """The user id a write must name; only a platform actor lacks one."""
+        if self.user_id is None:
+            raise OctopError(
+                ErrorCode.INTERNAL_ERROR,
+                "this operation needs an acting user",
+            )
+        return self.user_id
 
     @property
     def suspended(self) -> bool:
@@ -1763,6 +1781,18 @@ class WorkBuddyRuntimeService:
         )
         self._canary = canary or NO_CANARY_EVALUATION
 
+    @classmethod
+    def for_control_plane(cls, db: DatabasePool) -> WorkBuddyRuntimeService:
+        """The service as a deployment wires it: PostgreSQL facts plus canary routing.
+
+        Side-effect adapters stay fail-closed (``UNAVAILABLE_SIDE_EFFECTS``) until
+        the platform tool catalogue can resolve a published revision; a
+        deployment that has one injects ``effects=``. The API router and the
+        execution worker both build the service this way, so a run means the same
+        thing whichever tier evaluates it.
+        """
+        return cls(db, canary=ProposalCanaryDirectory(db))
+
     # -- helpers ------------------------------------------------------------
 
     def _require_postgres(self) -> None:
@@ -1808,7 +1838,9 @@ class WorkBuddyRuntimeService:
         self, actor: RuntimeActor, execution_id: str, *, conn: Any = None
     ) -> ExecutionRow:
         row = self._repo.get_execution(self._ctx(actor), execution_id, conn=conn)
-        if row is None or (not actor.is_admin and row.created_by_user_id != actor.user_id):
+        if row is None or (
+            not actor.is_admin and not actor.platform and row.created_by_user_id != actor.user_id
+        ):
             raise _not_found()
         return row
 
@@ -1942,33 +1974,6 @@ class WorkBuddyRuntimeService:
                 limits[metric] = int(limit)
         return limits
 
-    def _reserve_concurrency_slot(
-        self,
-        actor: RuntimeActor,
-        *,
-        execution_id: str,
-        limits: Mapping[str, int],
-        conn: Any,
-    ) -> str:
-        self._repo.lock_tenant_quota(self._ctx(actor), tenant_id=actor.tenant_id, conn=conn)
-        self._enforce_quota(
-            actor,
-            quota_key="concurrency",
-            amount=1,
-            limits=limits,
-            conn=conn,
-            include_usage=False,
-        )
-        return self._repo.reserve_quota(
-            self._ctx(actor),
-            tenant_id=actor.tenant_id,
-            quota_key="concurrency",
-            amount=1,
-            scope="execution",
-            execution_id=execution_id,
-            conn=conn,
-        )
-
     def _settle_execution_quota(
         self,
         actor: RuntimeActor,
@@ -1978,6 +1983,7 @@ class WorkBuddyRuntimeService:
         consume: bool,
     ) -> None:
         ctx = self._ctx(actor)
+        settled = 0
         for reservation in self._repo.list_live_quota_reservations(
             ctx, tenant_id=actor.tenant_id, execution_id=execution_id, conn=conn
         ):
@@ -1989,7 +1995,10 @@ class WorkBuddyRuntimeService:
                 else "released",
                 conn=conn,
             )
-        if consume:
+            settled += 1
+        # One consumption per execution: it is recorded when the reservation that
+        # carried it is settled, never a second time from a later terminal path.
+        if consume and settled:
             self._repo.record_quota_usage(
                 ctx,
                 tenant_id=actor.tenant_id,
@@ -2116,7 +2125,13 @@ class WorkBuddyRuntimeService:
         quota_limits: Mapping[str, int] | None = None,
         subject: str | None = None,
     ) -> ExecutionView:
-        """Accept one execution: suspension gate, idempotency, quota, run."""
+        """Accept one execution: suspension gate, idempotency, monthly allowance.
+
+        Acceptance runs nothing. The execution is recorded ``queued`` and a
+        worker admits it afterwards, which is where the running-slot ceiling is
+        applied (contract §8.1: the API tier holds no in-process execution state,
+        and a waiting execution holds no slot).
+        """
         self._require_postgres()
         self._assert_tenant_active(actor)
         if quota_limits is None:
@@ -2139,9 +2154,9 @@ class WorkBuddyRuntimeService:
             if route is not None
             else self._versions.load_active(ctx, workflow_id)
         )
-        graph = compile_locked_definition(
-            locked.definition, locked.definition_sha256, version_id=locked.version_id
-        )
+        # The definition was compiled when it was published and the execution
+        # locks its hash, so acceptance only has to reject a payload the declared
+        # inputs cannot accept; the worker compiles the locked snapshot again.
         payload = _validate_execution_inputs(locked.definition, payload)
         payload_sha, payload_size = _hash_json(payload)
         idempotency_hash = (
@@ -2185,12 +2200,6 @@ class WorkBuddyRuntimeService:
                 execution_id=execution_id,
                 conn=conn,
             )
-            self._reserve_concurrency_slot(
-                actor,
-                execution_id=execution_id,
-                limits=quota_limits,
-                conn=conn,
-            )
             if not self._repo.insert_execution_if_absent(
                 ctx,
                 tenant_id=actor.tenant_id,
@@ -2201,7 +2210,7 @@ class WorkBuddyRuntimeService:
                 definition_snapshot=dict(locked.definition),
                 trigger_type=trigger_type,
                 inputs=payload,
-                created_by_user_id=actor.user_id,
+                created_by_user_id=actor.acting_user_id,
                 # ``workbuddy_executions`` requires the scope and the key to be
                 # present together, so a run without a key carries neither.
                 idempotency_scope=idempotency_scope if idempotency_key else None,
@@ -2250,7 +2259,10 @@ class WorkBuddyRuntimeService:
                 details={"workflow_id": workflow_id, "trigger_type": trigger_type},
                 conn=conn,
             )
-        return self._run_execution(actor, execution_id, graph=graph, decisions={})
+            accepted = self._repo.get_execution(ctx, execution_id, conn=conn)
+        if accepted is None:  # pragma: no cover - defensive
+            raise _not_found()
+        return _execution_view(accepted)
 
     def _replay_state(self, ctx: WorkBuddyDbContext, execution_id: str) -> ReplayState:
         steps = self._repo.list_step_runs(ctx, execution_id)
@@ -2269,60 +2281,129 @@ class WorkBuddyRuntimeService:
             },
         )
 
-    def _run_execution(
-        self,
-        actor: RuntimeActor,
-        execution_id: str,
-        *,
-        graph: WorkflowGraph,
-        decisions: Mapping[str, str],
-    ) -> ExecutionView:
-        ctx = self._ctx(actor)
-        lease_name = f"execution:{execution_id}"
-        fence = self._repo.acquire_lease(
-            ctx,
-            tenant_id=actor.tenant_id,
-            lease_name=lease_name,
-            holder=str(actor.user_id),
-            ttl_seconds=600,
-        )
-        if fence is None:
-            raise OctopError(
-                ErrorCode.WORKBUDDY_FENCE_STALE,
-                "another runner owns this execution",
-            )
-        execution = self._repo.get_execution(ctx, execution_id)
+    def run_claimed_execution(self, claim: ExecutionClaim) -> None:
+        """Run one execution a worker admitted under ``claim``.
+
+        The claim already took the running slot and the lease and moved the
+        execution to ``running``, so this evaluates the locked definition,
+        commits the attempt under the claim's fence, and hands the slot and the
+        lease back -- whether the run finished, parked for a human, or could not
+        be interpreted at all.
+        """
+        ctx = WorkBuddyDbContext.for_tenant(claim.tenant_id)
+        execution = self._repo.get_execution(ctx, claim.execution_id)
+        lease_name = execution_lease_name(claim.execution_id)
         if execution is None or execution.is_terminal:
-            raise _not_found()
-        replay = self._replay_state(ctx, execution_id)
-        self._repo.update_execution_status(
-            ctx,
-            execution_id,
-            status="running",
-            expected_status=("queued", "waiting_approval", "waiting_reconciliation"),
-            mark_started=True,
+            self._close_claim(claim, lease_name)
+            return
+        actor = RuntimeActor(
+            tenant_id=claim.tenant_id,
+            user_id=execution.created_by_user_id,
+            role="member",
+            tenant_status="active",
+            # The platform runs what the workflow's definition declares; the
+            # audit trail records the worker, not a borrowed user identity.
+            kind="system",
+            platform=True,
         )
+        try:
+            graph = self._graph_from_snapshot(execution)
+        except WorkflowCompileError as exc:
+            # A locked definition the engine cannot interpret is an invariant
+            # failure with a root cause, never a run that silently never lands.
+            self._fail_claimed_execution(actor, execution, claim, lease_name, exc)
+            return
         run = run_graph(
             graph,
             inputs=execution.inputs,
-            replay=replay,
-            decisions=decisions,
+            replay=self._replay_state(ctx, claim.execution_id),
+            decisions=self._recorded_decisions(ctx, execution),
             effects=self._effects,
-            execution_id=execution_id,
+            execution_id=claim.execution_id,
             resolve_approvers=lambda node: self._resolved_candidates(actor, node),
         )
-        self._finalize(
-            actor,
-            execution,
-            run,
-            graph,
-            fence=fence,
-            lease_name=lease_name,
+        self._finalize(actor, execution, run, graph, claim=claim, lease_name=lease_name)
+
+    def _close_claim(self, claim: ExecutionClaim, lease_name: str) -> None:
+        """Give back a claim whose execution no longer needs running."""
+        actor = RuntimeActor(
+            tenant_id=claim.tenant_id,
+            user_id=None,
+            role="member",
+            tenant_status="active",
+            kind="system",
+            platform=True,
         )
-        updated = self._repo.get_execution(ctx, execution_id)
-        if updated is None:
-            raise _not_found()
-        return _execution_view(updated)
+        ctx = self._ctx(actor)
+        with runtime_transaction(self._db, ctx) as conn:
+            if not self._repo.verify_fence(
+                ctx,
+                tenant_id=claim.tenant_id,
+                lease_name=lease_name,
+                holder=claim.worker_id,
+                fence=claim.fence,
+                conn=conn,
+            ):
+                return
+            self._settle_execution_quota(actor, claim.execution_id, conn=conn, consume=True)
+            self._repo.release_lease(
+                ctx,
+                tenant_id=claim.tenant_id,
+                lease_name=lease_name,
+                holder=claim.worker_id,
+                fence=claim.fence,
+                conn=conn,
+            )
+
+    def _fail_claimed_execution(
+        self,
+        actor: RuntimeActor,
+        execution: ExecutionRow,
+        claim: ExecutionClaim,
+        lease_name: str,
+        error: Exception,
+    ) -> None:
+        """Fail an execution whose locked definition cannot be interpreted."""
+        ctx = self._ctx(actor)
+        with runtime_transaction(self._db, ctx) as conn:
+            if not self._repo.verify_fence(
+                ctx,
+                tenant_id=claim.tenant_id,
+                lease_name=lease_name,
+                holder=claim.worker_id,
+                fence=claim.fence,
+                conn=conn,
+            ):
+                return
+            self._repo.update_execution_status(
+                ctx,
+                execution.id,
+                status="failed",
+                expected_status=("running",),
+                expected_fence=claim.fence,
+                error_code=ErrorCode.WORKBUDDY_VALIDATION_FAILED.value,
+                error_message=str(error)[:500],
+                mark_finished=True,
+                conn=conn,
+            )
+            self._settle_execution_quota(actor, execution.id, conn=conn, consume=True)
+            self._audit(
+                actor,
+                action="execution.finish",
+                resource_type="execution",
+                resource_id=execution.id,
+                outcome="failed",
+                details={"status": "failed", "error_code": "WORKBUDDY_VALIDATION_FAILED"},
+                conn=conn,
+            )
+            self._repo.release_lease(
+                ctx,
+                tenant_id=claim.tenant_id,
+                lease_name=lease_name,
+                holder=claim.worker_id,
+                fence=claim.fence,
+                conn=conn,
+            )
 
     def _finalize(
         self,
@@ -2331,11 +2412,12 @@ class WorkBuddyRuntimeService:
         run: GraphRun,
         graph: WorkflowGraph,
         *,
-        fence: int,
+        claim: ExecutionClaim,
         lease_name: str,
     ) -> None:
         """Commit the attempt inside one fenced transaction, or commit nothing."""
         ctx = self._ctx(actor)
+        fence = claim.fence
         previous_steps = self._repo.list_step_runs(ctx, execution.id)
         attempt = max((step.attempt for step in previous_steps), default=0)
 
@@ -2344,7 +2426,7 @@ class WorkBuddyRuntimeService:
                 ctx,
                 tenant_id=actor.tenant_id,
                 lease_name=lease_name,
-                holder=str(actor.user_id),
+                holder=claim.worker_id,
                 fence=fence,
                 conn=conn,
             ):
@@ -2368,7 +2450,8 @@ class WorkBuddyRuntimeService:
                     ctx,
                     execution.id,
                     status="waiting_reconciliation",
-                    expected_status=("running", "queued"),
+                    expected_status=("running",),
+                    expected_fence=fence,
                     outputs=run.outputs,
                     conn=conn,
                 )
@@ -2392,6 +2475,17 @@ class WorkBuddyRuntimeService:
                     details={"node_id": run.reconciliation_node_id},
                     conn=conn,
                 )
+                # A parked execution is waiting for an operator, not running, so
+                # it holds no running slot; the reconciliation re-queues it.
+                self._release_concurrency_slot(actor, execution.id, conn=conn)
+                self._repo.release_lease(
+                    ctx,
+                    tenant_id=actor.tenant_id,
+                    lease_name=lease_name,
+                    holder=claim.worker_id,
+                    fence=fence,
+                    conn=conn,
+                )
                 return
             if run.status == "waiting_approval" and run.waiting_approval_node_id is not None:
                 self._open_approval(
@@ -2405,7 +2499,8 @@ class WorkBuddyRuntimeService:
                     ctx,
                     execution.id,
                     status="waiting_approval",
-                    expected_status=("running", "queued"),
+                    expected_status=("running",),
+                    expected_fence=fence,
                     conn=conn,
                 )
                 self._release_concurrency_slot(actor, execution.id, conn=conn)
@@ -2413,7 +2508,7 @@ class WorkBuddyRuntimeService:
                     ctx,
                     tenant_id=actor.tenant_id,
                     lease_name=lease_name,
-                    holder=str(actor.user_id),
+                    holder=claim.worker_id,
                     fence=fence,
                     conn=conn,
                 )
@@ -2422,7 +2517,8 @@ class WorkBuddyRuntimeService:
                 ctx,
                 execution.id,
                 status=run.status,
-                expected_status=("running", "queued", "waiting_approval", "waiting_reconciliation"),
+                expected_status=("running",),
+                expected_fence=fence,
                 error_code=run.error_code,
                 error_message=run.error_message,
                 outputs=run.outputs,
@@ -2442,17 +2538,18 @@ class WorkBuddyRuntimeService:
                 payload={"execution_id": execution.id, "status": run.status},
                 conn=conn,
             )
-            self._repo.insert_notification(
-                ctx,
-                tenant_id=actor.tenant_id,
-                user_id=execution.created_by_user_id or actor.user_id,
-                kind="execution.finished",
-                title=f"Execution {run.status}",
-                body=run.error_message,
-                resource_type="execution",
-                resource_id=execution.id,
-                conn=conn,
-            )
+            if execution.created_by_user_id is not None:
+                self._repo.insert_notification(
+                    ctx,
+                    tenant_id=actor.tenant_id,
+                    user_id=execution.created_by_user_id,
+                    kind="execution.finished",
+                    title=f"Execution {run.status}",
+                    body=run.error_message,
+                    resource_type="execution",
+                    resource_id=execution.id,
+                    conn=conn,
+                )
             self._audit(
                 actor,
                 action="execution.finish",
@@ -2466,7 +2563,7 @@ class WorkBuddyRuntimeService:
                 ctx,
                 tenant_id=actor.tenant_id,
                 lease_name=lease_name,
-                holder=str(actor.user_id),
+                holder=claim.worker_id,
                 fence=fence,
                 conn=conn,
             )
@@ -2705,11 +2802,16 @@ class WorkBuddyRuntimeService:
         decision: str,
         token: str,
     ) -> ExecutionView:
+        """Apply one approval decision and re-queue the execution for admission.
+
+        A parked execution holds no running slot, so the decision only moves it
+        back to ``queued``: the worker admits it again when the tenant has a slot
+        free, exactly like the first attempt.
+        """
         self._require_postgres()
         if decision not in APPROVAL_DECISIONS:
             raise _invalid("decision must be 'approved' or 'rejected'")
         ctx = self._ctx(actor)
-        limits = self._tenant_quota_limits(actor.tenant_id)
         with runtime_transaction(self._db, ctx) as conn:
             execution = self._load_execution(actor, execution_id, conn=conn)
             if execution.status == "waiting_reconciliation":
@@ -2749,7 +2851,7 @@ class WorkBuddyRuntimeService:
             if not self._repo.decide_candidate(
                 ctx,
                 approval_request_id,
-                user_id=actor.user_id,
+                user_id=actor.acting_user_id,
                 decision=decision,
                 conn=conn,
             ):
@@ -2764,7 +2866,7 @@ class WorkBuddyRuntimeService:
                     approval_request_id,
                     status="rejected",
                     decision="rejected",
-                    decided_by_user_id=actor.user_id,
+                    decided_by_user_id=actor.acting_user_id,
                     decided_approvals=decided,
                     conn=conn,
                 )
@@ -2774,7 +2876,7 @@ class WorkBuddyRuntimeService:
                     approval_request_id,
                     status="approved",
                     decision="approved",
-                    decided_by_user_id=actor.user_id,
+                    decided_by_user_id=actor.acting_user_id,
                     decided_approvals=decided,
                     conn=conn,
                 )
@@ -2789,10 +2891,10 @@ class WorkBuddyRuntimeService:
                 )
                 return _execution_view(execution)
 
-            self._reserve_concurrency_slot(
-                actor,
-                execution_id=execution_id,
-                limits=limits,
+            self._repo.requeue_execution(
+                ctx,
+                execution_id,
+                expected_status=("waiting_approval",),
                 conn=conn,
             )
             self._audit(
@@ -2803,16 +2905,16 @@ class WorkBuddyRuntimeService:
                 details={"decision": decision, "decided": decided},
                 conn=conn,
             )
+            requeued = self._repo.get_execution(ctx, execution_id, conn=conn)
+        if requeued is None:  # pragma: no cover - defensive
+            raise _not_found()
+        return _execution_view(requeued)
 
-        decisions = self._recorded_decisions(actor, execution)
-        graph = self._graph_from_snapshot(execution)
-        return self._run_execution(actor, execution_id, graph=graph, decisions=decisions)
-
-    def _recorded_decisions(self, actor: RuntimeActor, execution: ExecutionRow) -> dict[str, str]:
+    def _recorded_decisions(
+        self, ctx: WorkBuddyDbContext, execution: ExecutionRow
+    ) -> dict[str, str]:
         """Approval decisions already settled for this execution, by node id."""
-        rows = self._repo.list_approval_requests(
-            self._ctx(actor), execution_id=execution.id, limit=200
-        )
+        rows = self._repo.list_approval_requests(ctx, execution_id=execution.id, limit=200)
         decisions: dict[str, str] = {}
         for row in rows:
             if row.status == "approved":
@@ -2922,7 +3024,7 @@ class WorkBuddyRuntimeService:
             external_request_id=external_reference,
             result_payload_ref=result_payload_ref,
             note=normalized_reason,
-            decided_by_user_id=actor.user_id,
+            decided_by_user_id=actor.acting_user_id,
         )
         self._audit(
             actor,
@@ -2934,7 +3036,7 @@ class WorkBuddyRuntimeService:
         self._repo.insert_notification(
             ctx,
             tenant_id=actor.tenant_id,
-            user_id=execution.created_by_user_id or actor.user_id,
+            user_id=execution.created_by_user_id or actor.acting_user_id,
             kind="execution.reconciled",
             title=f"External write {decision}",
             body=normalized_reason,
@@ -2956,7 +3058,13 @@ class WorkBuddyRuntimeService:
                 # still holds are settled here; nothing else will settle them.
                 self._settle_execution_quota(actor, execution_id, conn=conn, consume=True)
         else:
-            self._run_execution(actor, execution_id, graph=graph, decisions={})
+            # The parked execution holds no running slot, so reconciling it
+            # re-queues it: the worker continues the DAG when a slot is free.
+            self._repo.requeue_execution(
+                ctx,
+                execution_id,
+                expected_status=("waiting_reconciliation",),
+            )
         rows = self._repo.list_reconciliations(ctx, execution_id)
         settled = self._repo.get_execution(ctx, execution_id)
         if settled is None:  # pragma: no cover - defensive
@@ -3093,7 +3201,7 @@ class WorkBuddyRuntimeService:
             self._ctx(actor),
             tenant_id=actor.tenant_id,
             kind=kind,
-            requested_by_user_id=actor.user_id,
+            requested_by_user_id=actor.acting_user_id,
             execution_id=execution_id,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
@@ -3145,7 +3253,7 @@ class WorkBuddyRuntimeService:
     ) -> list[JobView]:
         self._require_postgres()
         rows = self._repo.list_jobs(
-            self._ctx(actor), requested_by_user_id=actor.user_id, status=status, limit=limit
+            self._ctx(actor), requested_by_user_id=actor.acting_user_id, status=status, limit=limit
         )
         return [_job_view(row) for row in rows]
 
@@ -3164,19 +3272,19 @@ class WorkBuddyRuntimeService:
     ) -> list[NotificationView]:
         self._require_postgres()
         rows = self._repo.list_notifications(
-            self._ctx(actor), user_id=actor.user_id, unread_only=unread_only, limit=limit
+            self._ctx(actor), user_id=actor.acting_user_id, unread_only=unread_only, limit=limit
         )
         return [_notification_view(row) for row in rows]
 
     def mark_notification_read(self, actor: RuntimeActor, notification_id: str) -> NotificationView:
         self._require_postgres()
         ctx = self._ctx(actor)
-        if not self._repo.mark_notification_read(ctx, notification_id, user_id=actor.user_id):
-            rows = self._repo.list_notifications(ctx, user_id=actor.user_id, limit=200)
+        if not self._repo.mark_notification_read(ctx, notification_id, user_id=actor.acting_user_id):
+            rows = self._repo.list_notifications(ctx, user_id=actor.acting_user_id, limit=200)
             existing = next((row for row in rows if row.id == notification_id), None)
             if existing is None:
                 raise _not_found()
-        rows = self._repo.list_notifications(ctx, user_id=actor.user_id, limit=200)
+        rows = self._repo.list_notifications(ctx, user_id=actor.acting_user_id, limit=200)
         for row in rows:
             if row.id == notification_id:
                 return _notification_view(row)
@@ -3199,7 +3307,7 @@ class WorkBuddyRuntimeService:
         ctx = self._ctx(actor)
         if session_id is None:
             session_id = self._repo.create_chat_session(
-                ctx, tenant_id=actor.tenant_id, user_id=actor.user_id, title=content[:80]
+                ctx, tenant_id=actor.tenant_id, user_id=actor.acting_user_id, title=content[:80]
             )
         else:
             session = self._repo.get_chat_session(ctx, session_id)
@@ -3236,7 +3344,7 @@ class WorkBuddyRuntimeService:
 
     def list_chat_sessions(self, actor: RuntimeActor, *, limit: int = 50) -> list[ChatSessionView]:
         self._require_postgres()
-        rows = self._repo.list_chat_sessions(self._ctx(actor), user_id=actor.user_id, limit=limit)
+        rows = self._repo.list_chat_sessions(self._ctx(actor), user_id=actor.acting_user_id, limit=limit)
         return [_chat_session_view(row) for row in rows]
 
     def get_chat_session(self, actor: RuntimeActor, session_id: str) -> ChatSessionView:

@@ -358,6 +358,8 @@ services:
     environment:
       - HOME=/data
       - OCTOP_DEPLOY_SERVICE=app
+      # The API tier accepts executions; the worker tier below runs them.
+      - OCTOP_WORKBUDDY_WORKER=off
       - OCTOP_BIND_HOST=0.0.0.0
       - OCTOP_PORT=8088
       - OCTOP_LOG_LEVEL=${OCTOP_LOG_LEVEL:-info}
@@ -431,6 +433,77 @@ services:
           pids: 512
         reservations:
           memory: "${OCTOP_APP_MEMORY_RESERVATION:-512m}"
+    stop_grace_period: 60s
+
+  # --- execution worker -------------------------------------------------------
+  # Claims accepted executions from PostgreSQL and runs them. It publishes no
+  # port and holds no queue of its own: the lease, the fence, the running slot
+  # and the attempt's results all live in the database, so any number of these
+  # can run, and one dying is recovered when its lease expires.
+  worker:
+    image: ${OCTOP_IMAGE:?set OCTOP_IMAGE to a digest-pinned image reference (repo@sha256:<64 hex>)}
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    user: "${OCTOP_UID:-10001}:${OCTOP_GID:-10001}"
+    <<: *hardening
+    entrypoint: ["/bin/sh", "/opt/octop-deploy/scripts/app-entrypoint.sh"]
+    environment:
+      - HOME=/data
+      - OCTOP_DEPLOY_SERVICE=worker
+      - OCTOP_LOG_LEVEL=${OCTOP_LOG_LEVEL:-info}
+      - OCTOP_DATABASE_DRIVER=postgresql
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-octop}
+      - POSTGRES_USER=${POSTGRES_USER:-octop}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_PASSWORD_FILE=/run/secrets/redis_password
+      # locked embedding model revision; leave empty while the quality gate is open
+      - EMBEDDING_MODEL_REVISION=${EMBEDDING_MODEL_REVISION:-}
+      # Vault workload-identity placeholders (file indirection, no inline tokens)
+      - VAULT_ADDR=${VAULT_ADDR:-}
+      - VAULT_NAMESPACE=${VAULT_NAMESPACE:-}
+      - VAULT_ROLE_ID_FILE=/run/secrets/vault_role_id
+      - VAULT_SECRET_ID_FILE=/run/secrets/vault_secret_id
+      - VAULT_CACERT=${VAULT_CACERT:-}
+      - VAULT_WORKLOAD_IDENTITY_REQUIRED=${VAULT_WORKLOAD_IDENTITY_REQUIRED:-false}
+    secrets:
+      - postgres_password
+      - redis_password
+      - vault_role_id
+      - vault_secret_id
+    volumes:
+      - ./scripts:/opt/octop-deploy/scripts:ro
+      - ./contracts:/opt/octop-deploy/contracts:ro
+      - octop_data:/data/.octop
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+      - /run/octop:rw,nosuid,nodev,size=16m
+    networks:
+      - edge
+      - data
+      - vaultpriv
+    logging: *bounded-logs
+    deploy:
+      resources:
+        limits:
+          cpus: "${OCTOP_WORKER_CPUS:-1.0}"
+          memory: "${OCTOP_WORKER_MEMORY:-1g}"
+          pids: 512
+        reservations:
+          memory: "${OCTOP_WORKER_MEMORY_RESERVATION:-256m}"
     stop_grace_period: 60s
 
 networks:

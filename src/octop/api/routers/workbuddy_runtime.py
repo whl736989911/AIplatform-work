@@ -32,7 +32,6 @@ from octop.infra.workbuddy.ratelimit import BUSINESS_LIMIT, WORKFLOW_EXECUTE_LIM
 from octop.infra.workbuddy.runtime import (
     APPROVAL_DECISIONS,
     RECONCILIATION_DECISIONS,
-    ProposalCanaryDirectory,
     RuntimeActor,
     WorkBuddyRuntimeService,
     execution_wait_facts,
@@ -121,7 +120,7 @@ def _service(server: Any) -> WorkBuddyRuntimeService:
     if not isinstance(db, DatabasePool) or db.dialect != "postgresql":
         raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _POSTGRES_REQUIRED)
     # An active canary routes this execution to the candidate or the baseline.
-    return WorkBuddyRuntimeService(db, canary=ProposalCanaryDirectory(db))
+    return WorkBuddyRuntimeService.for_control_plane(db)
 
 
 def _actor(principal: WorkBuddyPrincipal) -> RuntimeActor:

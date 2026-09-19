@@ -33,6 +33,16 @@ The whole stack is one process. There is no separate worker, no
 external queue, no required external services beyond whatever LLM
 provider the user configures.
 
+The WorkBuddy enterprise surface is the one exception, and it is opt-in: it
+needs the PostgreSQL control plane, and accepted executions are run by an
+execution worker rather than inside the request. A single-node install hosts that
+worker in this process (`OCTOP_WORKBUDDY_WORKER`, default `on`); the published
+production topology runs it as its own tier
+(`octop workbuddy-worker`, see `deploy/compose.production.yml`). Either way the
+database holds the queue, the lease, the fencing token and the running-slot
+ceiling, so replicas need no coordination and a crashed worker is recovered when
+its lease expires.
+
 ## 2. Process model
 
 `OctopServer.start()` wires the runtime tree in dependency order. The
@@ -59,7 +69,8 @@ OctopServer.start()
  │    ├─ ChannelManager (one per agent that has a channel row)
  │    └─ WebSocketHub  (dashboard + CLI channel)
  ├─ CronManager (process-wide APScheduler)
- └─ UserManager (auth + per-user lookups)
+ ├─ UserManager (auth + per-user lookups)
+ └─ WorkBuddyExecutionWorker (PostgreSQL only; claims accepted executions)
 ```
 
 The `AppRuntime` dataclass holds the four live singletons that
