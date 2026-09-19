@@ -751,6 +751,8 @@ def run_graph(
     effects: SideEffectPort | None = None,
     resolve_approvers: Callable[[GraphNode], Sequence[tuple[int, str | None]]] | None = None,
     execution_id: str = "",
+    on_step_start: Callable[[GraphNode], None] | None = None,
+    on_step_settled: Callable[[StepOutcome], None] | None = None,
 ) -> GraphRun:
     """Execute the graph once, deterministically, and aggregate the outcome.
 
@@ -760,6 +762,11 @@ def run_graph(
     merges those branches runs exactly once. Results recorded by an earlier
     attempt of the same execution are replayed, never re-run, so resuming after
     an approval cannot duplicate a side effect.
+
+    ``on_step_start`` and ``on_step_settled`` let the caller persist a step the
+    moment it starts and the moment it settles, so an observer of a long run sees
+    ``running`` rather than waiting for the attempt to commit. Replayed outcomes
+    are not announced: they belong to the attempt that produced them.
     """
     replay = replay or ReplayState()
     decisions = dict(decisions or {})
@@ -841,6 +848,8 @@ def run_graph(
             tokens=int(tokens or 0),
         )
         steps.append(outcome)
+        if on_step_settled is not None and not replayed:
+            on_step_settled(outcome)
         return outcome
 
     def store(node: GraphNode, value: Any) -> None:
@@ -920,6 +929,9 @@ def run_graph(
                 error_message=f"workflow exceeded max_steps={graph.max_steps}",
             )
             break
+
+        if on_step_start is not None:
+            on_step_start(node)
 
         if node.type in {"transform", "condition"}:
             expression = node.expression
@@ -2030,40 +2042,18 @@ class WorkBuddyRuntimeService:
         run: GraphRun,
         graph: WorkflowGraph,
         *,
-        fence: int,
-        previous_attempt: int,
         conn: Any,
     ) -> None:
+        """Commit the attempt's edges and outputs.
+
+        Step rows are not written here: each step was persisted the moment it
+        settled (``_persist_step``), which is what makes a step observable while
+        the run is still going.
+        """
         ctx = self._ctx(actor)
-        attempt = previous_attempt + 1
         outputs_sha, outputs_size = _hash_json(run.outputs)
         if outputs_size > graph.max_output_bytes:
             raise _invalid("workflow output exceeds the definition output limit")
-        for step in run.steps:
-            if step.replayed:
-                continue
-            output_sha, output_size = (
-                _hash_json(step.output) if step.output is not None else (None, 0)
-            )
-            self._repo.insert_step_run(
-                ctx,
-                tenant_id=actor.tenant_id,
-                execution_id=execution.id,
-                node_id=step.node_id,
-                node_type=step.node_type or "transform",
-                status=step.status,
-                fence=fence,
-                attempt=attempt,
-                save_as=step.save_as,
-                output_sha256=output_sha,
-                output=step.output,
-                error_code=step.error_code,
-                error_message=step.error_message,
-                skip_reason=step.skip_reason,
-                started_at=step.started_at,
-                duration_ms=step.duration_ms,
-                conn=conn,
-            )
         for edge in run.edges:
             self._repo.insert_edge_run(
                 ctx,
@@ -2313,6 +2303,18 @@ class WorkBuddyRuntimeService:
             # failure with a root cause, never a run that silently never lands.
             self._fail_claimed_execution(actor, execution, claim, lease_name, exc)
             return
+        previous_steps = self._repo.list_step_runs(ctx, claim.execution_id)
+        attempt = max((step.attempt for step in previous_steps), default=0) + 1
+        # Record what this attempt has not decided yet before it can decide any
+        # of it, so a step is observable as waiting, running and settled.
+        self._repo.queue_step_runs(
+            ctx,
+            tenant_id=claim.tenant_id,
+            execution_id=claim.execution_id,
+            nodes=tuple((node.id, node.type) for node in graph.nodes),
+            attempt=attempt,
+            fence=claim.fence,
+        )
         run = run_graph(
             graph,
             inputs=execution.inputs,
@@ -2321,8 +2323,77 @@ class WorkBuddyRuntimeService:
             effects=self._effects,
             execution_id=claim.execution_id,
             resolve_approvers=lambda node: self._resolved_candidates(actor, node),
+            on_step_start=lambda node: self._mark_step_running(actor, claim, node, attempt),
+            on_step_settled=lambda step: self._persist_step(actor, claim, step, attempt),
         )
         self._finalize(actor, execution, run, graph, claim=claim, lease_name=lease_name)
+
+    def _mark_step_running(
+        self, actor: RuntimeActor, claim: ExecutionClaim, node: GraphNode, attempt: int
+    ) -> None:
+        """A node just began: the step is ``running`` under this attempt's fence."""
+        self._repo.mark_step_running(
+            self._ctx(actor),
+            execution_id=claim.execution_id,
+            node_id=node.id,
+            attempt=attempt,
+            fence=claim.fence,
+        )
+
+    def _persist_step(
+        self, actor: RuntimeActor, claim: ExecutionClaim, step: StepOutcome, attempt: int
+    ) -> None:
+        """Persist one settled step immediately, under the claim's fence."""
+        ctx = self._ctx(actor)
+        output_sha, _ = _hash_json(step.output) if step.output is not None else (None, 0)
+        if self._repo.settle_attempt_step(
+            ctx,
+            execution_id=claim.execution_id,
+            node_id=step.node_id,
+            attempt=attempt,
+            fence=claim.fence,
+            status=step.status,
+            save_as=step.save_as,
+            output_sha256=output_sha,
+            output=step.output,
+            error_code=step.error_code,
+            error_message=step.error_message,
+            duration_ms=step.duration_ms,
+            skip_reason=step.skip_reason,
+            started_at=step.started_at,
+        ):
+            return
+        if not self._repo.verify_fence(
+            ctx,
+            tenant_id=claim.tenant_id,
+            lease_name=execution_lease_name(claim.execution_id),
+            holder=claim.worker_id,
+            fence=claim.fence,
+        ):
+            raise OctopError(
+                ErrorCode.WORKBUDDY_FENCE_STALE,
+                "the execution lease moved to another runner",
+            )
+        # The lease is ours, so this step simply had no pending row (an outcome
+        # the engine decided without announcing a start): record it outright.
+        self._repo.insert_step_run(
+            ctx,
+            tenant_id=claim.tenant_id,
+            execution_id=claim.execution_id,
+            node_id=step.node_id,
+            node_type=step.node_type or "transform",
+            status=step.status,
+            fence=claim.fence,
+            attempt=attempt,
+            save_as=step.save_as,
+            output_sha256=output_sha,
+            output=step.output,
+            error_code=step.error_code,
+            error_message=step.error_message,
+            duration_ms=step.duration_ms,
+            skip_reason=step.skip_reason,
+            started_at=step.started_at,
+        )
 
     def _close_claim(self, claim: ExecutionClaim, lease_name: str) -> None:
         """Give back a claim whose execution no longer needs running."""
@@ -2418,8 +2489,6 @@ class WorkBuddyRuntimeService:
         """Commit the attempt inside one fenced transaction, or commit nothing."""
         ctx = self._ctx(actor)
         fence = claim.fence
-        previous_steps = self._repo.list_step_runs(ctx, execution.id)
-        attempt = max((step.attempt for step in previous_steps), default=0)
 
         with runtime_transaction(self._db, ctx) as conn:
             if not self._repo.verify_fence(
@@ -2439,8 +2508,6 @@ class WorkBuddyRuntimeService:
                 execution,
                 run,
                 graph,
-                fence=fence,
-                previous_attempt=attempt,
                 conn=conn,
             )
             if run.status == "waiting_reconciliation":

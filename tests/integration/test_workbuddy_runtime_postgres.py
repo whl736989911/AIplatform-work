@@ -1688,6 +1688,107 @@ def test_a_dead_worker_lease_is_taken_over_with_a_new_fence(
     assert dying.worker_id == "dead-worker"
 
 
+def test_a_running_step_is_visible_while_the_node_works(pool: Any, tenant: dict[str, Any]) -> None:
+    """A long node is observable as ``running``, not only once the run commits."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    class BlockingToolPort:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
+            self.entered.set()
+            if not self.release.wait(timeout=10):
+                raise AssertionError("test did not release the blocked tool")
+            return {"ok": True}
+
+        def execute_llm(self, *, node: Any, activation: Any) -> Any:
+            raise AssertionError("this workflow has no llm node")
+
+        def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:
+            raise AssertionError("chat is not part of this workflow")
+
+    definition = {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {},
+        "nodes": [
+            {
+                "id": "slow",
+                "type": "tool",
+                "name": "Slow call",
+                "config": {"tool_name": "test.slow", "parameters": {}},
+            }
+        ],
+        "edges": [],
+    }
+    workflow_id = _publish(pool, tenant, definition, "Step state runtime")
+    port = BlockingToolPort()
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    actor = RuntimeActor(
+        tenant_id=tenant["tenant_id"],
+        user_id=tenant["owner_user_id"],
+        role="owner",
+        tenant_status="active",
+    )
+    worker = WorkBuddyExecutionWorker(pool, service=service, worker_id="step-worker")
+    worker.drain()  # clear what an earlier test left queued
+    execution_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    repo = WorkBuddyRuntimeRepo(pool)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            running = executor.submit(worker.run_once)
+            assert port.entered.wait(timeout=10), "the admitted run never entered its tool"
+            mid_run = repo.list_step_runs(ctx, execution_id)
+            assert [step.status for step in mid_run] == ["running"], mid_run
+            port.release.set()
+            assert running.result(timeout=10) is not None
+    finally:
+        port.release.set()
+
+    settled = repo.list_step_runs(ctx, execution_id)
+    assert [step.status for step in settled] == ["success"], settled
+    assert settled[0].finished_at is not None, settled
+    assert settled[0].duration_ms is not None, settled
+
+
+async def test_a_parked_run_shows_its_pending_steps_as_queued(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """Steps of an attempt that has not decided them yet are ``queued``."""
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+
+    definition = external_write_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Step queue runtime")
+    async with _client(app, _principal(tenant)) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        assert accepted.status_code == 202, accepted.text
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        parked = (await client.get(f"/executions/{execution_id}")).json()["data"]
+
+    assert parked["status"] == "waiting_approval", parked
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    steps = WorkBuddyRuntimeRepo(pool).list_step_runs(ctx, execution_id)
+    by_node = {step.node_id: step.status for step in steps}
+    assert by_node == {
+        "hello": "success",
+        "review": "waiting_approval",
+        # Nothing decided these yet: the attempt is parked before them.
+        "submit": "queued",
+        "after": "queued",
+    }, by_node
+
+
 def test_the_worker_records_which_worker_ran_an_execution(
     pool: Any, tenant: dict[str, Any]
 ) -> None:

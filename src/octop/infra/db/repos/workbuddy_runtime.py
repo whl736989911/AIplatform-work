@@ -1068,6 +1068,133 @@ class WorkBuddyRuntimeRepo:
             )
         return rid
 
+    def queue_step_runs(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        nodes: Sequence[tuple[str, str]],
+        attempt: int,
+        fence: int,
+        conn: Any | None = None,
+    ) -> int:
+        """Record the attempt's pending steps: one ``queued`` row per node.
+
+        A node an earlier attempt already settled keeps that row -- it is a
+        replay or a permanent failure -- so the newest attempt can never mask a
+        fact the engine still has to honour. What is left is exactly the work
+        this attempt has not decided yet, which is what ``queued`` means.
+        """
+        inserted = 0
+        with runtime_transaction(self._db, ctx, conn) as c:
+            for node_id, node_type in nodes:
+                cursor = c.execute(
+                    """
+                    INSERT INTO workbuddy_step_runs(
+                        id, tenant_id, execution_id, node_id, node_type, attempt, status, fence
+                    )
+                    SELECT ?, ?, ?, ?, ?, ?, 'queued', ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM workbuddy_step_runs settled
+                        WHERE settled.tenant_id = ? AND settled.execution_id = ?
+                          AND settled.node_id = ?
+                          AND settled.status IN ('success', 'failed', 'skipped', 'canceled')
+                    )
+                    ON CONFLICT (tenant_id, execution_id, node_id, attempt) DO NOTHING
+                    """,
+                    (
+                        new_runtime_id(),
+                        tenant_id,
+                        execution_id,
+                        node_id,
+                        node_type,
+                        int(attempt),
+                        int(fence),
+                        tenant_id,
+                        execution_id,
+                        node_id,
+                    ),
+                )
+                inserted += int(getattr(cursor, "rowcount", 0) or 0)
+        return inserted
+
+    def mark_step_running(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        execution_id: str,
+        node_id: str,
+        attempt: int,
+        fence: int,
+        conn: Any | None = None,
+    ) -> bool:
+        """Move one pending step to ``running``; only its own fence may."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_step_runs
+                SET status = 'running'
+                WHERE execution_id = ? AND node_id = ? AND attempt = ? AND fence = ?
+                  AND status = 'queued'
+                """,
+                (execution_id, node_id, int(attempt), int(fence)),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def settle_attempt_step(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        execution_id: str,
+        node_id: str,
+        attempt: int,
+        fence: int,
+        status: str,
+        save_as: str | None = None,
+        output_sha256: str | None = None,
+        output: Any = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        duration_ms: int | None = None,
+        skip_reason: str | None = None,
+        started_at: float | None = None,
+        conn: Any | None = None,
+    ) -> bool:
+        """Settle the row this attempt queued, in place.
+
+        False means the step was not pending under this fence: either the attempt
+        is not the one that queued it, or another worker owns the execution now.
+        """
+        finished_at = "now()" if status in {"success", "failed", "skipped"} else "NULL"
+        started = ", started_at = to_timestamp(?)" if started_at is not None else ""
+        params: list[Any] = [
+            status,
+            save_as,
+            output_sha256,
+            _jsonb(output),
+            error_code,
+            error_message,
+            duration_ms,
+            skip_reason,
+        ]
+        if started_at is not None:
+            params.append(float(started_at))
+        params.extend([execution_id, node_id, int(attempt), int(fence)])
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                f"""
+                UPDATE workbuddy_step_runs
+                SET status = ?, save_as = ?, output_sha256 = ?, output = ?, error_code = ?,
+                    error_message = ?, duration_ms = ?, skip_reason = ?, finished_at = {finished_at}
+                    {started}
+                WHERE execution_id = ? AND node_id = ? AND attempt = ? AND fence = ?
+                  AND status IN ('queued', 'running')
+                """,
+                tuple(params),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
     def list_step_runs(
         self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
     ) -> list[StepRunRow]:
