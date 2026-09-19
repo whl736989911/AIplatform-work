@@ -40,6 +40,7 @@ import CredentialsPanel from "./CredentialsPanel";
 import CapabilitiesPanel from "./CapabilitiesPanel";
 import CatalogPanel from "./CatalogPanel";
 import styles from "./index.module.less";
+import { isTenantAdminRole } from "../../utils/tenantRole";
 
 type EnterpriseTabKey =
   | "departments"
@@ -58,7 +59,7 @@ const MEMBER_TABS: readonly EnterpriseTabKey[] = [
   "models",
 ];
 
-/** Additional tabs unlocked by membership.role === "admin". */
+/** Additional tabs unlocked by a tenant administrator (owner or admin). */
 const ADMIN_ONLY_TABS: readonly EnterpriseTabKey[] = [
   "users",
   "invitations",
@@ -129,7 +130,9 @@ export default function EnterprisePage() {
     },
   );
 
-  const isTenantAdmin = context?.membership.role === "admin";
+  // The backend's TENANT_ADMIN_ROLES owns this decision (owner and admin);
+  // asking for "admin" alone locked a tenant's own owner out of governance.
+  const isTenantAdmin = isTenantAdminRole(context?.membership.role);
   const allowedTabs = useMemo<readonly EnterpriseTabKey[]>(
     () => (isTenantAdmin ? [...MEMBER_TABS, ...ADMIN_ONLY_TABS] : MEMBER_TABS),
     [isTenantAdmin],
