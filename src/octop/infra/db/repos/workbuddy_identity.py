@@ -40,6 +40,7 @@ from octop.infra.db.workbuddy_context import (
     require_postgres,
     workbuddy_transaction,
 )
+from octop.infra.workbuddy.log_redaction import register_secret
 
 TENANT_STATUSES = ("active", "suspended")
 MEMBER_ROLES = ("owner", "admin", "member")
@@ -122,7 +123,9 @@ class WorkBuddyError(ValueError):
 
 def generate_invitation_token() -> str:
     """Fresh raw invitation token; only its sha256 may be stored or transmitted."""
-    return secrets.token_urlsafe(32)
+    token = secrets.token_urlsafe(32)
+    register_secret(token)
+    return token
 
 
 def hash_invitation_token(token: str) -> str:

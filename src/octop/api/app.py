@@ -19,6 +19,7 @@ from octop.api.openapi_meta import API_DESCRIPTION, OPENAPI_TAGS, configure_open
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.server import OctopServer
 from octop.infra.utils.locale import resolve_request_locale
+from octop.infra.workbuddy.log_redaction import install_log_redaction
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,9 @@ def _install_exception_handlers(app: FastAPI) -> None:
 
 
 def build_app(server: OctopServer) -> FastAPI:
+    # WorkBuddy carries credentials, approval tokens and webhook secrets through
+    # the same log stream as everything else; mask them before any handler runs.
+    install_log_redaction()
     cfg = server.services.config if server.services else getattr(server, "config", None)
     enable_dashboard = cfg.enable_dashboard if cfg else True
     enable_api_docs = cfg.enable_api_docs if cfg else False

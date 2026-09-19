@@ -51,6 +51,7 @@ from octop.infra.db.repos.workbuddy_knowledge import (
 )
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.workbuddy.log_redaction import register_secret
 
 #: The only retrieval model WorkBuddy pins into a knowledge base.
 BGE_M3_MODEL_KEY = "bge-m3"
@@ -1433,6 +1434,7 @@ class WorkBuddyTriggerService:
             if not _WEBHOOK_PATH.fullmatch(webhook_path):
                 raise OctopError(ErrorCode.INTERNAL_ERROR, "generated webhook path is invalid")
             secret_value = secrets.token_urlsafe(32)
+            register_secret(secret_value)
             secret_ref = backend.create_secret(
                 name=f"workbuddy/{ctx.tenant_id}/{webhook_path}", value=secret_value
             )
@@ -1512,6 +1514,7 @@ class WorkBuddyTriggerService:
             raise OctopError(ErrorCode.NOT_FOUND, "trigger registration not found")
         backend = self._require_secret_backend()
         new_secret = secrets.token_urlsafe(32)
+        register_secret(new_secret)
         now = self._now()
         reference = backend.create_secret(
             name=f"workbuddy/{ctx.tenant_id}/{registration.webhook_path}/v{registration.secret_version + 1}",
