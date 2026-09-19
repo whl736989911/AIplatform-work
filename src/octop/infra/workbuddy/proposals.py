@@ -22,6 +22,7 @@ import hashlib
 import json
 import re
 import time
+import uuid
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -981,9 +982,36 @@ def canary_bucket(stable_key: str) -> int:
     return int.from_bytes(digest[:8], "big") % CANARY_BUCKET_MODULUS
 
 
-def canary_key(*parts: object) -> str:
-    """Stable canary key: unit-separator joined fields of a single execution."""
-    return "\x1f".join(str(part) for part in parts)
+def canary_subject(*, user_uuid: str | None = None, trigger_uuid: str | None = None) -> str:
+    """The subject of one execution: a user, or the trigger that started it.
+
+    The contract fixes the spelling, so every implementation buckets the same
+    execution the same way.
+    """
+    if user_uuid:
+        return f"user:{_normalized_uuid(user_uuid)}"
+    if trigger_uuid:
+        return f"trigger:{_normalized_uuid(trigger_uuid)}"
+    raise ProposalPolicyError(
+        "CANARY_SUBJECT_REQUIRED", "a canary subject needs a user or a trigger"
+    )
+
+
+def canary_key(tenant_id: str, workflow_id: str, subject: str) -> str:
+    """``UTF8(tenant_uuid + ":" + workflow_uuid + ":" + subject)`` from the contract."""
+    return canary_key_parts(tenant_id, workflow_id, subject)
+
+
+def canary_key_parts(*parts: object) -> str:
+    """Colon-joined fields, the separator the contract's formula uses."""
+    return ":".join(str(part) for part in parts)
+
+
+def _normalized_uuid(value: str) -> str:
+    try:
+        return str(uuid.UUID(str(value))).lower()
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ProposalPolicyError("CANARY_SUBJECT_INVALID", "subject must be a uuid") from exc
 
 
 def is_canary_selected(bucket: int, ratio_basis_points: int) -> bool:

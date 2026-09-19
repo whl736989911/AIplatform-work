@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos.workbuddy_runtime import (
@@ -230,6 +230,39 @@ class ChatReply:
     content: str
     model_revision: str | None = None
     usage: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryRoute:
+    """How one execution is routed while a proposal evaluates a candidate.
+
+    The cohort is decided by the deterministic bucket, never by the runner, and
+    the candidate runs the candidate version while the baseline runs the version
+    the proposal fixed as its base.
+    """
+
+    proposal_id: str
+    cohort: Literal["canary", "baseline"]
+    version_id: str
+    bucket: int
+    ratio_basis_points: int
+    subject: str
+
+
+class CanaryDirectory(Protocol):
+    """Read side of the active canary, owned by the proposals slice."""
+
+    def route(self, *, tenant_id: str, workflow_id: str, subject: str) -> CanaryRoute | None: ...
+
+
+class NoCanaryEvaluation:
+    """Default: no workflow is under evaluation here."""
+
+    def route(self, *, tenant_id: str, workflow_id: str, subject: str) -> CanaryRoute | None:
+        return None
+
+
+NO_CANARY_EVALUATION = NoCanaryEvaluation()
 
 
 class SideEffectPort(Protocol):
@@ -955,6 +988,49 @@ def run_graph(
 # ---------------------------------------------------------------------------
 
 
+class ProposalCanaryDirectory:
+    """Active canary routes from the proposals slice (read-only).
+
+    The bucket comes from the proposals module's published formula, so a route
+    computed here is the same one any other implementation of the contract
+    computes for the same subject.
+    """
+
+    def __init__(self, db: DatabasePool) -> None:
+        self._db = db
+
+    def route(self, *, tenant_id: str, workflow_id: str, subject: str) -> CanaryRoute | None:
+        try:
+            from octop.infra.db.repos.workbuddy_proposals import WorkBuddyProposalsRepo
+            from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+            from octop.infra.workbuddy.proposals import (
+                CANARY_BUCKET_MODULUS,
+                canary_bucket,
+                canary_key,
+            )
+        except ImportError as exc:  # pragma: no cover - proposals slice not deployed
+            raise OctopError(
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
+                "the proposals slice is not available",
+            ) from exc
+        ctx = WorkBuddyDbContext.for_tenant(tenant_id)
+        active = WorkBuddyProposalsRepo(self._db, ctx).active_canary(workflow_id)
+        if active is None:
+            return None
+        ratio = int(active.canary_ratio_bp or 0)
+        key = canary_key(tenant_id, str(active.workflow_id), subject)
+        bucket = canary_bucket(key)
+        candidate = bucket < ratio <= CANARY_BUCKET_MODULUS
+        return CanaryRoute(
+            proposal_id=str(active.proposal_id),
+            cohort="canary" if candidate else "baseline",
+            version_id=str(active.candidate_version_id if candidate else active.base_version_id),
+            bucket=bucket,
+            ratio_basis_points=ratio,
+            subject=subject,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeActor:
     tenant_id: str
@@ -992,6 +1068,11 @@ class ExecutionView:
     started_at: str | None
     finished_at: str | None
     cancel_requested: bool = False
+    cohort: str | None = None
+    proposal_id: str | None = None
+    bucket: int | None = None
+    route_canary_percent: int | None = None
+    subject: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -1003,6 +1084,11 @@ class ExecutionView:
             "inputs": _json_safe(self.inputs),
             "outputs": _json_safe(self.outputs),
             "cancel_requested": self.cancel_requested,
+            "cohort": self.cohort,
+            "proposal_id": self.proposal_id,
+            "bucket": self.bucket,
+            "route_canary_percent": self.route_canary_percent,
+            "subject": self.subject,
             "error_code": self.error_code,
             "error_message": self.error_message,
             "created_by_user_id": self.created_by_user_id,
@@ -1216,6 +1302,11 @@ def _execution_view(row: ExecutionRow) -> ExecutionView:
         started_at=_iso(row.started_at),
         finished_at=_iso(row.finished_at),
         cancel_requested=row.cancel_requested_at is not None,
+        cohort=row.cohort,
+        proposal_id=row.proposal_id,
+        bucket=row.bucket,
+        route_canary_percent=row.route_canary_percent,
+        subject=row.subject,
     )
 
 
@@ -1355,6 +1446,7 @@ class WorkBuddyRuntimeService:
         versions: WorkflowVersionSource | None = None,
         effects: SideEffectPort | None = None,
         approver_resolver: Any | None = None,
+        canary: CanaryDirectory | None = None,
     ) -> None:
         self._db = db
         self._repo = repo or WorkBuddyRuntimeRepo(db)
@@ -1363,6 +1455,7 @@ class WorkBuddyRuntimeService:
         self._approver_resolver = (
             approver_resolver if approver_resolver is not None else MembershipApproverResolver(db)
         )
+        self._canary = canary or NO_CANARY_EVALUATION
 
     # -- helpers ------------------------------------------------------------
 
@@ -1604,6 +1697,7 @@ class WorkBuddyRuntimeService:
         idempotency_scope: str | None = None,
         idempotency_key: str | None = None,
         quota_limits: Mapping[str, int] | None = None,
+        subject: str | None = None,
     ) -> ExecutionView:
         """Accept one execution: suspension gate, idempotency, quota, run."""
         self._require_postgres()
@@ -1614,7 +1708,18 @@ class WorkBuddyRuntimeService:
             raise _invalid("workflow inputs exceed the maximum accepted size")
 
         ctx = self._ctx(actor)
-        locked = self._versions.load_active(ctx, workflow_id)
+        # An active canary decides which version this execution runs; the bucket
+        # is deterministic, so the same subject always lands in the same cohort.
+        route = (
+            self._canary.route(tenant_id=actor.tenant_id, workflow_id=workflow_id, subject=subject)
+            if subject
+            else None
+        )
+        locked = (
+            self._versions.load_version(ctx, workflow_id, route.version_id)
+            if route is not None
+            else self._versions.load_active(ctx, workflow_id)
+        )
         graph = compile_locked_definition(
             locked.definition, locked.definition_sha256, version_id=locked.version_id
         )
@@ -1668,6 +1773,11 @@ class WorkBuddyRuntimeService:
                 idempotency_scope=idempotency_scope if idempotency_key else None,
                 idempotency_key=idempotency_key,
                 idempotency_hash=idempotency_hash,
+                proposal_id=route.proposal_id if route is not None else None,
+                cohort="production" if route is None else route.cohort,
+                bucket=route.bucket if route is not None else None,
+                route_canary_percent=(route.ratio_basis_points if route is not None else None),
+                subject=subject,
                 conn=conn,
             ):
                 concurrent = self._existing_for_key(

@@ -110,9 +110,13 @@ def _principal(
 @pytest.fixture
 def app(pool: Any) -> FastAPI:
     from octop.api.deps import get_server
+    from octop.api.routers import workbuddy_runtime
 
     application = FastAPI()
     application.include_router(workbuddy_proposals.router)
+    # Executions are started by the runtime router, which is what applies a
+    # canary route to a run.
+    application.include_router(workbuddy_runtime.router)
 
     @application.exception_handler(OctopError)
     async def _octop_error(_: Request, exc: OctopError) -> JSONResponse:
@@ -481,3 +485,128 @@ async def test_stale_base_blocks_promotion(app: FastAPI, pool: Any, tenant: dict
         assert refused.json()["error"]["code"] == ErrorCode.PROPOSAL_BASE_CONFLICT.value, (
             refused.text
         )
+
+
+# --------------------------------------------------------------------------- #
+# canary routing (contract 5.2.3)
+# --------------------------------------------------------------------------- #
+
+
+def _expected_route(tenant_id: str, workflow_id: str, subject: str, ratio: int) -> tuple[str, int]:
+    """The contract's formula, computed here from the published text."""
+    source = f"{tenant_id}:{workflow_id}:{subject}"
+    bucket = int.from_bytes(hashlib.sha256(source.encode("utf-8")).digest()[:8], "big") % 10000
+    return ("canary" if bucket < ratio else "baseline"), bucket
+
+
+async def _walk_to_canary(
+    app: FastAPI,
+    pool: Any,
+    tenant: dict[str, Any],
+    workflow: dict[str, Any],
+    *,
+    ratio: int = 5000,
+) -> tuple[str, str]:
+    """Approve a low-risk candidate and start canary traffic with replay evidence."""
+    async with _client(app, _principal(tenant)) as client:
+        created = await _create(client, workflow, _rename_patch("Canary"))
+        proposal_id = created.json()["data"]["proposal_id"]
+
+    reviewer = _principal(
+        tenant,
+        user_id=tenant["reviewer_user_id"],
+        role="member",
+        member_id=tenant["reviewer_member_id"],
+    )
+    async with _client(app, reviewer) as client:
+        approved = await client.post(
+            f"/improvement-proposals/{proposal_id}/decisions",
+            json={"decision": "approved", "comment": "reviewed"},
+        )
+        assert approved.status_code == 200, approved.text
+
+    async with _client(app, _principal(tenant)) as client:
+        started = await client.post(
+            f"/improvement-proposals/{proposal_id}/promote",
+            json={"action": "start_shadow", "ratio_basis_points": ratio},
+            headers={"If-Match": f'"{workflow["revision"]}"'},
+        )
+        assert started.status_code == 200, started.text
+
+    _settle_shadow(pool, tenant, proposal_id)
+
+    async with _client(app, _principal(tenant)) as client:
+        canary = await client.post(
+            f"/improvement-proposals/{proposal_id}/promote",
+            json={"action": "start_canary", "ratio_basis_points": ratio},
+            headers={"If-Match": f'"{workflow["revision"]}"'},
+        )
+        assert canary.status_code == 200, canary.text
+        candidate_version_id = canary.json()["data"]["candidate_version_id"]
+    return proposal_id, candidate_version_id
+
+
+async def test_executions_route_by_the_published_bucket(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T31/T32: the same subject always lands in the same cohort, and it is recorded."""
+    workflow = _publish(pool, tenant, "Proposal canary routing")
+    ratio = 5000
+    proposal_id, candidate_version_id = await _walk_to_canary(
+        app, pool, tenant, workflow, ratio=ratio
+    )
+
+    # Two subjects chosen so one falls in each cohort for the same ratio.
+    subjects = [f"user:{uuid.uuid4()}" for _ in range(40)]
+    subjects.sort(
+        key=lambda subject: _expected_route(
+            tenant["tenant_id"], workflow["workflow_id"], subject, ratio
+        )[1]
+    )
+
+    observed: dict[str, tuple[str, int]] = {}
+    for subject in (subjects[0], subjects[-1]):
+        member_id = subject.split(":", 1)[1]
+        principal = _principal(tenant, member_id=member_id)
+        async with _client(app, principal) as per_subject:
+            accepted = await per_subject.post(
+                f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {}}
+            )
+            assert accepted.status_code == 202, accepted.text
+            execution = accepted.json()["data"]
+        expected_cohort, expected_bucket = _expected_route(
+            tenant["tenant_id"], workflow["workflow_id"], subject, ratio
+        )
+        observed[subject] = (execution["cohort"], execution["bucket"])
+        assert execution["cohort"] == expected_cohort, execution
+        assert execution["bucket"] == expected_bucket, execution
+        assert execution["proposal_id"] == proposal_id, execution
+        assert execution["route_canary_percent"] == ratio, execution
+        assert execution["subject"] == subject, execution
+        expected_version = (
+            candidate_version_id if expected_cohort == "canary" else workflow["version_id"]
+        )
+        assert execution["workflow_version_id"] == expected_version, execution
+
+    # One candidate and one baseline execution prove the split actually happened.
+    cohorts = {cohort for cohort, _bucket in observed.values()}
+    assert cohorts == {"canary", "baseline"}, observed
+
+
+async def test_production_runs_carry_no_proposal(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """Outside an evaluation the cohort is production and no proposal is named."""
+    workflow = _publish(pool, tenant, "Proposal production routing")
+    async with _client(app, _principal(tenant)) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {}}
+        )
+        assert accepted.status_code == 202, accepted.text
+        execution = accepted.json()["data"]
+
+    assert execution["cohort"] == "production", execution
+    assert execution["proposal_id"] is None, execution
+    assert execution["route_canary_percent"] is None, execution
+    assert execution["bucket"] is None, execution
+    assert execution["workflow_version_id"] == workflow["version_id"], execution

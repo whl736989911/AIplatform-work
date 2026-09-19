@@ -30,6 +30,7 @@ from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.runtime import (
     APPROVAL_DECISIONS,
     RECONCILIATION_DECISIONS,
+    ProposalCanaryDirectory,
     RuntimeActor,
     WorkBuddyRuntimeService,
     execution_wait_facts,
@@ -54,7 +55,8 @@ def _service(server: Any) -> WorkBuddyRuntimeService:
     db = getattr(services, "db", None)
     if not isinstance(db, DatabasePool) or db.dialect != "postgresql":
         raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _POSTGRES_REQUIRED)
-    return WorkBuddyRuntimeService(db)
+    # An active canary routes this execution to the candidate or the baseline.
+    return WorkBuddyRuntimeService(db, canary=ProposalCanaryDirectory(db))
 
 
 def _actor(principal: WorkBuddyPrincipal) -> RuntimeActor:
@@ -138,6 +140,9 @@ async def execute_workflow(
         trigger_type="api",
         idempotency_scope="workflow-execute",
         idempotency_key=body.idempotency_key or idempotency_header,
+        # The routing subject: this member, so the same person always lands in
+        # the same canary cohort.
+        subject=f"user:{principal.member_id}" if principal.member_id else None,
     )
     return workbuddy_envelope(request, view.to_payload())
 

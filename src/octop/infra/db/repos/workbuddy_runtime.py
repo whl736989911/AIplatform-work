@@ -117,6 +117,11 @@ class ExecutionRow:
     started_at: Any
     finished_at: Any
     cancel_requested_at: Any
+    proposal_id: str | None
+    cohort: str | None
+    bucket: int | None
+    route_canary_percent: int | None
+    subject: str | None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> ExecutionRow:
@@ -144,6 +149,11 @@ class ExecutionRow:
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             cancel_requested_at=row["cancel_requested_at"],
+            proposal_id=(str(row["proposal_id"]) if row["proposal_id"] else None),
+            cohort=row["cohort"],
+            bucket=row["bucket"],
+            route_canary_percent=row["route_canary_percent"],
+            subject=row["subject"],
         )
 
     @property
@@ -576,8 +586,9 @@ class WorkBuddyRuntimeRepo:
                 INSERT INTO workbuddy_executions(
                     id, tenant_id, workflow_id, workflow_version_id, workflow_version_hash,
                     definition_snapshot, status, trigger_type, idempotency_scope,
-                    idempotency_key, idempotency_hash, inputs, created_by_user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                    idempotency_key, idempotency_hash, inputs, created_by_user_id,
+                    proposal_id, cohort, bucket, route_canary_percent, subject
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rid,
@@ -640,6 +651,11 @@ class WorkBuddyRuntimeRepo:
         idempotency_scope: str | None = None,
         idempotency_key: str | None = None,
         idempotency_hash: str | None = None,
+        proposal_id: str | None = None,
+        cohort: str | None = None,
+        bucket: int | None = None,
+        route_canary_percent: int | None = None,
+        subject: str | None = None,
         conn: Any | None = None,
     ) -> bool:
         """Insert a new execution; False when the idempotency key already exists.
@@ -654,8 +670,9 @@ class WorkBuddyRuntimeRepo:
                 INSERT INTO workbuddy_executions(
                     id, tenant_id, workflow_id, workflow_version_id, workflow_version_hash,
                     definition_snapshot, status, trigger_type, idempotency_scope,
-                    idempotency_key, idempotency_hash, inputs, created_by_user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                    idempotency_key, idempotency_hash, inputs, created_by_user_id,
+                    proposal_id, cohort, bucket, route_canary_percent, subject
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (tenant_id, idempotency_scope, idempotency_key)
                   WHERE idempotency_key IS NOT NULL DO NOTHING
                 """,
@@ -672,6 +689,11 @@ class WorkBuddyRuntimeRepo:
                     idempotency_hash,
                     _jsonb(inputs),
                     created_by_user_id,
+                    proposal_id,
+                    cohort,
+                    bucket,
+                    route_canary_percent,
+                    subject,
                 ),
             )
             return bool(getattr(cursor, "rowcount", 0))
