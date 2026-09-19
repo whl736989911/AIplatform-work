@@ -100,6 +100,14 @@ def pool() -> Iterator[Any]:
         with database.connect() as conn:
             conn.execute("DROP SCHEMA public CASCADE")
             conn.execute("CREATE SCHEMA public")
+            # The upstream migrations declare a pgvector column, so the schema
+            # reset above has to be followed by the deployment prerequisite.
+            available = conn.execute(
+                "SELECT 1 AS present FROM pg_available_extensions WHERE name = 'vector'"
+            ).fetchone()
+            if available is None:
+                pytest.skip("pgvector is required by the upstream migrations")
+            conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
         run_migrations(database)
         yield database
     finally:
