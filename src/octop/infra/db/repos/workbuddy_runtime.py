@@ -1743,6 +1743,30 @@ class WorkBuddyRuntimeRepo:
             )
         return rid
 
+    def start_job(
+        self,
+        ctx: WorkBuddyDbContext,
+        job_id: str,
+        *,
+        progress: int = 0,
+        conn: Any | None = None,
+    ) -> bool:
+        """Move a queued job to running and stamp ``started_at``.
+
+        Without this the only transitions were *into* the table and out of it, so
+        a job being worked on still read ``queued`` to every client.
+        """
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_jobs
+                SET status = 'running', progress = ?, started_at = COALESCE(started_at, now())
+                WHERE id = ? AND status = 'queued'
+                """,
+                (int(progress), job_id),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
     def get_job(
         self, ctx: WorkBuddyDbContext, job_id: str, *, conn: Any | None = None
     ) -> JobRow | None:

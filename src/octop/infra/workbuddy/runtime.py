@@ -1904,6 +1904,11 @@ class RuntimeJobRecorder:
             request_hash=_hash_json(dict(request or {}))[0],
         )
 
+    def begin(self, job_id: str) -> bool:
+        """Mark the job as running while the work actually happens."""
+        ctx = WorkBuddyDbContext.for_tenant(self.tenant_id, user_id=self.user_id)
+        return WorkBuddyRuntimeRepo(self.db).start_job(ctx, job_id)
+
     def finish(
         self,
         job_id: str,

@@ -8,12 +8,14 @@
 
 ### 新增
 
+- WorkBuddy 知识索引记录为真实作业（合同 §4.6.2）：`POST /knowledge-bases/{id}/documents` 返回的 `job_id` 指向 `workbuddy_jobs` 中一条 `knowledge_index` 作业（此前是一个查不到对应行的随机 uuid）；索引开始时作业置为 `running`，结束时写入 `result`（文档、世代、分块数），失败时写入失败码。
 - WorkBuddy 提案生成记录为真实作业（合同 §4.6.2）：`POST /workflows/{id}/improvement-proposals` 的 202 返回 `job_id` 指向 `workbuddy_jobs` 中一条 `improvement_proposal` 作业，成功后 `result` 带 `proposal_id`/`workflow_id`，失败时记录拒绝码；客户端丢失响应后可用 `GET /jobs` 找回。
 - WorkBuddy 执行 Worker：接纳执行只写入 `queued`，由 Worker 从数据库原子领取（锁租户行、占运行槽、取租约并单调递增 fencing token）。整体等待（审批/对账）释放运行槽，恢复时重新排队申请；Worker 崩溃后租约到期由下一个 Worker 接管。
 - `octop workbuddy-worker` 命令行与 `deploy/compose.production.yml` 的 `worker` 服务；单进程安装默认在 `octop run` 内托管该 Worker（`OCTOP_WORKBUDDY_WORKER=off` 可关闭）。
 
 ### 修复
 
+- WorkBuddy 作业状态：此前没有任何路径把作业从 `queued` 置为 `running`，正在执行的作业对客户端仍显示 `queued`；新增 `start_job`（同时写入 `started_at`）。
 - WorkBuddy 作业结果写入：`finish_job` 未按 jsonb 绑定 `result`，任何以对象作为结果的作业都会在写入时失败。
 - WorkBuddy 租户并发配额按实际运行槽计数：审批等待释放槽位，恢复时原子重取，重叠执行不再越过上限。
 - 延迟取消（对账中取消）不再遗留每月执行预留与运行槽。
