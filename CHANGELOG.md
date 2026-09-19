@@ -8,6 +8,9 @@
 
 ### 新增
 
+- WorkBuddy 通用权限骨架（迁移 050 + `octop.infra.rbac`）：把知识库已有的四层权限模型（公司/部门/个人/单独授权）抽成与对象类型无关的一套表与解析——`workbuddy_object_scopes` 记隐式范围（`personal` 仅所有者、`department` 仅当前成员、`enterprise` 全员，形状与知识库同款 CHECK），`workbuddy_object_acl` 记可增可撤的显式授权（`read`/`write`/`admin`，主体为一人或一部门）。解析取「隐式等级与命中授权等级的最大值」，授权只能加不能夺；不可见对象对外与不存在一致（404 而非 403）。两张表强制 RLS（ENABLE + FORCE）与租户内复合外键，SQLite 侧只推进水位并在事务入口 fail closed。列表查询与单对象判定共用同一套可见性谓词，并有测试比对二者，防止两边漂移。
+- WorkBuddy 知识库文本-only 迁移通道（迁移 051）：文档新增 `source` 判别列（`upload`/`text`/`migration`），`file_ref_id` 放宽为可空并配 `source` 形状约束与部分唯一索引——这样「个人版只留分块文本与向量、不保留原文件」的库也能导入，同一知识库可有多篇无原文件的文档，而「一个已存文件只对应一篇文档」的约束仍然成立。服务新增 `index_text_document`（对传入文本分块、嵌入、原子发布，全程不触碰对象存储），路由 `POST /knowledge-bases/{id}/documents` 接受 `source` 与 `text`；上传类文档走原路径不变，走错入口会被明确拒绝而不是静默降级。
+- 知识库迁移对账脚本 `scripts/migrate_kb.py`：读取个人版控制库（`~/.octop/octop.db`）与各库的 `index.sqlite`（分块文本 + `<Nf` little-endian float32 向量），逐库给出导入路径与理由——A 原样搬（模型修订已发布且已授权、维度一致）、B 重新嵌入（模型可用但维度不符）、C 挂起（模型未发布或未授权，需管理员先授权），未给目标库时如实报 `unknown` 而不猜测。报告含每库文档数、分块数、向量维度、目标范围（`shared=1 → enterprise`）与总计；只读、可重复运行，本批次不写入任何一侧。
 - WorkBuddy 知识索引记录为真实作业（合同 §4.6.2）：`POST /knowledge-bases/{id}/documents` 返回的 `job_id` 指向 `workbuddy_jobs` 中一条 `knowledge_index` 作业（此前是一个查不到对应行的随机 uuid）；索引开始时作业置为 `running`，结束时写入 `result`（文档、世代、分块数），失败时写入失败码。
 - WorkBuddy 提案生成记录为真实作业（合同 §4.6.2）：`POST /workflows/{id}/improvement-proposals` 的 202 返回 `job_id` 指向 `workbuddy_jobs` 中一条 `improvement_proposal` 作业，成功后 `result` 带 `proposal_id`/`workflow_id`，失败时记录拒绝码；客户端丢失响应后可用 `GET /jobs` 找回。
 - WorkBuddy 节点重试：按定义声明的 `retry.max_attempts`/`backoff_sec` 执行重试，只对「可证明未发出调用」的失败（依赖不可达、请求被拒）与已声明只读/幂等的工具生效；每次重试复用同一逻辑操作键 `execution_id:node_id`；未知结果仍进入对账而不是重发。
