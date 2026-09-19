@@ -1688,6 +1688,165 @@ def test_a_dead_worker_lease_is_taken_over_with_a_new_fence(
     assert dying.worker_id == "dead-worker"
 
 
+def _tool_definition(*, retry: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One tool node, optionally with a retry budget on the node."""
+    node: dict[str, Any] = {
+        "id": "call",
+        "type": "tool",
+        "name": "Call the provider",
+        "config": {"tool_name": "bidding.submit", "parameters": {}},
+    }
+    if retry is not None:
+        node["retry"] = retry
+    return {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {},
+        "nodes": [node],
+        "edges": [],
+    }
+
+
+class _FlakyToolPort:
+    """Fails the first ``failures`` calls with ``code``, then answers."""
+
+    def __init__(self, *, failures: int, code: ErrorCode) -> None:
+        self.failures = failures
+        self.code = code
+        self.calls: list[str] = []
+
+    def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
+        self.calls.append(idempotency_key)
+        if len(self.calls) <= self.failures:
+            raise OctopError(self.code, "the provider did not answer")
+        return {"ok": True}
+
+    def execute_llm(self, *, node: Any, activation: Any) -> Any:  # pragma: no cover
+        raise AssertionError("this workflow has no llm node")
+
+    def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:
+        raise AssertionError("chat is not part of this workflow")
+
+
+def _run_tool_once(
+    pool: Any,
+    tenant: dict[str, Any],
+    port: Any,
+    definition: dict[str, Any],
+    *,
+    name: str,
+) -> dict[str, Any]:
+    """Accept, admit and run one tool workflow; return the execution row."""
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    actor = RuntimeActor(
+        tenant_id=tenant["tenant_id"],
+        user_id=tenant["owner_user_id"],
+        role="owner",
+        tenant_status="active",
+    )
+    worker = WorkBuddyExecutionWorker(pool, service=service, worker_id=f"{name}-worker")
+    worker.drain()
+    workflow_id = _publish(pool, tenant, definition, name)
+    execution_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+    worker.run_once()
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    row = WorkBuddyRuntimeRepo(pool).get_execution(ctx, execution_id)
+    assert row is not None
+    return {"status": row.status, "error_code": row.error_code, "id": execution_id}
+
+
+def test_a_pre_dispatch_failure_is_retried_within_the_node_budget(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """A retryable failure reuses the same operation key, up to ``max_attempts``."""
+    port = _FlakyToolPort(failures=2, code=ErrorCode.DEPENDENCY_UNAVAILABLE)
+    execution = _run_tool_once(
+        pool,
+        tenant,
+        port,
+        _tool_definition(retry={"max_attempts": 3, "backoff_sec": 1}),
+        name="Retry budget runtime",
+    )
+
+    assert execution["status"] == "success", execution
+    # Three dispatches of one logical operation, so an idempotent provider sees
+    # one operation and the same key every time.
+    assert len(port.calls) == 3, port.calls
+    assert len(set(port.calls)) == 1, port.calls
+    assert port.calls[0].endswith(":call"), port.calls
+
+
+def test_a_permanent_failure_is_never_retried(pool: Any, tenant: dict[str, Any]) -> None:
+    """Argument and permission failures are terminal, whatever the budget says."""
+    port = _FlakyToolPort(failures=9, code=ErrorCode.WORKBUDDY_VALIDATION_FAILED)
+    execution = _run_tool_once(
+        pool,
+        tenant,
+        port,
+        _tool_definition(retry={"max_attempts": 3, "backoff_sec": 1}),
+        name="Permanent failure runtime",
+    )
+
+    assert execution["status"] == "failed", execution
+    assert execution["error_code"] == ErrorCode.WORKBUDDY_VALIDATION_FAILED.value, execution
+    assert len(port.calls) == 1, port.calls
+
+
+def test_a_node_without_a_declared_retry_calls_once(pool: Any, tenant: dict[str, Any]) -> None:
+    """The budget defaults to a single call; nothing retries behind the author's back."""
+    port = _FlakyToolPort(failures=1, code=ErrorCode.DEPENDENCY_UNAVAILABLE)
+    execution = _run_tool_once(pool, tenant, port, _tool_definition(), name="No retry runtime")
+
+    assert execution["status"] == "failed", execution
+    assert len(port.calls) == 1, port.calls
+
+
+def test_a_retry_does_not_turn_an_unknown_write_into_a_second_call(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """An unknown outcome parks for reconciliation; a retry budget cannot override it."""
+
+    class _UnknownOutcomePort:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
+            from octop.infra.workbuddy.runtime import UnresolvedToolOutcome
+
+            self.calls.append(idempotency_key)
+            raise UnresolvedToolOutcome(
+                operation_key=idempotency_key,
+                external_request_id="provider-operation-retry-001",
+                dispatched_at="2026-09-19T12:00:00Z",
+                tool_revision="rev-1",
+                parameters_digest="d41d8cd98f00b204e9800998ecf8427e",
+                detail="the connection dropped after the request was sent",
+            )
+
+        def execute_llm(self, *, node: Any, activation: Any) -> Any:  # pragma: no cover
+            raise AssertionError("this workflow has no llm node")
+
+        def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:
+            raise AssertionError("chat is not part of this workflow")
+
+    port = _UnknownOutcomePort()
+    execution = _run_tool_once(
+        pool,
+        tenant,
+        port,
+        _tool_definition(retry={"max_attempts": 3, "backoff_sec": 1}),
+        name="Retry versus unknown write runtime",
+    )
+
+    assert execution["status"] == "waiting_reconciliation", execution
+    assert len(port.calls) == 1, port.calls
+
+
 async def test_the_dispatch_intent_is_durable_before_an_external_call(
     app: FastAPI, pool: Any, tenant: dict[str, Any], monkeypatch: Any
 ) -> None:

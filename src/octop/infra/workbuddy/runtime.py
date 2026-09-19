@@ -110,6 +110,11 @@ class GraphNode:
     name: str
     config: Mapping[str, Any]
     save_as: str | None
+    # The node's retry budget (``max_attempts``/``backoff_sec``), already
+    # validated and defaulted by the compiler, or None when the definition asked
+    # for none. The engine honours it only for failures that provably dispatched
+    # nothing.
+    retry: Mapping[str, Any] | None = None
 
     @property
     def output_key(self) -> str:
@@ -161,6 +166,9 @@ class StepOutcome:
     started_at: float | None = None
     duration_ms: int | None = None
     tokens: int = 0
+    # How many extra calls this attempt made before the step settled (0 = the
+    # declared retry budget was never needed).
+    retries: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,6 +623,7 @@ def graph_from_compiled(compiled: CompiledWorkflow, *, version_id: str) -> Workf
             name=node.name,
             config=dict(node.config) if isinstance(node.config, Mapping) else {},
             save_as=node.save_as,
+            retry=dict(node.retry) if node.retry else None,
         )
         for node in compiled.nodes
     )
@@ -742,6 +751,53 @@ def _evaluate(expression: str, activation: Mapping[str, Any], node: GraphNode) -
     return result.value
 
 
+# The contract's retry range: ``max_attempts`` counts the first call, and the
+# backoff is bounded so a run cannot sleep past its lease.
+MAX_RETRY_ATTEMPTS = 3
+DEFAULT_RETRY_BACKOFF_SECONDS = 5
+MAX_RETRY_BACKOFF_SECONDS = 60
+
+# A failure that provably dispatched nothing may be retried inside the node's
+# budget: the dependency was unreachable, or the request was refused before it
+# left the process. Anything else may already have reached the provider, and the
+# contract forbids re-sending an external write without a registered idempotency
+# guarantee -- the platform tool registry carries no such declaration, so the
+# engine never auto-retries those (an *unknown* outcome is parked for
+# reconciliation instead, by the adapter raising ``UnresolvedToolOutcome``).
+RETRYABLE_ERROR_CODES = frozenset(
+    {
+        ErrorCode.DEPENDENCY_UNAVAILABLE,
+        ErrorCode.RATE_LIMITED,
+    }
+)
+
+
+def _retry_budget(node: GraphNode) -> tuple[int, int]:
+    """Clamped ``(max_attempts, backoff_sec)`` for one node; 1 means no retry."""
+    raw = node.retry if isinstance(node.retry, Mapping) else {}
+    attempts = raw.get("max_attempts", 1)
+    backoff = raw.get("backoff_sec", DEFAULT_RETRY_BACKOFF_SECONDS)
+    max_attempts = 1
+    if isinstance(attempts, int) and not isinstance(attempts, bool):
+        max_attempts = min(max(attempts, 1), MAX_RETRY_ATTEMPTS)
+    seconds = DEFAULT_RETRY_BACKOFF_SECONDS
+    if isinstance(backoff, int) and not isinstance(backoff, bool):
+        seconds = min(max(backoff, 1), MAX_RETRY_BACKOFF_SECONDS)
+    return max_attempts, seconds
+
+
+def _sleep_backoff(seconds: int, should_stop: Callable[[], bool] | None) -> bool:
+    """Wait between attempts; False once a cancel has landed."""
+    remaining = float(seconds)
+    while remaining > 0:
+        if should_stop is not None and should_stop():
+            return False
+        slice_seconds = min(remaining, 1.0)
+        time.sleep(slice_seconds)
+        remaining -= slice_seconds
+    return should_stop is None or not should_stop()
+
+
 def run_graph(
     graph: WorkflowGraph,
     *,
@@ -836,6 +892,7 @@ def run_graph(
         skip_reason: str | None = None,
         timing: tuple[float, int] | None = None,
         tokens: int = 0,
+        retries: int = 0,
     ) -> StepOutcome:
         started_at, duration_ms = timing if timing is not None else (None, None)
         outcome = StepOutcome(
@@ -851,6 +908,7 @@ def run_graph(
             started_at=started_at,
             duration_ms=duration_ms,
             tokens=int(tokens or 0),
+            retries=int(retries or 0),
         )
         steps.append(outcome)
         if on_step_settled is not None and not replayed:
@@ -1083,46 +1141,70 @@ def run_graph(
             )
             propagate_skip(node, failed=True)
             continue
-        try:
-            activation = _activation(graph, node, inputs=inputs, bindings=bindings)
-            if on_step_dispatch is not None:
-                # Durable before the call leaves the process: a worker that dies
-                # here leaves the operation key, not a mystery.
-                on_step_dispatch(node)
-            if node.type == "tool":
-                value = port.execute_tool(
-                    node=node,
-                    activation=activation,
-                    idempotency_key=f"{execution_id}:{node.id}",
-                )
-            else:
-                value = port.execute_llm(node=node, activation=activation)
-        except UnresolvedToolOutcome as outcome:
+        max_attempts, backoff_sec = _retry_budget(node)
+        dispatched = 0
+        call_value: Any = None
+        call_error: OctopError | None = None
+        parked: UnresolvedToolOutcome | None = None
+        while True:
+            dispatched += 1
+            call_error = None
+            try:
+                activation = _activation(graph, node, inputs=inputs, bindings=bindings)
+                if on_step_dispatch is not None:
+                    # Durable before the call leaves the process: a worker that
+                    # dies here leaves the operation key, not a mystery.
+                    on_step_dispatch(node)
+                if node.type == "tool":
+                    call_value = port.execute_tool(
+                        node=node,
+                        activation=activation,
+                        # The same logical operation key on every attempt: an
+                        # idempotent provider de-duplicates on it.
+                        idempotency_key=f"{execution_id}:{node.id}",
+                    )
+                else:
+                    call_value = port.execute_llm(node=node, activation=activation)
+                break
+            except UnresolvedToolOutcome as outcome:
+                parked = outcome
+                break
+            except OctopError as exc:
+                call_error = exc
+                retryable = exc.code in RETRYABLE_ERROR_CODES
+                if not retryable or dispatched >= max_attempts:
+                    break
+                if not _sleep_backoff(backoff_sec, should_stop):
+                    # A cancel landed while backing off: stop instead of retrying.
+                    break
+        if parked is not None:
             # The write may or may not have happened. Park the step: downstream
             # stays unrunnable until an operator reconciles the evidence, and the
             # tool is never called again for this attempt.
-            record(node, "waiting_reconciliation", output=outcome.facts(), timing=elapsed())
+            record(node, "waiting_reconciliation", output=parked.facts(), timing=elapsed())
             reconciliation_node = node.id
             break
-        except OctopError as exc:
+        if call_error is not None:
             node_failures.append(
                 record(
                     node,
                     "failed",
-                    error_code=exc.code.value,
-                    error_message=exc.message,
+                    error_code=call_error.code.value,
+                    error_message=call_error.message,
                     timing=elapsed(),
+                    retries=dispatched - 1,
                 )
             )
             propagate_skip(node, failed=True)
             continue
-        store(node, value)
+        store(node, call_value)
         record(
             node,
             "success",
-            output=value,
+            output=call_value,
             timing=elapsed(),
-            tokens=_reported_tokens(value) if node.type == "llm" else 0,
+            tokens=_reported_tokens(call_value) if node.type == "llm" else 0,
+            retries=dispatched - 1,
         )
         propagate_taken(node)
 
