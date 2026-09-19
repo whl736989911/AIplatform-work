@@ -797,6 +797,18 @@ async def test_cancel_during_unknown_write_waits_for_evidence(
     assert settled["status"] == "canceled", settled
     assert settled["cancel_requested"] is True, settled
     assert len(lost_response.calls) == 1, lost_response.calls
+    # A terminal run keeps nothing live: the cancelled execution released its slot
+    # and settled its monthly reservation instead of leaking them until expiry.
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    assert (
+        WorkBuddyRuntimeRepo(pool).list_live_quota_reservations(
+            ctx, tenant_id=tenant["tenant_id"], execution_id=execution_id
+        )
+        == []
+    )
 
 
 class _UsagePort:

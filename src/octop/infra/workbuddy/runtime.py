@@ -70,6 +70,9 @@ EXECUTION_STATUSES = frozenset(
 )
 CANCELLABLE_EXECUTION_STATUSES = ("queued", "running", "waiting_approval")
 APPROVAL_TOKEN_TTL_SECONDS = 120
+# A monthly execution reservation must outlive any legitimate wait (approval,
+# reconciliation) inside its own period; anything shorter would let the monthly
+# allowance free itself while the run that consumed it is still unresolved.
 EXECUTION_RESERVATION_TTL_SECONDS = 32 * 24 * 60 * 60
 DEFAULT_MAX_STEPS = 50
 MAX_STEPS_CAP = 200
@@ -2940,13 +2943,18 @@ class WorkBuddyRuntimeService:
         )
         # The decision is final; only the recorded result may now advance the DAG.
         if execution.cancel_requested_at is not None:
-            self._repo.update_execution_status(
-                ctx,
-                execution_id,
-                status="canceled",
-                expected_status=("waiting_reconciliation",),
-                mark_finished=True,
-            )
+            with runtime_transaction(self._db, ctx) as conn:
+                self._repo.update_execution_status(
+                    ctx,
+                    execution_id,
+                    status="canceled",
+                    expected_status=("waiting_reconciliation",),
+                    mark_finished=True,
+                    conn=conn,
+                )
+                # The run is terminal, so the slot and the monthly reservation it
+                # still holds are settled here; nothing else will settle them.
+                self._settle_execution_quota(actor, execution_id, conn=conn, consume=True)
         else:
             self._run_execution(actor, execution_id, graph=graph, decisions={})
         rows = self._repo.list_reconciliations(ctx, execution_id)
