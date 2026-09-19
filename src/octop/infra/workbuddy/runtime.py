@@ -3279,7 +3279,9 @@ class WorkBuddyRuntimeService:
     def mark_notification_read(self, actor: RuntimeActor, notification_id: str) -> NotificationView:
         self._require_postgres()
         ctx = self._ctx(actor)
-        if not self._repo.mark_notification_read(ctx, notification_id, user_id=actor.acting_user_id):
+        if not self._repo.mark_notification_read(
+            ctx, notification_id, user_id=actor.acting_user_id
+        ):
             rows = self._repo.list_notifications(ctx, user_id=actor.acting_user_id, limit=200)
             existing = next((row for row in rows if row.id == notification_id), None)
             if existing is None:
@@ -3344,7 +3346,9 @@ class WorkBuddyRuntimeService:
 
     def list_chat_sessions(self, actor: RuntimeActor, *, limit: int = 50) -> list[ChatSessionView]:
         self._require_postgres()
-        rows = self._repo.list_chat_sessions(self._ctx(actor), user_id=actor.acting_user_id, limit=limit)
+        rows = self._repo.list_chat_sessions(
+            self._ctx(actor), user_id=actor.acting_user_id, limit=limit
+        )
         return [_chat_session_view(row) for row in rows]
 
     def get_chat_session(self, actor: RuntimeActor, session_id: str) -> ChatSessionView:

@@ -1764,9 +1764,7 @@ class WorkBuddyRuntimeRepo:
         """
         ctx = WorkBuddyDbContext.platform()
         with runtime_transaction(self._db, ctx) as c:
-            candidates = c.execute(
-                _CLAIMABLE_EXECUTIONS_SQL, (max(1, int(scan_limit)),)
-            ).fetchall()
+            candidates = c.execute(_CLAIMABLE_EXECUTIONS_SQL, (max(1, int(scan_limit)),)).fetchall()
             for row in candidates:
                 execution_id = str(row["id"])
                 tenant_id = str(row["tenant_id"])
@@ -1884,9 +1882,7 @@ class WorkBuddyRuntimeRepo:
         ).fetchone()
         return int(_row_value(row, "total", 0) or 0)
 
-    def _reserve_slot(
-        self, c: Any, *, tenant_id: str, execution_id: str, ttl_seconds: int
-    ) -> None:
+    def _reserve_slot(self, c: Any, *, tenant_id: str, execution_id: str, ttl_seconds: int) -> None:
         c.execute(
             """
             INSERT INTO workbuddy_quota_reservations(

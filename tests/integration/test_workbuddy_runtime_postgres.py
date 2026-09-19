@@ -1665,9 +1665,6 @@ def test_a_dead_worker_lease_is_taken_over_with_a_new_fence(
     assert first is not None and first.execution_id == execution_id, first
 
     time.sleep(1.2)
-    survivor = WorkBuddyExecutionWorker(
-        pool, service=service, worker_id="survivor", lease_ttl_seconds=60
-    )
     taken = repo.claim_execution(
         worker_id="survivor", lease_ttl_seconds=60, reservation_ttl_seconds=60
     )
