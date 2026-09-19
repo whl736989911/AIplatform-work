@@ -144,7 +144,7 @@ printf '{"status":"starting","service":"%s","database":"postgresql","object_stor
     "$DEPLOY_SERVICE" "$storage_state" "$vault_state"
 
 if [ "$DEPLOY_SERVICE" = "worker" ]; then
-    exec octop workbuddy-worker
+    exec octop workbuddy worker
 fi
 
 exec octop run --host "$BIND_HOST" --port "$BIND_PORT"

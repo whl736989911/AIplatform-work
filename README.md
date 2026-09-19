@@ -22,6 +22,7 @@
   <a href="#-overview">Overview</a> ·
   <a href="#-core-technology">Core Technology</a> ·
   <a href="#-features">Features</a> ·
+  <a href="#-workbuddy">WorkBuddy</a> ·
   <a href="#-roadmap">Roadmap</a> ·
   <a href="#-quick-start">Quick Start</a> ·
   <a href="#-contents">Contents</a>
@@ -53,6 +54,8 @@ Chat through the Web Dashboard, Feishu, DingTalk, QQ, Discord, WeCom, or program
 | 💻 | **Terminal AI+** | Interactive shell in the browser — AI-assisted command execution and troubleshooting |
 | 🌐 | **Browser AI+** | Headless Chromium sessions for web automation, screenshots, and remote browsing |
 | 🖥️ | **Remote desktop** | Live screen and input from the dashboard on Linux, Windows, and macOS — remote office work and GUI apps; one-click isolated desktop on headless Linux |
+| 🏢 | **WorkBuddy enterprise workflows** | Multi-tenant tenants/departments/roles, versioned workflows, approvals, knowledge bases, triggers, and a template marketplace — opt-in on PostgreSQL |
+| ⚙️ | **Durable execution tier** | Accepted runs are claimed from PostgreSQL by a worker: leases with monotonic fences, per-tenant concurrency ceilings, retry budgets bounded by each tool's declared effect, and an outbox for at-least-once events |
 | 🏠 | **Self-hosted** | Dashboard, CLI, IM channels, and cron in one `octop run` — all data under `~/.octop/` |
 
 ## 📌 Overview
@@ -123,6 +126,23 @@ Instead of an external queue or message broker, Octop routes every surface — W
 - **Knowledge base** — RAG over your documents; upload files and let semantic retrieval ground agent answers in your private corpus
 - **Plugins** — install and manage third-party plugins (`octop plugin`); bundled plugins are seeded and toggled on demand from the dashboard
 
+### WorkBuddy (multi-tenant workflows)
+
+An opt-in enterprise surface on the same process: many tenants in one deployment, each with its own people, credentials, workflows, and data boundaries. It needs the PostgreSQL control plane; a single-node install hosts the execution worker in-process, and a split topology runs it as its own tier.
+
+- **Tenancy & governance** — tenants, departments, memberships, roles, invitations, capability and quota settings; every tenant-scoped table is isolated by row-level security, and the API verifies the caller's current role from the database on each request
+- **Workflow authoring** — a JSON definition is compiled to a canonical form (boundaries, tool grants, knowledge references and schemas are checked), published as an immutable version, and activated per rollout bucket with a revision compare-and-swap
+- **Durable runtime** — accepting an execution only records `queued`; a worker claims it in one transaction (tenant row lock → concurrency ceiling → running slot → lease with a monotonic fence → `running`), so replicas need no coordination and a crashed worker is recovered when its lease expires
+- **Approvals** — a node can require named approvers; the decision is a one-time token, so a retried or replayed request cannot approve twice
+- **Tool governance** — the platform tool registry declares each tool's effect (`read_only` / `external_write`), idempotency and result-lookup support, sandbox verification, and input/output JSON Schemas (Draft 7), and the engine consults the tenant's granted revision before it retries or trusts a result
+- **Knowledge** — knowledge bases pin an embedding model, accept uploads, index documents into atomic generations, and answer retrieval queries; indexing runs as a tracked job
+- **Triggers** — webhook and cron registrations with signed raw bodies, tolerance windows and persisted dedupe keys
+- **Improvement loop** — proposals carry generated patches, risk classes and approval arithmetic; shadow runs replay real recordings and canary gates judge them on the executions that actually ran before a promotion applies
+- **Marketplace** — publish, review, install and upgrade workflow templates
+- **Jobs & events** — client-visible operations are recorded in one jobs table (kind, status, attempt, result) so a lost response can be recovered; committed facts are published at least once through a transport-agnostic outbox dispatcher
+
+Full API and CLI surface: see [WorkBuddy](#-workbuddy) below.
+
 ### ACP (Agent Client Protocol)
 
 Octop supports ACP in two directions:
@@ -139,6 +159,72 @@ Octop supports ACP in two directions:
 Built-in outbound runners include OpenCode, CodeBuddy, Claude Code, and Codex.
 
 Full setup: **[docs/acp.md](docs/acp.md)**.
+
+## 🏢 WorkBuddy
+
+WorkBuddy is the enterprise tier of Octop: a multi-tenant workflow platform that runs inside the same process and the same control plane, and turns Octop from a personal assistant into a governed system that a company can deploy. It is **opt-in** — the personal product keeps working without it.
+
+### What it is made of
+
+| Tier | Where | Responsibility |
+|------|-------|----------------|
+| API | `src/octop/api/routers/workbuddy_*.py` | `/api/v1` endpoints for tenants, workflows, executions, approvals, knowledge, proposals, marketplace, lifecycle |
+| Domain | `src/octop/infra/workbuddy/` | compiler, policy, runtime, worker, outbox dispatcher, knowledge, proposals, marketplace, lifecycle, CEL sandbox |
+| Data | `src/octop/infra/db/migrations/015…029` | tenant-scoped schema with `ENABLE`/`FORCE ROW LEVEL SECURITY`, immutable versions, leases and fences, jobs, outbox |
+| Worker | `octop workbuddy worker` | claims accepted executions and runs them; the API tier holds no queue and no in-process execution state |
+
+### API surface
+
+All enterprise endpoints sit under `/api/v1`, alongside the personal API:
+
+```bash
+GET  /api/v1/tenants                       # tenancy, members, invitations, departments
+POST /api/v1/workflow-definitions/validate # compile a definition before it is stored
+POST /api/v1/workflows/{id}/execute        # accept a run: 202 + execution id
+POST /api/v1/workflows/{id}/activate       # activate a version in a rollout bucket
+POST /api/v1/workflows/{id}/rollback
+GET  /api/v1/executions/{id}               # step-level state, token usage, dispatch intent
+POST /api/v1/executions/{id}/cancel
+GET  /api/v1/approval-requests/{id}
+POST /api/v1/knowledge-bases/{id}/documents
+GET  /api/v1/knowledge-bases/{id}/search
+POST /api/v1/improvement-proposals         # compiled change + risk class + approvals
+POST /api/v1/improvement-proposals/{id}/promote
+POST /api/v1/marketplace/templates/{id}/install
+GET  /api/v1/jobs/{job_id}                 # the job a request started, recoverable after a lost response
+GET  /api/v1/audit-logs
+```
+
+### CLI
+
+```bash
+octop workbuddy cel -e 'execution.status == "success"' --context '{"execution": {"status": "success"}}'
+octop workbuddy worker          # run the execution tier (needs PostgreSQL)
+octop workbuddy dependencies    # probe locked components and configured dependencies (0 ok / 2 failed / 3 blocked)
+```
+
+### Deployment
+
+- **Database**: PostgreSQL is mandatory for WorkBuddy (the personal surface still defaults to SQLite); knowledge vectors need the `vector` extension, which the migrations never create themselves — it is a control-plane prerequisite
+- **Broker**: Redis backs the API rate limiter (`REDIS_URL`); the execution queue itself is PostgreSQL, so a Redis outage cannot lose an accepted run
+- **Worker tier**: a single-node install hosts the worker in-process (`OCTOP_WORKBUDDY_WORKER=on`, the default); a scaled deployment sets `OCTOP_WORKBUDDY_WORKER=off` on the API and runs the `worker` service from `deploy/compose.production.yml` instead
+- **Migrations**: `015_workbuddy_*` … `029_workbuddy_*` create the enterprise schema, and they are applied when the control plane is opened; the production topology runs the `migrate` job from `deploy/scripts/migrate.sh` first, which re-verifies fail-closed that the backend really is PostgreSQL, that `vector` is installed, and that every tenant-scoped table has row-level security enabled and forced
+
+### Verification
+
+The WorkBuddy surface is covered by contract-driven tests that run against a live PostgreSQL (and a live Redis for the limiter):
+
+```bash
+pytest tests/unit/workbuddy tests/integration/test_workbuddy_runtime_postgres.py \
+       tests/integration/test_workbuddy_proposals_postgres.py \
+       tests/integration/test_workbuddy_business_smoke.py
+```
+
+### Current limits
+
+- Connector adapters, model-gateway adapters and trigger delivery execution are the deployment's own wiring; the engine side (declarations, retry policy, dispatch intent, reconciliation) is in place
+- The outbox dispatcher needs a publisher to be wired before events leave the database; without one it refuses to run and leaves them pending rather than reporting delivery
+- Per-tenant metric exposure and the final compliance sign-off for production deletion are product decisions, not code defaults
 
 ## 🧭 Roadmap
 
@@ -286,6 +372,7 @@ See [`.env.example`](.env.example) for the full list.
 - [Overview](#-overview)
 - [Core Technology](#-core-technology)
 - [Features](#-features)
+- [WorkBuddy](#-workbuddy)
 - [Roadmap](#-roadmap)
 - [Quick Start](#-quick-start)
 - **Deploy & Use**

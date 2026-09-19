@@ -14,14 +14,19 @@
 - WorkBuddy 平台工具注册表补齐合同 §4.6.1 的声明字段：`input_schema`、`output_schema`、`effect_class`（`read_only`/`external_write`）、`supports_idempotency`、`supports_result_lookup`、`sandbox_verified`，默认值一律取保守值；引擎按租户已授权修订解析声明，用于重试判定与工具结果按注册 schema 校验。
 - WorkBuddy 发件箱派发器（合同「Scheduler / Outbox dispatcher」）：已提交的 outbox 事件此前只写不读，永远停在 `pending`；现在由派发器按 `available_at` 领取（`FOR UPDATE SKIP LOCKED` + 可见性窗口，跨租户平台上下文）、经可注入的发布端口送出，成功标记 `dispatched`，失败按指数退避重排，超过尝试上限后进入死信（`failed` 并保留最后错误）。发送通道是端口（合同只规定语义：PG 为事实源、至少一次投递、消费者按 PG 去重）；未配置发布端口时派发器拒绝运行，不会把没人收到的事件标记为已送达。
 - WorkBuddy 执行 Worker：接纳执行只写入 `queued`，由 Worker 从数据库原子领取（锁租户行、占运行槽、取租约并单调递增 fencing token）。整体等待（审批/对账）释放运行槽，恢复时重新排队申请；Worker 崩溃后租约到期由下一个 Worker 接管。
-- `octop workbuddy-worker` 命令行与 `deploy/compose.production.yml` 的 `worker` 服务；单进程安装默认在 `octop run` 内托管该 Worker（`OCTOP_WORKBUDDY_WORKER=off` 可关闭）。
+- `octop workbuddy worker` 命令行与 `deploy/compose.production.yml` 的 `worker` 服务；单进程安装默认在 `octop run` 内托管该 Worker（`OCTOP_WORKBUDDY_WORKER=off` 可关闭）。
 
 ### 修复
 
+- 生产 Worker 容器启动即失败：`deploy/scripts/app-entrypoint.sh` 执行的是 `octop workbuddy-worker`，而命令行只提供 `octop workbuddy worker`（组 + 子命令），容器会以「No such command」退出。同步修正 `docs/architecture.md`、`.env.example` 与 CHANGELOG 中的同一处写法，并新增 `tests/unit/test_deploy_cli_commands.py`：解析 `deploy/scripts/*.sh` 中所有 `octop …` 调用并与真实命令行注册表比对，防止部署脚本与命令面再次漂移。
 - WorkBuddy 作业状态：此前没有任何路径把作业从 `queued` 置为 `running`，正在执行的作业对客户端仍显示 `queued`；新增 `start_job`（同时写入 `started_at`）。
 - WorkBuddy 作业结果写入：`finish_job` 未按 jsonb 绑定 `result`，任何以对象作为结果的作业都会在写入时失败。
 - WorkBuddy 租户并发配额按实际运行槽计数：审批等待释放槽位，恢复时原子重取，重叠执行不再越过上限。
 - 延迟取消（对账中取消）不再遗留每月执行预留与运行槽。
+
+### 文档
+
+- README（中英双份）新增 WorkBuddy 章节：能力清单（租户治理、工作流编译与版本、执行 Worker、审批、工具治理、知识库、触发器、改进闭环、模板市场、作业与事件）、`/api/v1` 接口速查、`octop workbuddy` 命令行、部署前提（PostgreSQL 必需、`vector` 扩展为前置条件、Redis 承载限流、Worker 层级开关）与验证命令；同时写明当前边界：连接器/模型网关适配器与触发器投递执行属部署方接线，outbox 需先接发布端口，租户级指标口径与生产注销合规签署属产品决策。
 
 ## [1.0.0] - 2026-09-14
 

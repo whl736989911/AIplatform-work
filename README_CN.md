@@ -22,6 +22,7 @@
   <a href="#-亮点">亮点</a> ·
   <a href="#-核心技术">核心技术</a> ·
   <a href="#-功能特性">功能特性</a> ·
+  <a href="#-workbuddy">WorkBuddy</a> ·
   <a href="#-规划">规划</a> ·
   <a href="#-快速开始">快速开始</a>·
   <a href="#-目录">目录</a>
@@ -57,6 +58,8 @@
 | 💻 | **终端 AI+** | 浏览器内交互式 Shell，AI 辅助命令执行与排障 |
 | 🌐 | **浏览器 AI+** | 基于 Chromium 的无头浏览器会话，支持网页自动化、截图与远程操控 |
 | 🖥️ | **远程桌面** | 控制台内实时看屏与键鼠操控，跨 Linux / Windows / macOS；适合远程办公、GUI 软件操作，无图形 Linux 可一键搭建隔离桌面 |
+| 🏢 | **WorkBuddy 企业多租户工作流** | 同一份进程内的企业面：租户/部门/角色、可版本化的工作流、审批、知识库、触发器与模板市场——按需开启，依赖 PostgreSQL |
+| ⚙️ | **可恢复的执行层** | 被接纳的执行由 Worker 从 PostgreSQL 领取：租约 + 单调递增 fencing、租户并发上限、受工具声明约束的重试预算，以及至少一次投递的 outbox |
 | 🏠 | **可自托管** | 一条 `octop run` 即可运行控制台、CLI、IM 通道与定时任务，数据存于 `~/.octop/` |
 
 <details>
@@ -123,6 +126,23 @@ Octop 不依赖外部消息队列或中间件，而是通过进程内的 `Harnes
 - **知识库** — 基于文档的 RAG 检索；上传文件后，语义检索让 Agent 的回答锚定你的私有知识库
 - **插件** — 安装并管理第三方插件（`octop plugin`）；内置插件随安装注入，按需在控制台一键启用
 
+### WorkBuddy（企业多租户工作流）
+
+同一进程内的可选企业面：一个部署服务多个租户，每个租户有自己的成员、凭据、工作流与数据边界。它需要 PostgreSQL 控制平面；单机安装把执行 Worker 托管在进程内，拆分部署则把 Worker 作为独立层级运行。
+
+- **租户与治理**——租户、部门、成员关系、角色、邀请、能力与配额设置；每张租户表都由行级安全隔离，接口在每次请求时从数据库校验调用者当前角色
+- **工作流作者面**——JSON 定义被编译为规范形式（边界、工具授权、知识引用与 schema 都会校验），发布为不可变版本，并按灰度桶激活；激活以修订号做 CAS
+- **持久化执行**——接纳执行只写入 `queued`；Worker 在一个事务内领取（锁租户行 → 并发上限 → 占运行槽 → 取租约并单调递增 fencing token → `running`），因此多副本无需协调，Worker 崩溃后租约到期即被接管
+- **审批**——节点可要求指定审批人；决定是一次性令牌，重试或重放的请求无法重复批准
+- **工具治理**——平台工具注册表声明每个工具的影响面（`read_only` / `external_write`）、幂等与结果查询能力、沙箱验证状态，以及输入/输出的 JSON Schema（Draft 7）；引擎在重试或采信结果前先查该租户已授权的修订
+- **知识库**——绑定 Embedding 模型、接收上传、把文档索引为原子世代并支持检索；索引本身是一条可追踪的作业
+- **触发器**——Webhook 与 cron 注册，支持原始报文签名、时间窗容差与持久化去重键
+- **改进闭环**——提案携带生成的补丁、风险等级与审批算术；影子回放真实录制，灰度门禁按真正跑过的执行来判定，通过后才允许提升
+- **模板市场**——工作流模板的发布、评审、安装与升级
+- **作业与事件**——对外可见的操作统一记录在作业表（类型、状态、尝试次数、结果），响应丢失后仍可找回；已提交的事实通过传输无关的 outbox 派发器至少一次投递
+
+接口与命令行速查见下方 [WorkBuddy](#-workbuddy)。
+
 ### ACP（Agent Client Protocol）
 
 Octop 支持两个方向的 ACP 集成：
@@ -139,6 +159,72 @@ Octop 支持两个方向的 ACP 集成：
 内置出站 Runner 包括 OpenCode、CodeBuddy、Claude Code 和 Codex。
 
 完整配置：**[docs/acp.md](docs/acp.md)**。
+
+## 🏢 WorkBuddy
+
+WorkBuddy 是 Octop 的企业层：一套运行在同一进程、同一控制平面内的多租户工作流平台，把 Octop 从个人助手扩展成企业可以部署的受治理系统。它是**按需开启**的——不开启不影响个人版功能。
+
+### 组成
+
+| 层级 | 位置 | 职责 |
+|------|------|------|
+| 接口 | `src/octop/api/routers/workbuddy_*.py` | `/api/v1` 下的租户、工作流、执行、审批、知识库、提案、市场与生命周期接口 |
+| 领域 | `src/octop/infra/workbuddy/` | 编译器、策略、运行时、Worker、outbox 派发器、知识库、提案、市场、生命周期、CEL 沙箱 |
+| 数据 | `src/octop/infra/db/migrations/015…029` | 租户级 schema，`ENABLE`/`FORCE ROW LEVEL SECURITY`、不可变版本、租约与 fencing、作业、outbox |
+| Worker | `octop workbuddy worker` | 领取并运行被接纳的执行；API 层不持有队列，也不在进程内保存执行状态 |
+
+### 接口速查
+
+企业面接口与个人版同在 `/api/v1` 下：
+
+```bash
+GET  /api/v1/tenants                       # 租户、成员、邀请、部门
+POST /api/v1/workflow-definitions/validate # 入库前先编译校验
+POST /api/v1/workflows/{id}/execute        # 接纳一次运行：202 + execution id
+POST /api/v1/workflows/{id}/activate       # 在灰度桶中激活版本
+POST /api/v1/workflows/{id}/rollback
+GET  /api/v1/executions/{id}               # 步骤级状态、token 用量、派发意图
+POST /api/v1/executions/{id}/cancel
+GET  /api/v1/approval-requests/{id}
+POST /api/v1/knowledge-bases/{id}/documents
+GET  /api/v1/knowledge-bases/{id}/search
+POST /api/v1/improvement-proposals         # 已编译的变更 + 风险等级 + 审批数
+POST /api/v1/improvement-proposals/{id}/promote
+POST /api/v1/marketplace/templates/{id}/install
+GET  /api/v1/jobs/{job_id}                 # 请求创建的作业，响应丢失后仍可找回
+GET  /api/v1/audit-logs
+```
+
+### 命令行
+
+```bash
+octop workbuddy cel -e 'execution.status == "success"' --context '{"execution": {"status": "success"}}'
+octop workbuddy worker          # 运行执行层（需要 PostgreSQL）
+octop workbuddy dependencies    # 探测锁定组件与已配置依赖（0 正常 / 2 失败 / 3 阻塞）
+```
+
+### 部署
+
+- **数据库**：WorkBuddy 必须使用 PostgreSQL（个人面仍默认 SQLite）；知识库向量需要 `vector` 扩展，且迁移不会自行创建它——这是控制平面的前置条件
+- **中间件**：Redis 承载接口限流（`REDIS_URL`）；执行队列本身在 PostgreSQL，因此 Redis 故障不会丢失已接纳的运行
+- **Worker 层级**：单机安装默认在进程内托管（`OCTOP_WORKBUDDY_WORKER=on`）；拆分部署在 API 上设 `OCTOP_WORKBUDDY_WORKER=off`，改用 `deploy/compose.production.yml` 的 `worker` 服务
+- **迁移**：`015_workbuddy_*` … `029_workbuddy_*` 建立企业 schema，在控制平面打开时应用；生产拓扑先跑 `deploy/scripts/migrate.sh` 的 `migrate` 作业，它会失败即停地复核：后端确为 PostgreSQL、`vector` 扩展已安装、每张租户表都已 ENABLE 且 FORCE 行级安全
+
+### 验证
+
+WorkBuddy 由合同驱动的测试覆盖，运行在真实 PostgreSQL（限流相关还需真实 Redis）上：
+
+```bash
+pytest tests/unit/workbuddy tests/integration/test_workbuddy_runtime_postgres.py \
+       tests/integration/test_workbuddy_proposals_postgres.py \
+       tests/integration/test_workbuddy_business_smoke.py
+```
+
+### 当前边界
+
+- 连接器适配器、模型网关适配器与触发器投递执行属于部署方接线；引擎侧（声明、重试策略、派发意图、对账）已就绪
+- outbox 派发器需要先接上发布端口，事件才会离开数据库；未接时它拒绝运行并把事件留在 `pending`，而不是谎报已送达
+- 租户级指标口径与生产注销的最终合规签署属于产品决策，不是代码默认值
 
 ## 🧭 规划
 
@@ -279,6 +365,7 @@ docker run -d \
 - [概述](#-概述)
 - [核心技术](#-核心技术)
 - [功能特性](#-功能特性)
+- [WorkBuddy](#-workbuddy)
 - [规划](#-规划)
 - [快速开始](#-快速开始)
 - **部署与使用**
