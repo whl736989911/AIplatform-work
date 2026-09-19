@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-19T22:54:04Z",
+  "updated": "2026-09-19T22:58:19Z",
   "batches": {
     "1": {
       "state": "done",
@@ -20,7 +20,7 @@
       "notes": "A-20 占用迁移号 031（A 线段），后续 A 线从 032 起；/auth/reauthenticate 落在 workbuddy_identity.py，属按路由的例外（已写入计划契约 5）。未包含项：个人版知识库入口保留到 B-10/B-14；治理组不做客户端角色隐藏；A-19 名册前端暂不渲染；收件箱提问/审核属批次 4；逐节点排障属 A-02。"
     },
     "2": {
-      "state": "pending",
+      "state": "in_progress",
       "tasks": [
         "A-04",
         "A-05",
@@ -30,7 +30,7 @@
       "pr": null,
       "commits": [],
       "evidence": "",
-      "notes": ""
+      "notes": "批次 1 的 PR #29 等待 CI 合并；本批次从 main 拉新分支实施。A-04 节点元数据契约（fields/types/required/引用语法）、A-05 编译器诊断聚合（收集式多错 + 错误码→修复提示）、A-02 运行详情增强（逐节点输入输出/耗时/token + 重跑到此/重试/取消/对账）、A-03 版本定义级 diff。"
     },
     "3": {
       "state": "pending",

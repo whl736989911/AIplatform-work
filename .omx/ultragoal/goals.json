@@ -1,7 +1,7 @@
 {
   "version": 1,
   "createdAt": "2026-09-19T22:27:35.941Z",
-  "updatedAt": "2026-09-19T22:55:49Z",
+  "updatedAt": "2026-09-19T22:58:19Z",
   "briefPath": ".omx/ultragoal/brief.md",
   "goalsPath": ".omx/ultragoal/goals.json",
   "ledgerPath": ".omx/ultragoal/ledger.jsonl",
@@ -22,10 +22,10 @@
       "id": "G002",
       "title": "批次 2：节点元数据 + 编译器诊断 + 运行详情 + 版本 diff（A-04、A-05、A-02、A-03）",
       "objective": "A-04 后端节点元数据契约（fields/types/required/引用语法），使前端可据此渲染表单；A-05 编译器诊断聚合：收集式多错、每条带 path 与错误码→修复提示（收敛 workflow_compiler.py 的 46 处 raise）；A-02 运行详情增强：逐节点输入输出、耗时、token、重跑到此、重试、取消、对账（复用 A-01 的新 IA）；A-03 版本对比：定义级 diff，两版差异可读。证据：后端三套件 + 前端 lint/tsc/vitest + 真实服务冒烟（A-02/A-03）+ 状态写回 machine-a.json 批次 2。",
-      "status": "pending",
+      "status": "in_progress",
       "attempt": 0,
       "createdAt": "2026-09-19T22:27:35.941Z",
-      "updatedAt": "2026-09-19T22:27:53.974Z"
+      "updatedAt": "2026-09-19T22:58:19Z"
     },
     {
       "id": "G003",
