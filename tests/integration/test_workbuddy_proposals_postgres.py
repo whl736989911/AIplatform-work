@@ -84,9 +84,7 @@ def tenant(pool: Any) -> dict[str, Any]:
     # assignment below into "assign the creator" — a refusal the contract wants.
     # Select the owner's own row instead of trusting row order.
     owner_member = next(
-        row
-        for row in repo.list_members(tenant_row["tenant_id"])
-        if row.get("user_id") == owner_id
+        row for row in repo.list_members(tenant_row["tenant_id"]) if row.get("user_id") == owner_id
     )
     return {
         "tenant_id": tenant_row["tenant_id"],
