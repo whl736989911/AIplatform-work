@@ -264,6 +264,14 @@ def _tool_payload(record: Any) -> dict[str, Any]:
         "status": record.status,
         "published_at": record.published_at,
         "revoked_at": record.revoked_at,
+        # What the engine consults before dispatching: whether repeating this
+        # tool is safe, and what schema its result has to satisfy.
+        "effect_class": record.effect_class,
+        "supports_idempotency": record.supports_idempotency,
+        "supports_result_lookup": record.supports_result_lookup,
+        "sandbox_verified": record.sandbox_verified,
+        "input_schema": record.input_schema,
+        "output_schema": record.output_schema,
     }
 
 
@@ -342,6 +350,15 @@ class ToolPublishBody(BaseModel):
     adapter_key: str = Field(min_length=1, max_length=120)
     display_name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=1000)
+    # The declaration the engine reads: a read-only tool may be repeated, and an
+    # external write may only be repeated when its idempotency semantics are
+    # confirmed here (contract line 891).
+    effect_class: str = Field(default="external_write", pattern="^(read_only|external_write)$")
+    supports_idempotency: bool = False
+    supports_result_lookup: bool = False
+    sandbox_verified: bool = False
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
 
 
 class ModelPublishBody(BaseModel):
@@ -580,6 +597,12 @@ async def publish_platform_tool(
             display_name=body.display_name,
             description=body.description or "",
             actor_user_id=platform.user_id,
+            effect_class=body.effect_class,
+            supports_idempotency=body.supports_idempotency,
+            supports_result_lookup=body.supports_result_lookup,
+            sandbox_verified=body.sandbox_verified,
+            input_schema=body.input_schema,
+            output_schema=body.output_schema,
         )
     except _CATALOG_ERRORS as exc:
         raise _platform_refusal(exc) from exc

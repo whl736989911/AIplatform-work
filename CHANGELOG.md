@@ -10,6 +10,8 @@
 
 - WorkBuddy 知识索引记录为真实作业（合同 §4.6.2）：`POST /knowledge-bases/{id}/documents` 返回的 `job_id` 指向 `workbuddy_jobs` 中一条 `knowledge_index` 作业（此前是一个查不到对应行的随机 uuid）；索引开始时作业置为 `running`，结束时写入 `result`（文档、世代、分块数），失败时写入失败码。
 - WorkBuddy 提案生成记录为真实作业（合同 §4.6.2）：`POST /workflows/{id}/improvement-proposals` 的 202 返回 `job_id` 指向 `workbuddy_jobs` 中一条 `improvement_proposal` 作业，成功后 `result` 带 `proposal_id`/`workflow_id`，失败时记录拒绝码；客户端丢失响应后可用 `GET /jobs` 找回。
+- WorkBuddy 节点重试：按定义声明的 `retry.max_attempts`/`backoff_sec` 执行重试，只对「可证明未发出调用」的失败（依赖不可达、请求被拒）与已声明只读/幂等的工具生效；每次重试复用同一逻辑操作键 `execution_id:node_id`；未知结果仍进入对账而不是重发。
+- WorkBuddy 平台工具注册表补齐合同 §4.6.1 的声明字段：`input_schema`、`output_schema`、`effect_class`（`read_only`/`external_write`）、`supports_idempotency`、`supports_result_lookup`、`sandbox_verified`，默认值一律取保守值；引擎按租户已授权修订解析声明，用于重试判定与工具结果按注册 schema 校验。
 - WorkBuddy 执行 Worker：接纳执行只写入 `queued`，由 Worker 从数据库原子领取（锁租户行、占运行槽、取租约并单调递增 fencing token）。整体等待（审批/对账）释放运行槽，恢复时重新排队申请；Worker 崩溃后租约到期由下一个 Worker 接管。
 - `octop workbuddy-worker` 命令行与 `deploy/compose.production.yml` 的 `worker` 服务；单进程安装默认在 `octop run` 内托管该 Worker（`OCTOP_WORKBUDDY_WORKER=off` 可关闭）。
 
