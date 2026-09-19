@@ -148,3 +148,75 @@ def test_redis_url_resolves_to_the_shared_store(monkeypatch: pytest.MonkeyPatch)
     assert created["url"] == "redis://cache:6379/0"
     assert store.admit("key", now_ms=1, limit=1, window_ms=1000) == 1
     assert "ZREMRANGEBYSCORE" in created["script"]
+
+
+# --------------------------------------------------------------------------- #
+# the shared store, against a real Redis
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.skipif(
+    not __import__("os").environ.get("OCTOP_TEST_REDIS_URL"),
+    reason="OCTOP_TEST_REDIS_URL is not configured",
+)
+def test_redis_window_store_counts_the_same_way() -> None:
+    """The script's window behaves exactly as the policy expects.
+
+    The policy tests above use an in-process window; this one proves the shared
+    implementation agrees with it, which is what makes the limits real across
+    workers.
+    """
+    import os
+
+    import redis as redis_client
+
+    from octop.infra.workbuddy.ratelimit import RedisWindowStore
+
+    client = redis_client.Redis.from_url(os.environ["OCTOP_TEST_REDIS_URL"])
+    client.flushdb()
+    try:
+        store = RedisWindowStore(client)
+        key = f"ratelimit:test:{os.getpid()}"
+        limit, window = 3, 1000
+
+        for expected in (1, 2, 3):
+            count = store.admit(key, now_ms=1_000, limit=limit, window_ms=window)
+            assert count == expected, count
+        # Over-limit attempts are still counted, so hammering stays refused.
+        assert store.admit(key, now_ms=1_000, limit=limit, window_ms=window) == 4
+
+        # Attempts at 1_500 keep their place while the window still covers them.
+        assert store.admit(key, now_ms=1_500, limit=limit, window_ms=window) == 5
+        assert store.admit(key, now_ms=2_100, limit=limit, window_ms=window) == 2
+        # Once the last attempt is older than the window, the subject starts over.
+        assert store.admit(key, now_ms=3_200, limit=limit, window_ms=window) == 1
+    finally:
+        client.flushdb()
+        client.close()
+
+
+@pytest.mark.skipif(
+    not __import__("os").environ.get("OCTOP_TEST_REDIS_URL"),
+    reason="OCTOP_TEST_REDIS_URL is not configured",
+)
+def test_the_limiter_refuses_through_a_real_redis() -> None:
+    import os
+
+    import redis as redis_client
+
+    from octop.infra.workbuddy.ratelimit import RedisWindowStore
+
+    client = redis_client.Redis.from_url(os.environ["OCTOP_TEST_REDIS_URL"])
+    client.flushdb()
+    try:
+        limiter = SlidingWindowLimiter(RedisWindowStore(client))
+        subject = f"user:{os.getpid()}"
+        for _ in range(20):
+            assert limiter.check(WORKFLOW_EXECUTE_LIMIT, subject).allowed is True
+        refused = limiter.check(WORKFLOW_EXECUTE_LIMIT, subject)
+        assert refused.allowed is False
+        assert refused.remaining == 0
+        assert refused.retry_after >= 1
+    finally:
+        client.flushdb()
+        client.close()

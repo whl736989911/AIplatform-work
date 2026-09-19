@@ -20,6 +20,7 @@ implementation keeps the trim-and-count in one atomic script.
 from __future__ import annotations
 
 import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -151,7 +152,15 @@ class RedisWindowStore:
         try:
             count = self._script(
                 keys=[key],
-                args=[int(now_ms), int(window_ms), int(limit), f"{int(now_ms)}:{id(self)}"],
+                # Every attempt needs its own member: two requests in the same
+                # millisecond would otherwise update one score instead of adding
+                # a second member, and a burst would count as one.
+                args=[
+                    int(now_ms),
+                    int(window_ms),
+                    int(limit),
+                    f"{int(now_ms)}-{uuid.uuid4().hex}",
+                ],
             )
         except Exception as exc:  # noqa: BLE001 - any driver failure is unavailable
             raise RateLimitUnavailable(f"rate-limit store failed: {type(exc).__name__}") from exc
