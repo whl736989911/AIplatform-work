@@ -131,7 +131,7 @@ class _Store:
             base_content_hash=compiled.base_content_hash,
             candidate_version_id=str(uuid.uuid4()),
             candidate_content_hash=compiled.candidate_content_hash,
-            status=P.ProposalStatus.UNDER_REVIEW,
+            status=P.ProposalStatus.PENDING,
             risk_level=compiled.risk.level,
             pii_involved=compiled.risk.pii,
             required_approvals=compiled.risk.required_approvals,
@@ -334,7 +334,7 @@ async def test_create_fixes_the_base_and_reports_governance(
 
     assert response.status_code == 202
     payload = response.json()["data"]
-    assert payload["status"] == "under_review"
+    assert payload["status"] == "pending"
     assert payload["required_approvals"] == 2
     record = store.proposals[payload["proposal_id"]]
     assert record.base_content_hash == P.definition_hash(workflow_definition())
@@ -586,7 +586,7 @@ async def test_promotion_flow_enforces_shadow_and_gates(monkeypatch: pytest.Monk
     )
 
     assert aborted.status_code == 200
-    assert aborted.json()["data"]["status"] == "aborted"
+    assert aborted.json()["data"]["status"] == "rolled_back"
 
 
 async def test_promote_requires_tenant_admin(monkeypatch: pytest.MonkeyPatch) -> None:

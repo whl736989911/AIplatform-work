@@ -603,10 +603,31 @@ class PolicyViolation:
 
 @dataclass(frozen=True, slots=True)
 class ProposalPolicy:
-    """Caller-supplied allowlists; empty ``approved_tools`` means "unknown"."""
+    """Caller-supplied allowlists.
+
+    An empty ``approved_tools`` means the tenant's list is unknown, so a candidate
+    that uses any tool fails closed; a candidate that uses none is still evaluated.
+    """
 
     approved_tools: frozenset[str] = frozenset()
     private_ids: frozenset[str] = frozenset()
+
+
+def _tool_names(definition: Any) -> set[str]:
+    """Every tool a definition reaches for; a definition without tools has none."""
+    names: set[str] = set()
+    if not isinstance(definition, Mapping):
+        return names
+    nodes = definition.get("nodes")
+    if not isinstance(nodes, Sequence):
+        return names
+    for node in nodes:
+        if not isinstance(node, Mapping) or node.get("type") != "tool":
+            continue
+        config = node.get("config")
+        if isinstance(config, Mapping) and isinstance(config.get("tool_name"), str):
+            names.add(str(config["tool_name"]))
+    return names
 
 
 def _segments(path: str) -> tuple[str, ...]:
@@ -1120,29 +1141,31 @@ def evaluate_canary_gates(
 
 
 class ProposalStatus(StrEnum):
-    UNDER_REVIEW = "under_review"
+    """The contract's unique status set; votes live in reviews, not in a status."""
+
+    PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
-    SHADOW = "shadow"
+    SHADOWING = "shadowing"
     CANARY = "canary"
     APPLIED = "applied"
-    ABORTED = "aborted"
+    ROLLED_BACK = "rolled_back"
     SUPERSEDED = "superseded"
     STALE = "stale"
 
 
 OPEN_STATUSES = frozenset(
     {
-        ProposalStatus.UNDER_REVIEW,
+        ProposalStatus.PENDING,
         ProposalStatus.APPROVED,
-        ProposalStatus.SHADOW,
+        ProposalStatus.SHADOWING,
         ProposalStatus.CANARY,
     }
 )
 # ``PENDING_STATUSES`` is the "one open proposal per workflow" gate: shadow and
 # canary proposals are already promoted, so a new idea may be drafted while they
 # run, and applying one supersedes the others via CAS on the workflow revision.
-PENDING_STATUSES = frozenset({ProposalStatus.UNDER_REVIEW, ProposalStatus.APPROVED})
+PENDING_STATUSES = frozenset({ProposalStatus.PENDING, ProposalStatus.APPROVED})
 TERMINAL_STATUSES = frozenset(ProposalStatus) - OPEN_STATUSES
 
 
@@ -1154,17 +1177,14 @@ class PromotionAction(StrEnum):
 
 
 _TRANSITIONS: dict[PromotionAction, dict[ProposalStatus, ProposalStatus]] = {
-    PromotionAction.START_SHADOW: {ProposalStatus.APPROVED: ProposalStatus.SHADOW},
-    PromotionAction.START_CANARY: {
-        ProposalStatus.APPROVED: ProposalStatus.CANARY,
-        ProposalStatus.SHADOW: ProposalStatus.CANARY,
-    },
+    PromotionAction.START_SHADOW: {ProposalStatus.APPROVED: ProposalStatus.SHADOWING},
+    PromotionAction.START_CANARY: {ProposalStatus.SHADOWING: ProposalStatus.CANARY},
     PromotionAction.APPLY: {ProposalStatus.CANARY: ProposalStatus.APPLIED},
     PromotionAction.ABORT: {
-        ProposalStatus.UNDER_REVIEW: ProposalStatus.ABORTED,
-        ProposalStatus.APPROVED: ProposalStatus.ABORTED,
-        ProposalStatus.SHADOW: ProposalStatus.ABORTED,
-        ProposalStatus.CANARY: ProposalStatus.ABORTED,
+        ProposalStatus.PENDING: ProposalStatus.ROLLED_BACK,
+        ProposalStatus.APPROVED: ProposalStatus.ROLLED_BACK,
+        ProposalStatus.SHADOWING: ProposalStatus.ROLLED_BACK,
+        ProposalStatus.CANARY: ProposalStatus.ROLLED_BACK,
     },
 }
 
@@ -1189,9 +1209,9 @@ def canary_admission(
     ratio_basis_points: int,
 ) -> None:
     """Validate the shadow evidence gate before candidate traffic starts."""
-    if (status is ProposalStatus.SHADOW or requires_manual_shadow) and (
-        shadow is None or not shadow.complete
-    ):
+    # Reaching canary means the shadow phase ran: the replay proof is mandatory,
+    # and only a manual-shadow candidate additionally needs the admin gate.
+    if shadow is None or not shadow.complete:
         failures = list(shadow.failures) if shadow is not None else ["shadow_not_run"]
         raise ProposalPolicyError(
             "SHADOW_PROOF_REQUIRED",
@@ -1238,14 +1258,15 @@ def compile_proposal(
     schema, the semantic boundary policy and the tool allowlist.  Anything else
     raises :class:`ProposalPolicyError` with a stable code.
     """
-    if not policy.approved_tools:
-        raise ProposalPolicyError(
-            ALLOWLIST_UNAVAILABLE,
-            "the tenant tool allowlist is not configured; proposals cannot be evaluated",
-        )
     operations = parse_patch(patch)
     candidate = apply_patch(base_definition, operations)
     validate_definition(candidate)
+    if not policy.approved_tools and _tool_names(candidate):
+        raise ProposalPolicyError(
+            ALLOWLIST_UNAVAILABLE,
+            "the tenant tool allowlist is not configured; a candidate that uses tools"
+            " cannot be evaluated",
+        )
     changes = semantic_diff(base_definition, candidate)
     if not changes:
         raise ProposalPolicyError("NO_SEMANTIC_CHANGE", "the patch does not change the workflow")
@@ -1575,11 +1596,6 @@ class WorkBuddyProposalsService:
         actor: ProposalActor,
         expect_revision: int,
     ) -> ProposalView:
-        if not self._policy.approved_tools:
-            raise ProposalPolicyError(
-                ALLOWLIST_UNAVAILABLE,
-                "the tenant tool allowlist is not configured; proposals cannot be evaluated",
-            )
         request = NewProposal(
             workflow_id=workflow_id,
             expect_revision=expect_revision,
@@ -1644,7 +1660,7 @@ class WorkBuddyProposalsService:
                 "CREATOR_SELF_REVIEW", "the proposal creator cannot review it"
             )
         if decision is ReviewDecision.APPROVED and record.status not in (
-            ProposalStatus.UNDER_REVIEW,
+            ProposalStatus.PENDING,
             ProposalStatus.APPROVED,
         ):
             raise ProposalPolicyError(
@@ -1676,10 +1692,7 @@ class WorkBuddyProposalsService:
             record = self._transition(
                 record, ProposalStatus.REJECTED, self._stop_fields(record, "rejected")
             )
-        elif (
-            state.outcome is ApprovalOutcome.APPROVED
-            and record.status is ProposalStatus.UNDER_REVIEW
-        ):
+        elif state.outcome is ApprovalOutcome.APPROVED and record.status is ProposalStatus.PENDING:
             record = self._transition(record, ProposalStatus.APPROVED, {"status_reason": None})
         else:
             record = self._require(proposal_id)
@@ -1712,7 +1725,7 @@ class WorkBuddyProposalsService:
             )
         if action is PromotionAction.ABORT:
             record = self._transition(
-                record, ProposalStatus.ABORTED, self._stop_fields(record, "aborted")
+                record, ProposalStatus.ROLLED_BACK, self._stop_fields(record, "rolled_back")
             )
         elif action is PromotionAction.START_SHADOW:
             target = transition_for(action, record.status)
@@ -1802,7 +1815,7 @@ class WorkBuddyProposalsService:
         self._store.add_evaluation(proposal_id, evaluation, verdict)
         if verdict.safety_stop and record.status is ProposalStatus.CANARY:
             record = self._transition(
-                record, ProposalStatus.ABORTED, self._stop_fields(record, "safety_violation")
+                record, ProposalStatus.ROLLED_BACK, self._stop_fields(record, "safety_violation")
             )
         return self._view(
             record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id)

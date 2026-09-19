@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS workbuddy_improvement_proposals (
   updated_at               BIGINT NOT NULL,
   PRIMARY KEY (tenant_id, proposal_id),
   CONSTRAINT workbuddy_proposals_status_check CHECK (
-    status IN ('under_review','approved','rejected','shadow','canary','applied','aborted','superseded','stale')
+    status IN ('pending','approved','rejected','shadowing','canary','applied','rolled_back','superseded','stale')
   ),
   CONSTRAINT workbuddy_proposals_risk_check CHECK (risk_level IN ('low','medium','high')),
   CONSTRAINT workbuddy_proposals_approvals_check CHECK (required_approvals BETWEEN 1 AND 2),
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS workbuddy_improvement_proposals (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workbuddy_proposals_pending_workflow
   ON workbuddy_improvement_proposals(tenant_id, workflow_id)
-  WHERE status IN ('under_review','approved');
+  WHERE status IN ('pending','approved');
 CREATE INDEX IF NOT EXISTS idx_workbuddy_proposals_workflow
   ON workbuddy_improvement_proposals(tenant_id, workflow_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workbuddy_proposals_status

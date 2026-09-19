@@ -480,7 +480,7 @@ class FakeStore:
             base_content_hash=compiled.base_content_hash,
             candidate_version_id=self._id("candidate"),
             candidate_content_hash=compiled.candidate_content_hash,
-            status=P.ProposalStatus.UNDER_REVIEW,
+            status=P.ProposalStatus.PENDING,
             risk_level=compiled.risk.level,
             pii_involved=compiled.risk.pii,
             required_approvals=compiled.risk.required_approvals,
@@ -728,7 +728,7 @@ def test_create_fixes_base_and_candidate_hashes() -> None:
 
     assert record.base_content_hash == P.definition_hash(workflow_definition())
     assert record.candidate_content_hash != record.base_content_hash
-    assert record.status is P.ProposalStatus.UNDER_REVIEW
+    assert record.status is P.ProposalStatus.PENDING
     assert record.required_approvals == 2
 
 
@@ -892,7 +892,8 @@ def test_medium_risk_canary_requires_a_replay_only_shadow_proof() -> None:
     ]
 
 
-def test_low_risk_proposal_can_start_canary_without_shadow() -> None:
+def test_canary_traffic_requires_the_replay_shadow_phase() -> None:
+    """Even a low-risk candidate passes through shadowing before real traffic."""
     service = make_service(FakeStore(workflow_definition()))
     record = create_proposal(service, actor=P.ProposalActor(10), patch=LOW_PATCH)
     assert record.required_approvals == 1
@@ -903,14 +904,19 @@ def test_low_risk_proposal_can_start_canary_without_shadow() -> None:
         comment="",
     )
 
-    view = service.promote(
-        record.proposal_id,
-        action=P.PromotionAction.START_CANARY,
-        if_match_revision=INITIAL_REVISION,
-        actor=ADMIN,
-        ratio_basis_points=2500,
-    )
+    # Canary is not reachable straight from approval.
+    with pytest.raises(P.ProposalPolicyError) as caught:
+        service.promote(
+            record.proposal_id,
+            action=P.PromotionAction.START_CANARY,
+            if_match_revision=INITIAL_REVISION,
+            actor=ADMIN,
+            ratio_basis_points=2500,
+        )
+    assert caught.value.code == "INVALID_STATE"
 
+    start_canary(service, record.proposal_id, ratio=2500)
+    view = service.get(record.proposal_id)
     assert view.proposal.status is P.ProposalStatus.CANARY
     assert view.proposal.canary_ratio_bp == 2500
 
@@ -997,7 +1003,7 @@ def test_safety_violation_stops_candidate_traffic() -> None:
 
     view = record_canary_evaluation(service, record.proposal_id, safety_violations=1)
 
-    assert view.proposal.status is P.ProposalStatus.ABORTED
+    assert view.proposal.status is P.ProposalStatus.ROLLED_BACK
     assert view.proposal.canary_stop_reason == "safety_violation"
     assert view.proposal.canary_stopped_at is not None
     assert service.lane_for(WORKFLOW_ID, "any-key") == "baseline"
@@ -1037,7 +1043,7 @@ def test_abort_frees_the_workflow_for_a_new_proposal() -> None:
         actor=ADMIN,
     )
 
-    assert aborted.proposal.status is P.ProposalStatus.ABORTED
+    assert aborted.proposal.status is P.ProposalStatus.ROLLED_BACK
     replacement = create_proposal(service, actor=P.ProposalActor(11))
 
-    assert replacement.status is P.ProposalStatus.UNDER_REVIEW
+    assert replacement.status is P.ProposalStatus.PENDING

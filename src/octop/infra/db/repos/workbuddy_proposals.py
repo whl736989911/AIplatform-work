@@ -82,9 +82,9 @@ MAX_LIST_LIMIT = 200
 DEFAULT_LIST_LIMIT = 50
 
 _STATUS_VALUES = tuple(status.value for status in ProposalStatus)
-_TERMINAL_STATUSES = ("applied", "rejected", "aborted", "superseded", "stale")
-_OPEN_STATUSES = ("under_review", "approved", "shadow", "canary")
-_PENDING_STATUSES = ("under_review", "approved")
+_TERMINAL_STATUSES = ("applied", "rejected", "rolled_back", "superseded", "stale")
+_OPEN_STATUSES = ("pending", "approved", "shadowing", "canary")
+_PENDING_STATUSES = ("pending", "approved")
 _PROMOTION_FIELDS = {
     "status_reason",
     "canary_ratio_bp",
@@ -246,7 +246,7 @@ class WorkBuddyProposalsRepo:
             existing = self._one(
                 ambient,
                 "SELECT proposal_id FROM workbuddy_improvement_proposals"
-                " WHERE tenant_id = ? AND workflow_id = ? AND status IN ('under_review','approved')"
+                " WHERE tenant_id = ? AND workflow_id = ? AND status IN ('pending','approved')"
                 " LIMIT 1",
                 (tenant_id, workflow_id),
             )
@@ -291,7 +291,7 @@ class WorkBuddyProposalsRepo:
                         base_hash,
                         candidate_version_id,
                         compiled.candidate_content_hash,
-                        ProposalStatus.UNDER_REVIEW.value,
+                        ProposalStatus.PENDING.value,
                         None,
                         compiled.risk.level,
                         compiled.risk.pii,
@@ -545,6 +545,7 @@ class WorkBuddyProposalsRepo:
                     bool(run.replay_only),
                     int(run.live_side_effects),
                     bool(run.settled),
+                    evidence,
                     now if run.settled else None,
                     now,
                 ),
@@ -745,7 +746,7 @@ class WorkBuddyProposalsRepo:
                 " status_reason = 'superseded', canary_stopped_at = coalesce(canary_stopped_at, ?),"
                 " canary_stop_reason = coalesce(canary_stop_reason, 'superseded'), updated_at = ?"
                 " WHERE tenant_id = ? AND workflow_id = ? AND proposal_id <> ?"
-                " AND status IN ('under_review','approved','shadow','canary')",
+                " AND status IN ('pending','approved','shadowing','canary')",
                 (now, now, tenant_id, record.workflow_id, public_id),
             )
             if int(getattr(superseded, "rowcount", 0) or 0) < 0:  # pragma: no cover - defensive
@@ -787,7 +788,7 @@ class WorkBuddyProposalsRepo:
             " tenant_id, workflow_version_id, workflow_id, version_number, definition,"
             " definition_sha256, origin, base_version_id, source_version_id, change_summary,"
             " created_by, created_by_membership_id, created_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, to_timestamp(?))",
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 tenant_id,
                 version_id,
