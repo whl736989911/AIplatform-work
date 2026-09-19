@@ -122,7 +122,16 @@ def _capabilities(
     )
 
 
-def _tool_revision(*, status: str = "published") -> WorkBuddyToolRevision:
+def _tool_revision(
+    *,
+    status: str = "published",
+    effect_class: str = "external_write",
+    supports_idempotency: bool = False,
+    supports_result_lookup: bool = False,
+    sandbox_verified: bool = False,
+    input_schema: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
+) -> WorkBuddyToolRevision:
     return WorkBuddyToolRevision(
         tool_revision_id=TOOL_REVISION_ID,
         adapter_key="builtin",
@@ -135,6 +144,12 @@ def _tool_revision(*, status: str = "published") -> WorkBuddyToolRevision:
         published_at=1_700_000_000,
         revoked_by_user_id=None,
         revoked_at=None,
+        effect_class=effect_class,
+        supports_idempotency=supports_idempotency,
+        supports_result_lookup=supports_result_lookup,
+        sandbox_verified=sandbox_verified,
+        input_schema=input_schema,
+        output_schema=output_schema,
     )
 
 
@@ -285,7 +300,20 @@ class _FakeCatalogRepo:
         self.calls.append(("publish_tool", (), kwargs))
         if self.tool_failure is not None:
             raise self.tool_failure
-        return _tool_revision()
+        declared = {
+            name: kwargs[name]
+            for name in (
+                "effect_class",
+                "supports_idempotency",
+                "supports_result_lookup",
+                "sandbox_verified",
+                "input_schema",
+                "output_schema",
+            )
+            if name in kwargs and kwargs[name] is not None
+        }
+        # The record echoes the declaration, the way the real insert does.
+        return _tool_revision(**declared)
 
     def revoke_tool(self, tool_revision_id: str, **kwargs: Any) -> bool:
         self.calls.append(("revoke_tool", (tool_revision_id,), kwargs))
@@ -837,6 +865,58 @@ def test_platform_publish_succeeds_with_explicit_platform_audience(
     assert kwargs["actor_user_id"] == 7
 
 
+def test_platform_publish_carries_the_tool_declaration(
+    repo: _FakeCatalogRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registry body is what the engine later reads, so the API must pass it."""
+    monkeypatch.setattr(catalog, "_repo", lambda _server: repo)
+    response = _run(
+        _platform_request(
+            "/platform/tools",
+            token=_jwt(audience=["workbuddy-platform"]),
+            body={
+                "tool_key": "web_search",
+                "adapter_key": "builtin",
+                "display_name": "Web Search",
+                "effect_class": "read_only",
+                "supports_idempotency": True,
+                "sandbox_verified": True,
+                "output_schema": {"type": "object", "required": ["hits"]},
+            },
+        )
+    )
+    assert response.status_code == 201, response.text
+    ((_, _, kwargs),) = _item_calls(repo, "publish_tool")
+    assert kwargs["effect_class"] == "read_only", kwargs
+    assert kwargs["supports_idempotency"] is True, kwargs
+    assert kwargs["sandbox_verified"] is True, kwargs
+    assert kwargs["output_schema"] == {"type": "object", "required": ["hits"]}, kwargs
+    body = response.json()["data"]
+    assert body["effect_class"] == "read_only", body
+    assert body["supports_idempotency"] is True, body
+    assert body["sandbox_verified"] is True, body
+    assert body["output_schema"] == {"type": "object", "required": ["hits"]}, body
+
+
+def test_platform_publish_rejects_an_unknown_effect_class(
+    repo: _FakeCatalogRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(catalog, "_repo", lambda _server: repo)
+    response = _run(
+        _platform_request(
+            "/platform/tools",
+            token=_jwt(audience=["workbuddy-platform"]),
+            body={
+                "tool_key": "web_search",
+                "adapter_key": "builtin",
+                "display_name": "Web Search",
+                "effect_class": "side_effect",
+            },
+        )
+    )
+    assert response.status_code == 422, response.text
+
+
 def test_platform_revoke_requires_platform_audience(monkeypatch: pytest.MonkeyPatch) -> None:
     response = _run(
         _platform_request(
@@ -1042,7 +1122,7 @@ def _jwt(*, audience: list[str] | None) -> str:
     return jwt.encode(payload, b"workbuddy-test-secret-0123456789abcdef", algorithm="HS256")
 
 
-def _platform_request(path: str, *, token: str) -> Any:
+def _platform_request(path: str, *, token: str, body: dict[str, Any] | None = None) -> Any:
     """POST ``/api/v1{path}`` through a minimal app with the real audience guard."""
     from unittest.mock import MagicMock
 
@@ -1064,10 +1144,14 @@ def _platform_request(path: str, *, token: str) -> Any:
     async def _octop_error(_request: Request, exc: OctopError) -> JSONResponse:
         return JSONResponse(status_code=exc.status, content=exc.to_envelope())
 
-    body = (
-        '{"tool_key": "web_search", "adapter_key": "builtin", "display_name": "Web Search"}'
-        if path == "/platform/tools"
-        else "{}"
+    payload = (
+        json.dumps(body)
+        if body is not None
+        else (
+            '{"tool_key": "web_search", "adapter_key": "builtin", "display_name": "Web Search"}'
+            if path == "/platform/tools"
+            else "{}"
+        )
     )
 
     async def _send() -> httpx.Response:
@@ -1075,7 +1159,7 @@ def _platform_request(path: str, *, token: str) -> Any:
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             return await client.post(
                 f"/api/v1{path}",
-                content=body,
+                content=payload,
                 headers={"authorization": f"Bearer {token}", "content-type": "application/json"},
             )
 

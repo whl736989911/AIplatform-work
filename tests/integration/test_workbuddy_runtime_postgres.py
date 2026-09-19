@@ -1847,6 +1847,143 @@ def test_a_retry_does_not_turn_an_unknown_write_into_a_second_call(
     assert len(port.calls) == 1, port.calls
 
 
+def _declare_tool(
+    pool: Any,
+    tenant: dict[str, Any],
+    *,
+    tool_key: str,
+    effect_class: str = "external_write",
+    supports_idempotency: bool = False,
+    output_schema: dict[str, Any] | None = None,
+) -> str:
+    """Publish a platform tool revision with a declaration and grant it."""
+    from octop.infra.db.repos.workbuddy_catalog import WorkBuddyCatalogRepo
+
+    catalog = WorkBuddyCatalogRepo(pool)
+    revision = catalog.publish_tool(
+        adapter_key="tests",
+        tool_key=tool_key,
+        display_name=f"Test tool {tool_key}",
+        actor_user_id=tenant["owner_user_id"],
+        effect_class=effect_class,
+        supports_idempotency=supports_idempotency,
+        output_schema=output_schema,
+    )
+    catalog.update_capabilities(
+        tenant["tenant_id"],
+        actor_member_id=tenant["owner_member_id"],
+        tool_revision_ids=[revision.tool_revision_id],
+    )
+    return revision.tool_revision_id
+
+
+def _tool_definition_for(tool_key: str, *, retry: int = 3) -> dict[str, Any]:
+    definition = _tool_definition(retry={"max_attempts": retry, "backoff_sec": 1})
+    definition["nodes"][0]["config"]["tool_name"] = tool_key
+    return definition
+
+
+def test_a_confirmed_failure_is_retried_only_when_the_tool_may_be_repeated(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """Contract 891: repetition follows the registry, not the budget alone."""
+    code = ErrorCode.INTERNAL_ERROR
+
+    # An undeclared tool: the confirmed failure is terminal for the attempt.
+    undeclared = _FlakyToolPort(failures=1, code=code)
+    outcome = _run_tool_once(
+        pool,
+        tenant,
+        undeclared,
+        _tool_definition_for("tests.undeclared"),
+        name="Undeclared tool runtime",
+    )
+    assert outcome["status"] == "failed", outcome
+    assert len(undeclared.calls) == 1, undeclared.calls
+
+    # A read-only tool: repeating it is safe, so the budget applies.
+    _declare_tool(pool, tenant, tool_key="tests.read_only", effect_class="read_only")
+    read_only = _FlakyToolPort(failures=1, code=code)
+    outcome = _run_tool_once(
+        pool,
+        tenant,
+        read_only,
+        _tool_definition_for("tests.read_only"),
+        name="Read only tool runtime",
+    )
+    assert outcome["status"] == "success", outcome
+    assert len(read_only.calls) == 2, read_only.calls
+
+    # An idempotent external write: its confirmed failure may also be repeated.
+    _declare_tool(
+        pool,
+        tenant,
+        tool_key="tests.idempotent_write",
+        effect_class="external_write",
+        supports_idempotency=True,
+    )
+    idempotent = _FlakyToolPort(failures=1, code=code)
+    outcome = _run_tool_once(
+        pool,
+        tenant,
+        idempotent,
+        _tool_definition_for("tests.idempotent_write"),
+        name="Idempotent write runtime",
+    )
+    assert outcome["status"] == "success", outcome
+    assert len(idempotent.calls) == 2, idempotent.calls
+
+    # A non-idempotent external write: never repeated automatically.
+    _declare_tool(pool, tenant, tool_key="tests.write_once", effect_class="external_write")
+    once = _FlakyToolPort(failures=1, code=code)
+    outcome = _run_tool_once(
+        pool,
+        tenant,
+        once,
+        _tool_definition_for("tests.write_once"),
+        name="Write once runtime",
+    )
+    assert outcome["status"] == "failed", outcome
+    assert len(once.calls) == 1, once.calls
+
+
+def test_a_result_outside_the_registered_schema_fails_the_step(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """A registered output schema is enforced, not decorative."""
+    _declare_tool(
+        pool,
+        tenant,
+        tool_key="tests.schema_bound",
+        effect_class="read_only",
+        output_schema={
+            "type": "object",
+            "required": ["bid_id"],
+            "properties": {"bid_id": {"type": "string"}},
+        },
+    )
+
+    class _WrongShapePort:
+        def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
+            return {"ok": True}
+
+        def execute_llm(self, *, node: Any, activation: Any) -> Any:  # pragma: no cover
+            raise AssertionError("this workflow has no llm node")
+
+        def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:
+            raise AssertionError("chat is not part of this workflow")
+
+    outcome = _run_tool_once(
+        pool,
+        tenant,
+        _WrongShapePort(),
+        _tool_definition_for("tests.schema_bound"),
+        name="Registered schema runtime",
+    )
+    assert outcome["status"] == "failed", outcome
+    assert outcome["error_code"] == ErrorCode.WORKBUDDY_VALIDATION_FAILED.value, outcome
+
+
 async def test_the_dispatch_intent_is_durable_before_an_external_call(
     app: FastAPI, pool: Any, tenant: dict[str, Any], monkeypatch: Any
 ) -> None:
