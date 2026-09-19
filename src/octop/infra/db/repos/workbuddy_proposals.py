@@ -20,7 +20,11 @@ Guarantees enforced here on top of ``020_workbuddy_proposals.pg.sql``:
   and moves ``active_version_id`` in the same transaction as the proposal
   status, while shadow/canary traffic pins ``shadow_version_id`` without
   touching the revision;
-* reviews, shadow runs and canary evaluations are append-only evidence rows.
+* reviews, shadow runs and canary evaluations are append-only evidence rows;
+* the reviewer roster of a proposal is the newest
+  ``improvement_proposal_reviewers_assigned`` entry in the tenant's append-only
+  governance trail, so assigning again replaces the roster without rewriting a
+  row or adding a table.
 
 Failures raise :class:`WorkBuddyError` (a ``ValueError``) carrying a stable
 English code, or :class:`ProposalConflictError` / :class:`ProposalNotFoundError`
@@ -60,6 +64,7 @@ from octop.infra.workbuddy.proposals import (
     ProposalRecord,
     ProposalStatus,
     ReviewDecision,
+    ReviewerAssignment,
     ReviewRecord,
     SemanticChange,
     ShadowRunRow,
@@ -80,6 +85,16 @@ ERROR_VERSION_IMMUTABLE = "WORKBUDDY_VERSION_IMMUTABLE"
 
 MAX_LIST_LIMIT = 200
 DEFAULT_LIST_LIMIT = 50
+
+# The reviewer roster of a proposal is the latest reviewers-assigned entry in
+# the tenant's governance trail.  The proposal table has no reviewer column and
+# this slice ships no migration, so the assignment is recorded where every other
+# governance act already is — an append-only, RLS-scoped trail — instead of in a
+# private side table.  The trail's own ``key=value`` convention puts the target
+# in ``reason``, which also makes the latest roster an exact read; ``detail``
+# carries the roster as JSON.
+REVIEWERS_ASSIGNED_ACTION = "improvement_proposal_reviewers_assigned"
+_REVIEWERS_REASON_PREFIX = "proposal_id="
 
 _STATUS_VALUES = tuple(status.value for status in ProposalStatus)
 _TERMINAL_STATUSES = ("applied", "rejected", "rolled_back", "superseded", "stale")
@@ -435,6 +450,98 @@ class WorkBuddyProposalsRepo:
                     None if row["definition_sha256"] is None else str(row["definition_sha256"])
                 ),
             )
+
+    # ── reviewer roster ──────────────────────────────────────────────────────
+
+    def resolve_active_memberships(
+        self, membership_ids: Sequence[str], *, conn: Any = None
+    ) -> dict[str, int]:
+        """User id per requested membership, for active members of this tenant.
+
+        The query is tenant-scoped and status-filtered, so an id from another
+        tenant, a suspended membership and an id that was never issued are all
+        simply absent: the caller learns nothing about members it cannot see.
+        """
+        tenant_id = self._require_tenant()
+        requested = [normalize_uuid(value, field="membership_id") for value in membership_ids]
+        if not requested:
+            return {}
+        placeholders = ", ".join("?" for _ in requested)
+        with self._transaction(conn) as ambient:
+            rows = self._all(
+                ambient,
+                "SELECT membership_id, user_id FROM workbuddy_tenant_members"
+                f" WHERE tenant_id = ? AND status = 'active' AND membership_id IN ({placeholders})",
+                (tenant_id, *requested),
+            )
+            return {str(row["membership_id"]): _int(row["user_id"]) for row in rows}
+
+    def list_reviewers(self, proposal_id: str, *, conn: Any = None) -> list[ReviewerAssignment]:
+        """The roster currently in force: the latest assignment for the proposal."""
+        tenant_id = self._require_tenant()
+        public_id = normalize_uuid(proposal_id, field="proposal_id")
+        with self._transaction(conn) as ambient:
+            row = self._one(
+                ambient,
+                "SELECT detail FROM workbuddy_tenant_audit_events"
+                " WHERE tenant_id = ? AND action = ? AND reason = ?"
+                " ORDER BY created_at DESC, event_id DESC LIMIT 1",
+                (tenant_id, REVIEWERS_ASSIGNED_ACTION, f"{_REVIEWERS_REASON_PREFIX}{public_id}"),
+            )
+        entries = _as_json(row["detail"]) if row is not None and row["detail"] is not None else []
+        return [
+            ReviewerAssignment(
+                membership_id=str(entry["membership_id"]), user_id=_int(entry["user_id"])
+            )
+            for entry in entries or ()
+            if isinstance(entry, Mapping) and "membership_id" in entry
+        ]
+
+    def assign_reviewers(
+        self,
+        proposal_id: str,
+        *,
+        reviewers: Sequence[ReviewerAssignment],
+        actor_user_id: int,
+        assigned_at: int,
+        conn: Any = None,
+    ) -> list[ReviewerAssignment]:
+        """Append the reviewer roster of one proposal to the governance trail.
+
+        Assigning again appends a new entry, and the newest entry is what
+        ``list_reviewers`` reports: the trail stays append-only while the roster
+        is still replaceable.  A proposal that is not visible to this tenant is
+        refused exactly like an unknown one.
+        """
+        tenant_id = self._require_tenant()
+        public_id = normalize_uuid(proposal_id, field="proposal_id")
+        actor = normalize_user_id(actor_user_id)
+        now = int(assigned_at or now_ts())
+        roster = list(reviewers)
+        with self._transaction(conn) as ambient:
+            visible = self._one(
+                ambient,
+                "SELECT 1 AS present FROM workbuddy_improvement_proposals"
+                " WHERE tenant_id = ? AND proposal_id = ?",
+                (tenant_id, public_id),
+            )
+            if visible is None:
+                raise ProposalNotFoundError(f"proposal {public_id} is not visible")
+            ambient.execute(
+                "INSERT INTO workbuddy_tenant_audit_events ("
+                " event_id, tenant_id, action, actor_user_id, reason, detail, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    tenant_id,
+                    REVIEWERS_ASSIGNED_ACTION,
+                    actor,
+                    f"{_REVIEWERS_REASON_PREFIX}{public_id}",
+                    _dump([reviewer.to_dict() for reviewer in roster]),
+                    now,
+                ),
+            )
+        return roster
 
     # ── reviews ──────────────────────────────────────────────────────────────
 

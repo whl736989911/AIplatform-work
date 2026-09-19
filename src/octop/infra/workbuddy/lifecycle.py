@@ -17,6 +17,12 @@ Guarantees kept here:
 * a redeem token is a 256-bit random value that only ever exists as its sha256
   in the database, is bound to one export job and one 72h window, and is
   consumed by a single conditional UPDATE (CAS);
+* the stage-D download challenge *is* that redeem token, re-issued on demand for
+  the admin who requested the export, against a five-minute one-time
+  re-authentication credential bound to tenant/user/purpose — it is minted
+  against the job's frozen ``redeem_expires_at``, so it can never extend the 72h
+  window, and an export that was already redeemed never yields a second
+  challenge;
 * deletion is fail-closed: it requires a signed compliance policy bound to the
   tenant and inside its validity window, otherwise the API answers
   ``COMPLIANCE_GATE_CLOSED`` and no job is queued;
@@ -48,20 +54,24 @@ from octop.infra.workbuddy.log_redaction import register_secret
 __all__ = [
     "ARCHIVE_RETENTION_SECONDS",
     "COOLING_OFF_SECONDS",
+    "EXPORT_DOWNLOAD_PURPOSE",
     "EXPORT_SCHEMA",
     "LEDGER_ENTRY_TYPES",
     "MAX_EXPORT_ROWS_PER_TABLE",
     "POLICY_ENV",
     "POLICY_KEY_ENV",
     "PURGE_EVIDENCE_TABLES",
+    "REAUTH_TTL_SECONDS",
     "REDACTION_RULES_VERSION",
     "REDEEM_TTL_SECONDS",
     "CompliancePolicy",
     "DeletionTimeline",
+    "DownloadChallenge",
     "ExportTable",
     "ExportTableExclusion",
     "LedgerEntry",
     "PurgePlan",
+    "ReauthIssue",
     "RedeemToken",
     "RestoreReplayPlan",
     "Tombstone",
@@ -73,6 +83,8 @@ __all__ = [
     "excluded_table_category",
     "exportable_columns",
     "hash_redeem_token",
+    "issue_download_challenge",
+    "issue_reauth_credential",
     "issue_redeem_token",
     "ledger_entry_sha256",
     "ledger_payload_sha256",
@@ -82,6 +94,8 @@ __all__ = [
     "plan_tenant_purge",
     "policy_digest",
     "purge_protects",
+    "reauth_credential_error",
+    "reauth_credential_failure",
     "redeem_token_failure",
     "redeem_window_expires_at",
     "redact_row",
@@ -99,6 +113,7 @@ __all__ = [
 COOLING_OFF_SECONDS = 30 * 86400
 ARCHIVE_RETENTION_SECONDS = 90 * 86400
 REDEEM_TTL_SECONDS = 72 * 3600
+REAUTH_TTL_SECONDS = 5 * 60
 EXPORT_SCHEMA = "workbuddy.export.v1"
 REDACTION_RULES_VERSION = 1
 MAX_EXPORT_ROWS_PER_TABLE = 50_000
@@ -311,9 +326,15 @@ def manifest_sha256(manifest: Mapping[str, Any]) -> str:
     return sha256_json(dict(manifest))
 
 
-# ── one-time redeem tokens ──────────────────────────────────────────────────
+# ── one-time redeem tokens and re-authentication credentials ────────────────
+#
+# Both are the same kind of secret: a 256-bit random value that is registered for
+# log redaction, persisted as its sha256 only, time boxed and consumed by a
+# single conditional UPDATE.  A redeem token is bound to one export job and that
+# job's fixed 72h window; a re-authentication credential is bound to one
+# tenant/user/purpose triple and lives at most five minutes.
 
-_REDEEM_TOKEN_BYTES = 32
+_ONE_TIME_TOKEN_BYTES = 32
 
 
 @dataclass(frozen=True)
@@ -324,13 +345,20 @@ class RedeemToken:
     token_sha256: str
 
 
-def issue_redeem_token() -> RedeemToken:
-    raw = secrets.token_urlsafe(_REDEEM_TOKEN_BYTES)
+def _new_one_time_token() -> tuple[str, str]:
+    """Return ``(raw, sha256)`` for a fresh 256-bit one-time secret."""
+    raw = secrets.token_urlsafe(_ONE_TIME_TOKEN_BYTES)
     register_secret(raw)
-    return RedeemToken(raw=raw, token_sha256=hash_redeem_token(raw))
+    return raw, sha256_text(raw)
+
+
+def issue_redeem_token() -> RedeemToken:
+    raw, digest = _new_one_time_token()
+    return RedeemToken(raw=raw, token_sha256=digest)
 
 
 def hash_redeem_token(raw: str) -> str:
+    """Persisted digest of a one-time secret (redeem token or re-auth credential)."""
     return sha256_text(raw.strip())
 
 
@@ -369,6 +397,62 @@ def redeem_token_failure(
 
 def redeem_token_error(code: ErrorCode) -> OctopError:
     return OctopError(code, _REDEEM_FAILURES[code])
+
+
+# ── re-authentication credentials ───────────────────────────────────────────
+#
+# ``POST /auth/reauthenticate`` proves a password again and mints one five-minute
+# credential bound to tenant/user/purpose; ``POST /exports/{id}/download-challenge``
+# spends it to re-issue the export's redeem challenge.  Only the sha256 is ever
+# stored, a credential is single-use, and every failure that is not a plain
+# expiry answers the same indistinguishable refusal as a failed sign-in, so the
+# response never confirms that a credential exists.
+
+EXPORT_DOWNLOAD_PURPOSE = "export-download"
+
+_REAUTH_PURPOSE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+
+_REAUTH_FAILURES: Mapping[ErrorCode, str] = MappingProxyType(
+    {
+        ErrorCode.AUTH_INVALID_CREDENTIALS: "invalid credentials",
+        ErrorCode.DOWNLOAD_GRANT_EXPIRED: "re-authentication credential has expired",
+    }
+)
+
+
+def reauth_credential_error(code: ErrorCode) -> OctopError:
+    return OctopError(code, _REAUTH_FAILURES[code])
+
+
+def reauth_credential_failure(
+    row: Mapping[str, Any] | None,
+    *,
+    tenant_id: str,
+    user_id: int,
+    purpose: str,
+    now: int | None = None,
+) -> ErrorCode | None:
+    """Classify a stored credential row; ``None`` means it may be consumed.
+
+    A credential that belongs to another tenant, another user or another purpose
+    is reported exactly like an unknown one: nothing here distinguishes "never
+    existed" from "not yours" or "already used".
+    """
+    if row is None:
+        return ErrorCode.AUTH_INVALID_CREDENTIALS
+    moment = int(now if now is not None else time.time())
+    if str(row.get("tenant_id")) != str(tenant_id):
+        return ErrorCode.AUTH_INVALID_CREDENTIALS
+    if int(row.get("user_id") or 0) != int(user_id):
+        return ErrorCode.AUTH_INVALID_CREDENTIALS
+    if str(row.get("purpose") or "") != purpose or row.get("consumed_at") is not None:
+        return ErrorCode.AUTH_INVALID_CREDENTIALS
+    expires_at = row.get("expires_at")
+    if expires_at is None:
+        return ErrorCode.AUTH_INVALID_CREDENTIALS
+    if int(expires_at) <= moment:
+        return ErrorCode.DOWNLOAD_GRANT_EXPIRED
+    return None
 
 
 # ── compliance policy (fail-closed deletion gate) ───────────────────────────
@@ -1472,6 +1556,13 @@ def redeem_export(
                 ErrorCode.EXPORT_REDEEM_INVALID,
                 "export job is not ready to redeem",
             )
+        if job.get("status") == "redeemed":
+            # Another live token for a job that was already downloaded (a
+            # challenge minted while this export was being consumed) must never
+            # serve the payload a second time.
+            raise redeem_token_error(ErrorCode.EXPORT_REDEEM_CONSUMED)
+        if job.get("status") == "expired":
+            raise redeem_token_error(ErrorCode.EXPORT_REDEEM_EXPIRED)
         manifest = json.loads(str(job["manifest_json"]))
         artifacts = repo.list_export_artifacts(
             conn, tenant_id=tenant_id, export_job_id=export_job_id
@@ -1524,6 +1615,156 @@ def redeem_export(
         manifest_sha256=str(job["manifest_sha256"]),
         tables=tuple(tables),
         redeemed_at=moment,
+    )
+
+
+@dataclass(frozen=True)
+class ReauthIssue:
+    """A freshly minted one-time re-authentication credential."""
+
+    purpose: str
+    credential: str
+    expires_at: int
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "purpose": self.purpose,
+            "credential": self.credential,
+            "expires_at": self.expires_at,
+        }
+
+
+def issue_reauth_credential(
+    repo: Any,
+    *,
+    tenant_id: str,
+    user_id: int,
+    purpose: str = EXPORT_DOWNLOAD_PURPOSE,
+    now: int | None = None,
+) -> ReauthIssue:
+    """Mint one five-minute credential bound to this tenant, user and purpose.
+
+    The caller has already proved the password; this function stores the digest
+    of a fresh 256-bit secret and hands the raw value back exactly once.
+    """
+    if not _REAUTH_PURPOSE_RE.fullmatch(purpose):
+        raise OctopError(
+            ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+            "purpose must be a lower-case identifier of at most 64 characters",
+        )
+    moment = int(now if now is not None else time.time())
+    credential, digest = _new_one_time_token()
+    with repo.transaction(_tenant_ctx(tenant_id, user_id=user_id)) as conn:
+        record = repo.insert_reauth_credential(
+            conn,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            purpose=purpose,
+            credential_sha256=digest,
+            issued_at=moment,
+            expires_at=moment + REAUTH_TTL_SECONDS,
+        )
+    return ReauthIssue(purpose=purpose, credential=credential, expires_at=int(record["expires_at"]))
+
+
+@dataclass(frozen=True)
+class DownloadChallenge:
+    """One freshly minted export download challenge: the job's redeem token."""
+
+    export_job_id: str
+    challenge: str
+    expires_at: int
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "export_job_id": self.export_job_id,
+            "challenge": self.challenge,
+            "expires_at": self.expires_at,
+        }
+
+
+def issue_download_challenge(
+    repo: Any,
+    *,
+    tenant_id: str,
+    user_id: int,
+    export_job_id: str,
+    credential: str,
+    purpose: str = EXPORT_DOWNLOAD_PURPOSE,
+    now: int | None = None,
+) -> DownloadChallenge:
+    """Exchange a fresh re-authentication credential for one redeem challenge.
+
+    The challenge *is* the export's redeem token: it is minted against the job's
+    frozen ``redeem_expires_at``, so re-issuing can never extend the 72h window,
+    and it is spent by the same conditional UPDATE as any other redeem token.
+    Only the admin who requested the export may spend a credential here, an
+    export that was already redeemed is refused, and a credential is consumed by
+    the first caller that wins the CAS.
+    """
+    moment = int(now if now is not None else time.time())
+    digest = hash_redeem_token(credential)
+    ctx = _tenant_ctx(tenant_id, user_id=user_id)
+    with repo.transaction(ctx) as conn:
+        stored = repo.get_reauth_credential(conn, tenant_id=tenant_id, credential_sha256=digest)
+        failure = reauth_credential_failure(
+            stored, tenant_id=tenant_id, user_id=user_id, purpose=purpose, now=moment
+        )
+        if failure is not None:
+            raise reauth_credential_error(failure)
+        job = repo.get_export_job(conn, tenant_id=tenant_id, export_job_id=export_job_id)
+        if job is None:
+            raise OctopError(ErrorCode.EXPORT_JOB_NOT_FOUND, "export job not found")
+        if job.get("requested_by") is None or int(job["requested_by"]) != int(user_id):
+            raise OctopError(
+                ErrorCode.FORBIDDEN_RESOURCE_ACTION,
+                "only the admin who requested this export may download it",
+            )
+        status = str(job.get("status") or "")
+        if status == "redeemed":
+            raise redeem_token_error(ErrorCode.EXPORT_REDEEM_CONSUMED)
+        if status == "expired" or int(job["redeem_expires_at"]) <= moment:
+            # The 72h window is fixed when the job is created and never extends.
+            raise redeem_token_error(ErrorCode.EXPORT_REDEEM_EXPIRED)
+        if status != "ready" or not job.get("manifest_json"):
+            raise redeem_token_error(ErrorCode.EXPORT_REDEEM_INVALID)
+        if not repo.consume_reauth_credential(
+            conn, tenant_id=tenant_id, credential_sha256=digest, consumed_at=moment
+        ):
+            raise reauth_credential_error(ErrorCode.AUTH_INVALID_CREDENTIALS)
+        token = issue_redeem_token()
+        repo.revoke_live_redeem_tokens(
+            conn, tenant_id=tenant_id, export_job_id=export_job_id, revoked_at=moment
+        )
+        record = repo.insert_redeem_token(
+            conn,
+            tenant_id=tenant_id,
+            export_job_id=export_job_id,
+            token_sha256=token.token_sha256,
+            issued_by=user_id,
+            issued_at=moment,
+            expires_at=int(job["redeem_expires_at"]),
+        )
+        _ledger_entry(
+            repo,
+            conn,
+            tenant_id=tenant_id,
+            entry_type="export_redeem_issued",
+            payload={
+                "export_job_id": export_job_id,
+                "redeem_token_id": str(record["redeem_token_id"]),
+                "expires_at": int(record["expires_at"]),
+                "purpose": purpose,
+            },
+            deletion_request_id=None,
+            actor_user_id=user_id,
+            actor_label=None,
+            created_at=moment,
+        )
+    return DownloadChallenge(
+        export_job_id=export_job_id,
+        challenge=token.raw,
+        expires_at=int(record["expires_at"]),
     )
 
 

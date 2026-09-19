@@ -2444,6 +2444,29 @@ class MarketplaceService:
             self._db, WorkBuddyDbContext.for_tenant(tenant_id, user_id=user_id)
         )
 
+    def list_installations(
+        self,
+        *,
+        tenant_id: str,
+        member_id: str,
+        is_admin: bool,
+        limit: Any = None,
+        offset: Any = None,
+    ) -> list[dict[str, Any]]:
+        """The installation ledger the caller may read.
+
+        Tenant identity comes from the principal, never from the request, and
+        the same rule as ``installation_detail`` decides the rows: a tenant
+        admin reads the tenant's whole ledger, a member reads what they
+        installed — so every row of a member's page is a row they may open.
+        """
+        return self._store.list_installations(
+            tenant_id,
+            installed_by=None if is_admin else member_id,
+            limit=limit,
+            offset=offset,
+        )
+
     def installation_detail(
         self, *, tenant_id: str, installation_id: str, member_id: str, is_admin: bool
     ) -> dict[str, Any]:

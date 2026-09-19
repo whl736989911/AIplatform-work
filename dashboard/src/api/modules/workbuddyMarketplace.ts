@@ -295,6 +295,11 @@ export interface MarketplaceInstallationDetail extends MarketplaceInstallation {
   upgrades: MarketplaceUpgrade[];
 }
 
+export interface MarketplaceInstallationListQuery {
+  limit?: number;
+  offset?: number;
+}
+
 // --- Consent + rebinding ---------------------------------------------------
 
 /**
@@ -515,8 +520,8 @@ export function capabilitiesDigest(
 
 export const workbuddyMarketplaceApi = {
   /**
-   * Published catalogue. There is no list route for versions, installs or
-   * submissions in the frozen manifest — callers read those by id.
+   * Published catalogue. There is no list route for versions or submissions in
+   * the frozen manifest — callers read those by id.
    */
   listTemplates: (query: MarketplaceTemplateListQuery = {}) => {
     const params = new URLSearchParams();
@@ -549,6 +554,23 @@ export const workbuddyMarketplaceApi = {
     unwrap<MarketplaceInstallationDetail>(
       `${BASE}/marketplace/installations/${encodeURIComponent(installationId)}`,
     ),
+
+  /**
+   * This tenant's install ledger, newest first. Scope is the caller's: a member
+   * reads the installations they started, a tenant admin reads the whole
+   * tenant. ``data`` is a bare array; the server clamps the page.
+   */
+  listInstallations: (query: MarketplaceInstallationListQuery = {}) => {
+    const params = new URLSearchParams();
+    if (typeof query.limit === "number")
+      params.set("limit", String(query.limit));
+    if (typeof query.offset === "number")
+      params.set("offset", String(query.offset));
+    const suffix = params.toString();
+    return unwrapList<MarketplaceInstallation>(
+      `${BASE}/marketplace/installations${suffix ? `?${suffix}` : ""}`,
+    );
+  },
 
   /** 202: explicit upgrade with renewed consent for the target version. */
   upgradeInstallation: (

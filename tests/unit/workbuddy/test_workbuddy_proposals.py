@@ -451,6 +451,10 @@ class FakeStore:
         self.hash = P.definition_hash(definition)
         self.proposals: dict[str, P.ProposalRecord] = {}
         self.reviews: dict[str, list[P.ReviewRecord]] = {}
+        self.reviewers: dict[str, list[P.ReviewerAssignment]] = {}
+        # The tenant directory this suite can resolve: a test declares the
+        # memberships it wants the service to accept.
+        self.members: dict[str, int] = {}
         self.shadow: dict[str, list[P.ShadowRunRow]] = {}
         self.evaluations: dict[str, list[P.EvaluationRow]] = {}
         self.counter = 0
@@ -517,6 +521,28 @@ class FakeStore:
 
     def list_reviews(self, proposal_id: str) -> list[P.ReviewRecord]:
         return list(self.reviews.get(proposal_id, ()))
+
+    def resolve_active_memberships(self, membership_ids: Sequence[str]) -> dict[str, int]:
+        return {
+            membership: self.members[membership]
+            for membership in membership_ids
+            if membership in self.members
+        }
+
+    def list_reviewers(self, proposal_id: str) -> list[P.ReviewerAssignment]:
+        return list(self.reviewers.get(proposal_id, ()))
+
+    def assign_reviewers(
+        self,
+        proposal_id: str,
+        *,
+        reviewers: Sequence[P.ReviewerAssignment],
+        actor_user_id: int,
+        assigned_at: int,
+    ) -> list[P.ReviewerAssignment]:
+        roster = list(reviewers)
+        self.reviewers[proposal_id] = roster
+        return roster
 
     def add_review(self, review: P.NewReview) -> P.ReviewRecord:
         rows = self.reviews.setdefault(review.proposal_id, [])

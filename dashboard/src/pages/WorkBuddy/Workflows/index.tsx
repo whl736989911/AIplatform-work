@@ -13,6 +13,7 @@ import { Alert, Button } from "antd";
 import {
   FileCog,
   History,
+  Lightbulb,
   ListChecks,
   PlayCircle,
   RefreshCw,
@@ -32,12 +33,14 @@ import VersionsPanel from "./VersionsPanel";
 import ExecutionsPanel from "./ExecutionsPanel";
 import TriggersPanel from "./TriggersPanel";
 import JobsPanel from "./JobsPanel";
+import WorkflowProposalsPanel from "./WorkflowProposalsPanel";
 import styles from "./index.module.less";
 
 type WorkflowTabKey =
   | "definitions"
   | "versions"
   | "executions"
+  | "proposals"
   | "triggers"
   | "jobs";
 
@@ -58,6 +61,11 @@ const TAB_ITEMS: readonly TabBarItem<WorkflowTabKey>[] = [
     icon: PlayCircle,
   },
   {
+    key: "proposals",
+    labelKey: "workbuddy.workflows.tab.proposals",
+    icon: Lightbulb,
+  },
+  {
     key: "triggers",
     labelKey: "workbuddy.workflows.tab.triggers",
     icon: Workflow,
@@ -69,6 +77,7 @@ const TAB_KEYS: Record<WorkflowTabKey, true> = {
   definitions: true,
   versions: true,
   executions: true,
+  proposals: true,
   triggers: true,
   jobs: true,
 };
@@ -80,8 +89,22 @@ function isWorkflowTab(value: string | null): value is WorkflowTabKey {
 export default function WorkflowsPage() {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
+  // The selected workflow lives in the URL (`?workflow=`), so the dashboard and
+  // the runs page can link straight into the workflow they point at instead of
+  // dropping the reader on an unselected list.
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(
-    null,
+    () => searchParams.get("workflow"),
+  );
+
+  const selectWorkflow = useCallback(
+    (id: string | null) => {
+      setSelectedWorkflowId(id);
+      const next = new URLSearchParams(searchParams);
+      if (id === null) next.delete("workflow");
+      else next.set("workflow", id);
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
   );
   const workflows = useWorkBuddyResource<WorkflowListItem[]>(
     [],
@@ -147,9 +170,9 @@ export default function WorkflowsPage() {
         <DefinitionsPanel
           resource={workflows}
           selectedWorkflowId={selectedWorkflowId}
-          onSelectWorkflow={setSelectedWorkflowId}
+          onSelectWorkflow={selectWorkflow}
           onOpenVersions={(id) => {
-            setSelectedWorkflowId(id);
+            selectWorkflow(id);
             selectTab("versions");
           }}
         />
@@ -157,7 +180,7 @@ export default function WorkflowsPage() {
       {activeTab === "versions" && (
         <VersionsPanel
           workflowId={selectedWorkflowId}
-          onSelectWorkflow={setSelectedWorkflowId}
+          onSelectWorkflow={selectWorkflow}
           options={options}
           optionsLoading={workflows.loading}
           onWorkflowChanged={reloadWorkflows}
@@ -166,16 +189,24 @@ export default function WorkflowsPage() {
       {activeTab === "executions" && (
         <ExecutionsPanel
           workflowId={selectedWorkflowId}
-          onSelectWorkflow={setSelectedWorkflowId}
+          onSelectWorkflow={selectWorkflow}
           options={options}
           optionsLoading={workflows.loading}
           onExecutionAccepted={reloadWorkflows}
         />
       )}
+      {activeTab === "proposals" && (
+        <WorkflowProposalsPanel
+          workflowId={selectedWorkflowId}
+          onSelectWorkflow={selectWorkflow}
+          options={options}
+          optionsLoading={workflows.loading}
+        />
+      )}
       {activeTab === "triggers" && (
         <TriggersPanel
           workflowId={selectedWorkflowId}
-          onSelectWorkflow={setSelectedWorkflowId}
+          onSelectWorkflow={selectWorkflow}
           options={options}
           optionsLoading={workflows.loading}
         />

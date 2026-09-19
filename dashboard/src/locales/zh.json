@@ -343,14 +343,18 @@
     "paneSettings": "设置",
     "paneRecords": "任务",
     "enterpriseGovernance": "企业治理",
-    "workbuddy": "WorkBuddy",
     "workbuddyKnowledge": "租户知识库",
     "workbuddyWorkflows": "工作流",
     "workbuddyApprovals": "审批",
     "workbuddyProposals": "改进提案",
     "workbuddyMarketplace": "市场",
     "workbuddyCompliance": "合规",
-    "workbuddyLifecycle": "数据生命周期"
+    "workbuddyLifecycle": "数据生命周期",
+    "workbuddyDaily": "日常工作",
+    "workbuddyGovernance": "治理与设置",
+    "workbuddyHome": "工作台",
+    "workbuddyInbox": "收件箱",
+    "workbuddyRuns": "运行"
   },
   "skillPackages": {
     "title": "技能包",
@@ -6255,7 +6259,8 @@
         "versions": "版本",
         "executions": "执行",
         "triggers": "触发器",
-        "jobs": "任务"
+        "jobs": "任务",
+        "proposals": "改进提案"
       },
       "state": {
         "unavailableTitle": "功能尚未可用",
@@ -6617,6 +6622,10 @@
           "failed": "失败",
           "cancelled": "已取消"
         }
+      },
+      "proposals": {
+        "title": "该工作流的改进提案",
+        "empty": "该工作流还没有改进提案。"
       }
     },
     "approvals": {
@@ -6881,8 +6890,6 @@
       "reviewers": {
         "button": "分配审查人",
         "title": "分配独立审查人",
-        "pendingRoute": "该路由冻结于 B1 阶段，尚未实现",
-        "pendingRouteHint": "契约固定了 POST /improvement-proposals/{id}/reviewers（分配本租户 active 且非创建者的成员）；目前尚无分支实现它，因此这里原样显示服务端返回，且不会假定已保存。",
         "field": "审查人成员 ID",
         "fieldHint": "本租户的成员 UUID；创建者与非 active 成员会被服务端拒绝。",
         "placeholder": "输入或粘贴成员 UUID",
@@ -7060,12 +7067,12 @@
       },
       "installations": {
         "title": "安装记录",
-        "desc": "按 ID 查看单条安装记录（契约未提供列表路由）、同意证据与升级历史；显式升级需要针对目标版本再次同意。",
+        "desc": "本租户安装台账——成员读取自己发起的安装，租户管理员读取全租户——以及每条安装的同意证据与升级历史；显式升级需要针对目标版本再次同意。",
         "open": "打开",
         "openPlaceholder": "安装记录 ID（UUID）",
         "sessionIds": "本次会话：",
         "empty": "未打开安装记录",
-        "emptyHint": "输入安装记录 ID，或安装一个模板——随后其 ID 会列在上方。",
+        "emptyHint": "从上方台账中选择一条安装记录，或输入安装记录 ID。",
         "loadFailed": "加载安装记录失败",
         "detailTitle": "安装详情",
         "installationId": "安装记录 ID",
@@ -7097,7 +7104,14 @@
           "to": "目标版本",
           "status": "状态",
           "error": "错误"
-        }
+        },
+        "ledgerTitle": "安装台账",
+        "ledgerLoadFailed": "加载安装列表失败",
+        "ledgerEmpty": "暂无安装记录",
+        "ledgerEmptyHint": "安装模板后，对应的安装记录会出现在这里。",
+        "ledgerCapped": "仅列出最近一页。",
+        "status": "状态",
+        "updatedAt": "更新时间"
       },
       "upgrade": {
         "button": "升级",
@@ -7412,6 +7426,43 @@
         "stepPurge": "清除",
         "stepPending": "待执行"
       }
+    },
+    "shared": {
+      "notMergedTitle": "该能力尚未合并到本部署",
+      "notMergedHint": "后端接口尚未合并，页面不会显示编造的数据；合并后会自动出现。",
+      "loadFailed": "加载失败",
+      "empty": "暂无数据",
+      "open": "打开"
+    },
+    "home": {
+      "title": "工作台",
+      "subtitle": "待你处理的、你在用的、最近发生的，一屏看完。",
+      "pendingTitle": "待我处理",
+      "pendingEmpty": "没有待你处理的审批。",
+      "workflowsTitle": "我的工作流",
+      "runsTitle": "最近运行",
+      "openInbox": "去收件箱",
+      "openWorkflows": "去工作流",
+      "openRuns": "去运行"
+    },
+    "inbox": {
+      "title": "收件箱",
+      "subtitle": "待你审批与待你审阅，集中在一处。",
+      "approvalsTitle": "待我审批",
+      "proposalsTitle": "待我审阅的提案",
+      "proposalsEmpty": "没有待你审阅的提案。",
+      "proposalsScope": "范围：全租户处于「待审」状态的提案。提案接口目前没有「审阅人过滤」参数，因此这里不只是指派给你的提案。",
+      "proposalsEmptyHint": "有提案进入待审且仍需审阅人时，会出现在这里。"
+    },
+    "runs": {
+      "title": "运行",
+      "subtitle": "跨工作流的执行记录；点开任意一条可看逐节点过程。",
+      "empty": "还没有执行记录。",
+      "columnWorkflow": "工作流",
+      "columnStatus": "状态",
+      "columnTrigger": "触发方式",
+      "columnStarted": "开始时间",
+      "columnFinished": "结束时间"
     }
   }
 }

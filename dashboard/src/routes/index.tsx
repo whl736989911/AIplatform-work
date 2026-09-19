@@ -18,6 +18,9 @@ const EnterprisePage = lazy(() => import("../pages/Enterprise"));
 const WorkBuddyKnowledgePage = lazy(
   () => import("../pages/WorkBuddy/Knowledge"),
 );
+const WorkBuddyHomePage = lazy(() => import("../pages/WorkBuddy/Home"));
+const WorkBuddyInboxPage = lazy(() => import("../pages/WorkBuddy/Inbox"));
+const WorkBuddyRunsPage = lazy(() => import("../pages/WorkBuddy/Runs"));
 const WorkBuddyWorkflowsPage = lazy(
   () => import("../pages/WorkBuddy/Workflows"),
 );
@@ -90,6 +93,11 @@ export const pathToKey: Record<string, string> = {
   // WorkBuddy enterprise governance (authenticated members).
   "/enterprise": "enterprise-governance",
   // WorkBuddy console (authenticated members; the server owns authorization).
+  // The four daily entries come first, governance follows — the sidebar groups
+  // mirror this order.
+  "/workbuddy": "workbuddy-home",
+  "/workbuddy/inbox": "workbuddy-inbox",
+  "/workbuddy/runs": "workbuddy-runs",
   "/workbuddy/knowledge": "workbuddy-knowledge",
   "/workbuddy/workflows": "workbuddy-workflows",
   "/workbuddy/approvals": "workbuddy-approvals",
@@ -204,10 +212,9 @@ export const routeConfigs: RouteConfig[] = [
   // WorkBuddy console (/workbuddy/*) is authenticated-only, like /enterprise.
   // Each page renders the server's own authorization answer and shows an
   // explicit "not available yet" state while a backend slice is unmerged.
-  {
-    path: "/workbuddy",
-    element: <RedirectPreserveSearch to="/workbuddy/knowledge" />,
-  },
+  { path: "/workbuddy", element: <WorkBuddyHomePage /> },
+  { path: "/workbuddy/inbox", element: <WorkBuddyInboxPage /> },
+  { path: "/workbuddy/runs", element: <WorkBuddyRunsPage /> },
   { path: "/workbuddy/knowledge", element: <WorkBuddyKnowledgePage /> },
   { path: "/workbuddy/workflows", element: <WorkBuddyWorkflowsPage /> },
   { path: "/workbuddy/approvals", element: <WorkBuddyApprovalsPage /> },

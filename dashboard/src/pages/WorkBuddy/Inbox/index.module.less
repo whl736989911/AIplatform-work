@@ -1,0 +1,33 @@
+/* WorkBuddy console → Inbox: panels shared by both tabs. */
+
+.panel {
+  width: 100%;
+  min-width: 0;
+}
+
+.notice {
+  margin-bottom: 16px;
+}
+
+.centered {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.mono {
+  font-family: var(
+    --fn-font-mono,
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace
+  );
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.selectedRow {
+  background: var(--fn-bg-elevated, rgba(22, 119, 255, 0.06));
+}

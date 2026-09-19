@@ -395,6 +395,77 @@ async def test_review_requires_an_independent_member(
         assert approved.json()["data"]["status"] == "approved", approved.text
 
 
+async def test_reviewer_roster_is_persisted_and_replaceable(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """The manager staffs the review, and the roster outlives the request."""
+    from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
+    from octop.infra.db.repos.workbuddy_proposals import WorkBuddyProposalsRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+
+    identity = WorkBuddyIdentityRepo(pool)
+    panelist = _seed_user(pool, f"pp-panel-{uuid.uuid4().hex[:8]}")
+    added = identity.add_membership(tenant["tenant_id"], panelist, role="member")
+    panelist_member_id = str(added.get("membership_id") or added.get("id"))
+    workflow = _publish(pool, tenant, "Proposal reviewers")
+    never_issued = str(uuid.uuid4())
+    context = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+
+    async with _client(app, _principal(tenant)) as client:
+        created = await _create(client, workflow, _rename_patch("Staffed"))
+        proposal_id = created.json()["data"]["proposal_id"]
+
+        # The author cannot staff themselves, and a membership that was never
+        # issued reads exactly like a foreign one.
+        self_assigned = await client.post(
+            f"/improvement-proposals/{proposal_id}/reviewers",
+            json={"reviewer_membership_ids": [tenant["owner_member_id"]]},
+        )
+        unknown = await client.post(
+            f"/improvement-proposals/{proposal_id}/reviewers",
+            json={"reviewer_membership_ids": [never_issued]},
+        )
+        assigned = await client.post(
+            f"/improvement-proposals/{proposal_id}/reviewers",
+            json={
+                "reviewer_membership_ids": [
+                    tenant["reviewer_member_id"],
+                    panelist_member_id,
+                ]
+            },
+        )
+        detail = await client.get(f"/improvement-proposals/{proposal_id}")
+        replaced = await client.post(
+            f"/improvement-proposals/{proposal_id}/reviewers",
+            json={"reviewer_membership_ids": [panelist_member_id]},
+        )
+
+    assert self_assigned.status_code == 403, self_assigned.text
+    assert self_assigned.json()["error"]["code"] == "FORBIDDEN_NOT_APPROVER"
+    assert unknown.status_code == 400, unknown.text
+    assert unknown.json()["error"]["code"] == "WORKBUDDY_INVALID_ARGUMENT"
+
+    assert assigned.status_code == 200, assigned.text
+    roster = assigned.json()["data"]["reviewers"]
+    assert [row["membership_id"] for row in roster] == [
+        tenant["reviewer_member_id"],
+        panelist_member_id,
+    ], roster
+    assert [row["user_id"] for row in roster] == [tenant["reviewer_user_id"], panelist], roster
+    assert detail.json()["data"]["reviewers"] == roster, detail.text
+
+    # Assigning again replaces the roster instead of accumulating one.
+    assert replaced.status_code == 200, replaced.text
+    assert [row["membership_id"] for row in replaced.json()["data"]["reviewers"]] == [
+        panelist_member_id
+    ], replaced.text
+
+    # Durable tenant state, read straight back from the live store.
+    stored = WorkBuddyProposalsRepo(pool, context).list_reviewers(proposal_id)
+    assert [row.membership_id for row in stored] == [panelist_member_id], stored
+    assert [row.user_id for row in stored] == [panelist], stored
+
+
 async def test_promotion_walks_shadow_canary_and_apply(
     app: FastAPI, pool: Any, tenant: dict[str, Any]
 ) -> None:

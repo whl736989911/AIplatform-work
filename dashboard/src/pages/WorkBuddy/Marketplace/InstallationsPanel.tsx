@@ -1,10 +1,11 @@
 /**
  * 模板市场 → 安装记录.
  *
- * The frozen manifest exposes installations by id only (no list route), so the
- * panel reads one installation — the ids seen in this session plus whatever the
- * operator pastes — and shows the state, consent evidence, credential bindings
- * and upgrade history the detail route returns. An upgrade needs the target
+ * The frozen manifest exposes this tenant's install ledger
+ * (``GET /marketplace/installations``), so the panel opens with the list the
+ * caller may read — their own installations, or the whole tenant's when they are
+ * a tenant admin — and reads one installation by id for its state, consent
+ * evidence, credential bindings and upgrade history. An upgrade needs the target
  * template version and renewed consent for it; nothing is guessed locally.
  */
 
@@ -39,6 +40,7 @@ import {
   type MarketplaceCapabilityDeclaration,
   type MarketplaceCredentialBinding,
   type MarketplaceInstallConsent,
+  type MarketplaceInstallation,
   type MarketplaceInstallationDetail,
   type MarketplaceTemplate,
   type MarketplaceTemplateVersion,
@@ -64,6 +66,9 @@ const SLOT_KINDS: Record<string, true> = {
 };
 
 type SlotKind = "knowledge_base" | "approver" | "credential";
+
+/** One ledger page; the server clamps anything above its own page maximum. */
+const LEDGER_PAGE_SIZE = 100;
 
 function isSlotKind(
   kind: MarketplaceCapabilityDeclaration["kind"],
@@ -97,6 +102,10 @@ export default function InstallationsPanel({
   const [unavailable, setUnavailable] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
 
+  const [ledger, setLedger] = useState<MarketplaceInstallation[]>([]);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [ledgerError, setLedgerError] = useState<string | null>(null);
+
   const [catalogue, setCatalogue] = useState<MarketplaceTemplate[]>([]);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [upgradeSaving, setUpgradeSaving] = useState(false);
@@ -105,6 +114,38 @@ export default function InstallationsPanel({
   const [targetLoading, setTargetLoading] = useState(false);
   const [targetError, setTargetError] = useState<string | null>(null);
   const [upgradeError, setUpgradeError] = useState<string | null>(null);
+
+  const loadLedger = useCallback(async () => {
+    setLedgerLoading(true);
+    setLedgerError(null);
+    try {
+      setLedger(
+        await workbuddyMarketplaceApi.listInstallations({
+          limit: LEDGER_PAGE_SIZE,
+        }),
+      );
+      setUnavailable(false);
+    } catch (error) {
+      if (isMarketplaceUnavailableError(error)) {
+        setUnavailable(true);
+      } else {
+        setLedgerError(
+          describeApiError(
+            error,
+            t("workbuddy.marketplace.installations.ledgerLoadFailed"),
+            t,
+          ),
+        );
+      }
+    } finally {
+      setLedgerLoading(false);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    // The tab opens on this tenant's ledger, not on a blank id box.
+    void loadLedger();
+  }, [loadLedger]);
 
   const open = useCallback(
     async (installationId: string) => {
@@ -142,6 +183,11 @@ export default function InstallationsPanel({
     // Opening the tab preloads the installation an install just produced.
     if (firstKnownInstallation) void open(firstKnownInstallation);
   }, [firstKnownInstallation, open]);
+
+  const refresh = useCallback(async () => {
+    await loadLedger();
+    if (detail) await open(detail.id);
+  }, [detail, loadLedger, open]);
 
   const loadTargetVersion = useCallback(
     async (templateId: string, versionId: string) => {
@@ -242,7 +288,7 @@ export default function InstallationsPanel({
           }),
         );
         setUpgradeOpen(false);
-        await open(detail.id);
+        await refresh();
       } catch (error) {
         if (error instanceof MarketplaceDigestUnavailableError) {
           setUpgradeError(t("workbuddy.marketplace.consent.digestFailed"));
@@ -259,8 +305,67 @@ export default function InstallationsPanel({
         setUpgradeSaving(false);
       }
     },
-    [detail, open, t, targetVersion],
+    [detail, refresh, t, targetVersion],
   );
+
+  const ledgerColumns: ColumnsType<MarketplaceInstallation> = [
+    {
+      title: t("workbuddy.marketplace.installations.installationId"),
+      dataIndex: "id",
+      key: "id",
+      width: 320,
+      render: (value: string) => (
+        <Button
+          type="link"
+          size="small"
+          className={styles.mono}
+          onClick={() => void open(value)}
+        >
+          {value}
+        </Button>
+      ),
+    },
+    {
+      title: t("workbuddy.marketplace.installations.templateId"),
+      dataIndex: "template_id",
+      key: "template_id",
+      width: 300,
+      render: (value: string) => <span className={styles.mono}>{value}</span>,
+    },
+    {
+      title: t("workbuddy.marketplace.installations.status"),
+      dataIndex: "status",
+      key: "status",
+      width: 130,
+      render: (value: string) => (
+        <Tag color={statusColor(value)}>
+          {t(`workbuddy.marketplace.installationStatus.${value}`)}
+        </Tag>
+      ),
+    },
+    {
+      title: t("workbuddy.marketplace.installations.workflowId"),
+      dataIndex: "workflow_id",
+      key: "workflow_id",
+      width: 300,
+      render: (value: string | null) =>
+        value ? <span className={styles.mono}>{value}</span> : "—",
+    },
+    {
+      title: t("workbuddy.marketplace.installations.revision"),
+      dataIndex: "revision",
+      key: "revision",
+      width: 90,
+    },
+    {
+      title: t("workbuddy.marketplace.installations.updatedAt"),
+      dataIndex: "updated_at",
+      key: "updated_at",
+      width: 180,
+      render: (value: string | null) =>
+        value ? formatServerIsoDateTime(value, timeZone) : "—",
+    },
+  ];
 
   const consentColumns: ColumnsType<MarketplaceInstallConsent> = [
     {
@@ -375,8 +480,8 @@ export default function InstallationsPanel({
         <Button
           size="small"
           icon={<RefreshCw size={14} />}
-          disabled={!detail}
-          onClick={() => detail && void open(detail.id)}
+          loading={ledgerLoading}
+          onClick={() => void refresh()}
         >
           {t("common.refresh")}
         </Button>
@@ -393,7 +498,7 @@ export default function InstallationsPanel({
           title={t("workbuddy.marketplace.unavailable.title")}
           description={t("workbuddy.marketplace.unavailable.hint")}
           actionLabel={t("common.refresh")}
-          onAction={() => void open(idInput)}
+          onAction={() => void refresh()}
         />
       </div>
     );
@@ -402,6 +507,49 @@ export default function InstallationsPanel({
   return (
     <div className={styles.panel}>
       {header}
+
+      <div className={styles.sectionTitleRow}>
+        <h3 className={styles.sectionTitle}>
+          {t("workbuddy.marketplace.installations.ledgerTitle")}
+        </h3>
+      </div>
+
+      {ledgerError && (
+        <Alert
+          className={styles.notice}
+          type="error"
+          showIcon
+          message={ledgerError}
+        />
+      )}
+
+      {ledgerLoading && ledger.length === 0 ? (
+        <div className={styles.centered}>
+          <Spin />
+        </div>
+      ) : ledger.length === 0 ? (
+        <EmptyState
+          variant="mascot"
+          title={t("workbuddy.marketplace.installations.ledgerEmpty")}
+          description={t("workbuddy.marketplace.installations.ledgerEmptyHint")}
+        />
+      ) : (
+        <>
+          <Table
+            columns={ledgerColumns}
+            dataSource={ledger}
+            rowKey="id"
+            size="small"
+            pagination={false}
+            scroll={{ x: 1300 }}
+          />
+          {ledger.length >= LEDGER_PAGE_SIZE && (
+            <Text type="secondary">
+              {t("workbuddy.marketplace.installations.ledgerCapped")}
+            </Text>
+          )}
+        </>
+      )}
 
       <Space direction="vertical" size={8} style={{ width: "100%" }}>
         <Space.Compact style={{ width: "100%", maxWidth: 640 }}>

@@ -574,13 +574,6 @@ export default function ProposalDetailPanel({
         cancelText={t("common.cancel")}
         destroyOnHidden
       >
-        <Alert
-          type="warning"
-          showIcon
-          className={styles.notice}
-          message={t("workbuddy.proposals.reviewers.pendingRoute")}
-          description={t("workbuddy.proposals.reviewers.pendingRouteHint")}
-        />
         <Form
           form={reviewersForm}
           layout="vertical"

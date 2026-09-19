@@ -92,7 +92,7 @@ git checkout -b feat/<你的线>-<主题>        # A 线: feat/orchestration-*�
 
 | ID | 任务 | 层 | 主要文件 | 依赖 | 验收 |
 |---|---|---|---|---|---|
-| A-01 | 前端 IA 重组：新侧边栏/路由、工作流详情页做中枢、去"个人版"痕迹 | 前端 | `layouts/sidebarNav.tsx`、`routes/index.tsx` | — | 员工只看 工作台/收件箱/工作流/运行；旧路由重定向 |
+| A-01 | 前端 IA 重组：新侧边栏/路由、工作流详情页做中枢、去"个人版"痕迹 | 前端 | `layouts/sidebarNav.tsx`、`routes/index.tsx`、`pages/WorkBuddy/{Home,Inbox,Runs}/**` | — | 员工只看 工作台/收件箱/工作流/运行；旧路由重定向 |
 | A-02 | 运行详情增强：逐节点输入输出/耗时/token、重跑到此、重试、取消、对账 | 前端+读接口 | `pages/WorkBuddy/Workflows/ExecutionsPanel`、`workbuddy_runtime.py` | A-01 | 一次运行可逐节点排障 |
 | A-03 | 版本对比（定义级 diff） | 前端 | 版本页签 | A-01 | 两版差异可读 |
 | A-04 | 节点元数据导出（字段/类型/必填/引用语法） | 后端契约 | `workflow_compiler.py` + 新 `node_schema` | — | 前端可据此渲染表单 |
@@ -102,7 +102,7 @@ git checkout -b feat/<你的线>-<主题>        # A 线: feat/orchestration-*�
 | A-08 | **`ask` 人类表单节点 + `waiting_input` + 输入请求表 + `resume` 载数据** | 后端+迁移 | `runtime.py`、`workbuddy_runtime.py`、迁移 031+ | A-05 | 运行中提问→收件箱填表→执行继续 |
 | A-09 | 产出审核（修正后确认/采纳/重跑） | 后端+前端 | 同 A-08 | A-08 | 末节点产出可被人工修正 |
 | A-10 | 超时与升级（SLA） | 后端 | `runtime.py` | A-08 | 超时按规则升级并可审计 |
-| A-11 | 收件箱（审批+提问+审核三合一 + 表单抽屉） | 前端 | 新 `pages/Inbox/` | A-08 | 员工每天只来这一页 |
+| A-11 | 收件箱（审批+提问+审核三合一 + 表单抽屉） | 前端 | `pages/WorkBuddy/Inbox/**`（批次 1 已建入口与骨架，批次 4 补提问/审核与表单抽屉） | A-08 | 员工每天只来这一页 |
 | A-12 | 纠正/反馈采集表 `workbuddy_execution_feedback` + 接口 | 后端+迁移 | 迁移 031+ | A-08 | 每次修正留结构化记录 |
 | A-13 | 纠正归因与范围界定 | 后端 | 新分析模块 | A-12 | 输出"改哪、影响面多大" |
 | A-14 | 分析器（PG 版）+ 生成提案候选 → 接既有治理链 | 后端 | `proposals.py` | A-13 | 自动产出提案并可走影子/灰度/提升 |
@@ -158,9 +158,14 @@ git checkout -b feat/<你的线>-<主题>        # A 线: feat/orchestration-*�
 2. **`errors.py`**：只追加、不重排、不删除；合并取并集（AST 校验：成员全为字符串、两侧不缺、全仓引用无悬空）。
 3. **i18n**：`en.json`/`zh.json` 必须同步；命名空间按 1 表分段。
 4. **CHANGELOG**：各自只追加自己的条目（新增/修复/文档 分区）。
-5. **文件所有权**：A 线写 `workflow_compiler.py`、`workbuddy_runtime.py`、`workbuddy_proposals.py`、`pages/WorkBuddy/Workflows|Proposals|Approvals`、`layouts/*`、`routes/*`；B 线写 `workbuddy_knowledge.py`、`workbuddy_catalog.py`、`workbuddy_identity.py`、`pages/WorkBuddy/Knowledge|Lifecycle`、新 `rbac/`。**对方的文件只读，通过接口调用**。
+5. **文件所有权**（按文件族划分；**对方的文件只读**，跨线只经接口调用）：
+   - **A 线**：`src/octop/infra/workbuddy/{compiler,runtime,proposals,marketplace,lifecycle}.py`、`src/octop/infra/workbuddy/authoring/**`、`src/octop/api/routers/workbuddy_{runtime,proposals,marketplace,lifecycle}.py`、`src/octop/infra/db/repos/workbuddy_{runtime,proposals,marketplace,lifecycle}.py`、`dashboard/src/pages/WorkBuddy/{Workflows,Proposals,Approvals,Marketplace,Home,Inbox,Runs}/**`、`dashboard/src/layouts/**`、`dashboard/src/routes/**`、`dashboard/src/api/modules/workbuddy{Workflows,Runtime,Proposals,Marketplace,Lifecycle}.ts`
+   - **B 线**：`workbuddy_knowledge.py`、`workbuddy_catalog.py`、`workbuddy_identity.py`、**`workbuddy_workflows.py`**、`pages/WorkBuddy/{Knowledge,Lifecycle}/**`、新 `rbac/`、`scripts/migrate_kb.py`、`dashboard/src/api/modules/workbuddy{Knowledge,Catalog,Identity}.ts`
+   - **共享但只在"追加"上并发**（谁都不许重排/删除）：`contracts/route-manifest.json`（各自只加自己任务的条目；`counts` 后合并方 rebase 后重算）、`dashboard/src/locales/{en,zh}.json`（中英必须同步）、`CHANGELOG.md`、`src/octop/infra/errors.py`。
+   - **归属冲突时以本表为准**：例 A-20（再认证/下载挑战）后端在 A 线的 `workbuddy_lifecycle.py`，而 `pages/WorkBuddy/Lifecycle/**` 仍归 B 线——A 线只改 `dashboard/src/api/modules/workbuddyLifecycle.ts`。
+   - **一处按路由的例外**：`/auth/reauthenticate`（A-20，stage D）实现在 `workbuddy_identity.py`（B 线文件）内；该文件其余身份/租户路由仍归 B 线。A 线对该文件只保留这一条路由及其私有辅助函数，B 线改动时不得重排/删除它。
 6. **唯一交叉点**：B 线提供 `Resolver(actor, …)` 新签名（B-04）；A 线只调用、不改实现。
-7. **合并顺序**：先合 A 线无迁移批次（A-01…A-07、A-19…A-21）→ 再合 B-01…B-07（权限）→ 然后 A-08+ 与 B-08+。
+7. **合并顺序**：先合 A 线批次 1–3（A-01…A-07、A-19…A-21）→ 再合 B-01…B-07（权限）→ 然后 A-08+ 与 B-08+。**迁移号段依然分离**：A 线批次 1 的 A-20 已占用 `031`（再认证凭据表，PG 实体 + SQLite 水位），后续 A 线迁移从 `032` 起，B 线仍从 `050` 起。
 8. **合并纪律**：不要 `--delete-branch` 删掉别人 PR 的 base；squash 会重写基线，后合并方需 rebase（只冲突 CHANGELOG 时用并集脚本）；上游同步时迁移冲突落到本地最大号之后。
 9. **推送信息**：commit message 与 PR 说明用**详细简体中文**（背景/根因/改动/可复现证据/验证命令与结果/未包含项）。
 
