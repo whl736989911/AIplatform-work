@@ -2152,3 +2152,48 @@ def test_the_worker_records_which_worker_ran_an_execution(
     # The worker is the platform actor, and it names the requester it ran for.
     assert finishes[0].actor_kind == "system", finishes[0]
     assert finishes[0].actor_user_id == tenant["owner_user_id"], finishes[0]
+
+
+async def test_a_job_reports_queued_then_running_then_its_result(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """A client must be able to see work in flight, not only its ending."""
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    repo = WorkBuddyRuntimeRepo(pool)
+    job_id = repo.insert_job(
+        ctx,
+        tenant_id=tenant["tenant_id"],
+        kind="knowledge_index",
+        requested_by_user_id=tenant["owner_user_id"],
+        request_hash="hash-of-request",
+    )
+    queued = repo.get_job(ctx, job_id)
+    assert queued is not None and queued.status == "queued", queued
+    assert queued.started_at is None, queued
+
+    assert repo.start_job(ctx, job_id) is True
+    running = repo.get_job(ctx, job_id)
+    assert running is not None and running.status == "running", running
+    assert running.started_at is not None, running
+    # Starting is one transition, not a repeated one.
+    assert repo.start_job(ctx, job_id) is False
+
+    assert (
+        repo.finish_job(
+            ctx, job_id, status="succeeded", progress=100, result={"document_id": "doc-1"}
+        )
+        is True
+    )
+    done = repo.get_job(ctx, job_id)
+    assert done is not None and done.status == "succeeded", done
+    assert done.result == {"document_id": "doc-1"}, done
+    assert done.finished_at is not None, done
+    assert done.progress == 100, done
+    # A settled job is settled.
+    assert repo.finish_job(ctx, job_id, status="failed", progress=0) is False
+
+    listed = [row.id for row in repo.list_jobs(ctx)]
+    assert job_id in listed, listed

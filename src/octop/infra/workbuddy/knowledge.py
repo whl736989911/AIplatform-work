@@ -52,6 +52,7 @@ from octop.infra.db.repos.workbuddy_knowledge import (
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.log_redaction import register_secret
+from octop.infra.workbuddy.runtime import RuntimeJobRecorder
 
 #: The only retrieval model WorkBuddy pins into a knowledge base.
 BGE_M3_MODEL_KEY = "bge-m3"
@@ -627,9 +628,17 @@ class WorkBuddyKnowledgeService:
     hooks: KnowledgeHooks | None = None
     clock: Callable[[], float] = time.time
     repo: WorkBuddyKnowledgeRepo | None = None
+    jobs: RuntimeJobRecorder | None = None
 
     def __post_init__(self) -> None:
         self.repo = self.repo or WorkBuddyKnowledgeRepo(self.db)
+
+    def _jobs(self, actor: WorkBuddyKnowledgeActor) -> RuntimeJobRecorder:
+        # Indexing is a job (contract §4.6.2): the document's ``job_id`` is the id
+        # of a row in the tenant's jobs, not a bare uuid that resolves nowhere.
+        if self.jobs is not None:
+            return self.jobs
+        return RuntimeJobRecorder(self.db, actor.tenant_id, actor.user_id)
 
     # -- plumbing ----------------------------------------------------------
 
@@ -1027,13 +1036,28 @@ class WorkBuddyKnowledgeService:
                 "file reference does not belong to the upload",
             )
         clean_title = sanitize_filename(title or ref.filename)
-        document = repo.create_document(
-            ctx,
-            kb_id,
-            file_ref_id=ref.file_ref_id,
-            title=clean_title,
-            created_by_user_id=actor.user_id,
+        jobs = self._jobs(actor)
+        job_id = jobs.start(
+            kind="knowledge_index",
+            request={"kb_id": kb_id, "file_ref_id": ref.file_ref_id, "title": clean_title},
         )
+        try:
+            document = repo.create_document(
+                ctx,
+                kb_id,
+                file_ref_id=ref.file_ref_id,
+                title=clean_title,
+                created_by_user_id=actor.user_id,
+                job_id=job_id,
+            )
+        except Exception as exc:
+            jobs.finish(
+                job_id,
+                status="failed",
+                error_code="DOCUMENT_CREATE_FAILED",
+                error_message=str(exc),
+            )
+            raise
         return {
             "document_id": document.document_id,
             "kb_id": document.kb_id,
@@ -1082,6 +1106,8 @@ class WorkBuddyKnowledgeService:
         ref = repo.get_file_ref(ctx, kb_id, document.file_ref_id)
         if ref is None:
             raise OctopError(ErrorCode.NOT_FOUND, "file reference not found")
+        jobs = self._jobs(actor)
+        jobs.begin(document.job_id)
         try:
             store = require_object_store(self._hooks.object_store)
             parser = require_parser(self._hooks.parser)
@@ -1118,7 +1144,7 @@ class WorkBuddyKnowledgeService:
                     )
                 )
             repo.set_document_status(ctx, kb_id, document_id, status="indexing")
-            repo.publish_generation(
+            generation = repo.publish_generation(
                 ctx,
                 base=base,
                 document_id=document_id,
@@ -1132,7 +1158,18 @@ class WorkBuddyKnowledgeService:
                 else str(getattr(exc, "code", "INDEX_FAILED"))
             )
             repo.set_document_status(ctx, kb_id, document_id, status="failed", error_code=code)
+            jobs.finish(document.job_id, status="failed", error_code=code, error_message=str(exc))
             raise
+        jobs.finish(
+            document.job_id,
+            status="succeeded",
+            result={
+                "document_id": document_id,
+                "kb_id": kb_id,
+                "generation_id": generation.generation_id,
+                "chunk_count": generation.chunk_count,
+            },
+        )
 
     # -- search ------------------------------------------------------------
 

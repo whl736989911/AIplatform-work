@@ -15,6 +15,7 @@ these tests never open a database, so they also pin the SQLite fail-closed path.
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -69,6 +70,7 @@ OTHER_TENANT = "22222222-2222-2222-2222-222222222222"
 REVISION_ID = "33333333-3333-3333-3333-333333333333"
 KB_ID = "44444444-4444-4444-4444-444444444444"
 DOC_ID = "55555555-5555-5555-5555-555555555555"
+DOC_JOB_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 FILE_REF_ID = "66666666-6666-6666-6666-666666666666"
 WEBHOOK_PATH = "abcDEF0123456789_-xyz"
 SECRET = "s3cret-signing-material"
@@ -215,7 +217,7 @@ def _document(**overrides: Any) -> WorkBuddyKnowledgeDocumentRow:
         "error_code": None,
         "active_generation_id": None,
         "chunk_count": 0,
-        "job_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        "job_id": DOC_JOB_ID,
         "created_by_user_id": 7,
         "created_at": 1_700_000_000,
         "updated_at": 1_700_000_000,
@@ -265,6 +267,7 @@ class FakeKnowledgeRepo:
         self.published: list[dict[str, Any]] = []
         self.statuses: list[tuple[str, str | None]] = []
         self.search_calls: list[dict[str, Any]] = []
+        self.created_documents: list[dict[str, Any]] = []
 
     # reads
     def get_base(self, ctx: Any, kb_id: str, *, include_archived: bool = True) -> Any:
@@ -317,6 +320,16 @@ class FakeKnowledgeRepo:
             return None
         return self.document if self.document.document_id == document_id else None
 
+    def create_document(self, ctx: Any, kb_id: str, **kwargs: Any) -> Any:
+        self.created_documents.append({"kb_id": kb_id, **kwargs})
+        return _document(
+            document_id=kwargs.get("document_id") or DOC_ID,
+            kb_id=kb_id,
+            file_ref_id=kwargs["file_ref_id"],
+            title=kwargs["title"],
+            job_id=kwargs["job_id"],
+        )
+
     def get_file_ref(self, ctx: Any, kb_id: str, file_ref_id: str) -> Any:
         if self.file_ref is None or self.file_ref.kb_id != kb_id:
             return None
@@ -336,7 +349,12 @@ class FakeKnowledgeRepo:
 
     def publish_generation(self, ctx: Any, **kwargs: Any) -> Any:
         self.published.append(kwargs)
-        return object()
+        # The caller reads the published generation back (its id and chunk count),
+        # exactly as the repository's row contract promises.
+        return SimpleNamespace(
+            generation_id=f"generation-{len(self.published)}",
+            chunk_count=len(kwargs.get("chunks") or ()),
+        )
 
     def reject_upload(self, ctx: Any, kb_id: str, upload_id: str, *, rejection_code: str) -> None:
         self.rejected = rejection_code
@@ -525,9 +543,47 @@ def _reset_hooks() -> None:
     reset_workbuddy_knowledge_hooks()
 
 
-def _service(repo: FakeKnowledgeRepo, hooks: KnowledgeHooks) -> WorkBuddyKnowledgeService:
+class _FakeJobs:
+    """The tenant's job facts, in memory: this suite has no database."""
+
+    def __init__(self) -> None:
+        self.started: list[tuple[str, dict[str, Any]]] = []
+        self.begun: list[str] = []
+        self.finished: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    def start(self, *, kind: str, request: Any = None) -> str:
+        self.started.append((kind, dict(request or {})))
+        return f"job-{len(self.started)}"
+
+    def begin(self, job_id: str) -> bool:
+        self.begun.append(job_id)
+        return True
+
+    def finish(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        result: Any = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> bool:
+        self.finished.append((job_id, status, dict(result) if result is not None else None))
+        return True
+
+
+def _service(
+    repo: FakeKnowledgeRepo,
+    hooks: KnowledgeHooks,
+    *,
+    jobs: _FakeJobs | None = None,
+) -> WorkBuddyKnowledgeService:
     return WorkBuddyKnowledgeService(
-        db=NoopDb(), hooks=hooks, repo=repo, clock=lambda: 1_700_000_000
+        db=NoopDb(),
+        hooks=hooks,
+        repo=repo,
+        clock=lambda: 1_700_000_000,
+        jobs=jobs if jobs is not None else _FakeJobs(),
     )
 
 
@@ -839,13 +895,29 @@ def _index_hooks(
 
 def test_indexing_publishes_one_ready_generation_atomically() -> None:
     repo = FakeKnowledgeRepo()
-    service = _service(repo, _index_hooks(store=FakeObjectStore(b"hello world")))
+    jobs = _FakeJobs()
+    service = _service(repo, _index_hooks(store=FakeObjectStore(b"hello world")), jobs=jobs)
     service.index_document(tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID)
     assert len(repo.published) == 1
     published = repo.published[0]
     assert published["document_id"] == DOC_ID
     assert all(len(chunk[4]) == EMBEDDING_DIMENSIONS for chunk in published["chunks"])
     assert repo.statuses == [("parsing", None), ("indexing", None)]
+    # The document's job reports the work: running while it happens, and the
+    # published generation once it is done.
+    assert jobs.begun == [DOC_JOB_ID], jobs.begun
+    assert jobs.finished == [
+        (
+            DOC_JOB_ID,
+            "succeeded",
+            {
+                "document_id": DOC_ID,
+                "kb_id": KB_ID,
+                "generation_id": "generation-1",
+                "chunk_count": len(published["chunks"]),
+            },
+        )
+    ], jobs.finished
 
 
 def test_indexing_fails_closed_without_publishing() -> None:
@@ -878,9 +950,15 @@ def test_indexing_fails_closed_without_publishing() -> None:
             ),
         ),
     )
+    bomb_jobs = _FakeJobs()
     with pytest.raises(HookRejection):
+        # ``bomb`` already carries its hooks; only the job recorder is swapped so
+        # the failure can be read back off the job.
+        bomb.jobs = bomb_jobs
         bomb.index_document(tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID)
     assert bomb.repo is not None and bomb.repo.published == []
+    assert bomb_jobs.begun == [DOC_JOB_ID], bomb_jobs.begun
+    assert bomb_jobs.finished and bomb_jobs.finished[0][1] == "failed", bomb_jobs.finished
 
     tampered = _service(
         FakeKnowledgeRepo(),
@@ -1130,3 +1208,18 @@ def test_rotation_requires_a_proven_secret_backend() -> None:
     )
     assert rotated["secret"] and rotated["secret_version"] == 2
     assert rotated["overlap_expires_at"] == 1_700_000_300
+
+
+def test_creating_a_document_opens_the_indexing_job_it_points_at() -> None:
+    """A document's job id must name a job, not just look like one."""
+    repo = FakeKnowledgeRepo()
+    jobs = _FakeJobs()
+    service = _service(repo, _index_hooks(store=FakeObjectStore(b"hello world")), jobs=jobs)
+
+    created = service.create_document(_actor(), KB_ID, file_ref_id=FILE_REF_ID, title="doc.md")
+
+    assert jobs.started == [
+        ("knowledge_index", {"kb_id": KB_ID, "file_ref_id": FILE_REF_ID, "title": "doc.md"})
+    ], jobs.started
+    assert created["job_id"] == "job-1", created
+    assert repo.created_documents[0]["job_id"] == "job-1", repo.created_documents
