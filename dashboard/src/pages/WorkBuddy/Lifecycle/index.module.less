@@ -1,0 +1,86 @@
+/* 数据生命周期 (/workbuddy/lifecycle) — export + deletion tabs. */
+
+.panel {
+  width: 100%;
+  min-width: 0;
+}
+
+.notice {
+  margin: 12px 0;
+  width: 100%;
+}
+
+.sectionBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--fn-border-primary);
+}
+
+.sectionTitle {
+  margin: 0 !important;
+}
+
+.sectionDesc {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.actionRow {
+  margin-top: 4px;
+}
+
+.idInput {
+  width: 360px;
+  max-width: 100%;
+}
+
+.inlineForm {
+  max-width: 520px;
+}
+
+.summary {
+  margin-top: 12px;
+  max-width: 720px;
+}
+
+.summaryTable {
+  margin-top: 8px;
+}
+
+.tagRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.tokenBox {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+
+.tokenHint {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rowHint {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 767px) {
+  .idInput {
+    width: 100%;
+  }
+
+  .inlineForm {
+    max-width: none;
+  }
+}

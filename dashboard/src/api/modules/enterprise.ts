@@ -48,10 +48,7 @@ async function unwrap<T>(path: string, init?: RequestInit): Promise<T> {
  * invitations) and ``{ items }`` in the catalog slice. Accept both so the
  * dashboard works against either envelope shape.
  */
-async function unwrapList<T>(
-  path: string,
-  init?: RequestInit,
-): Promise<T[]> {
+async function unwrapList<T>(path: string, init?: RequestInit): Promise<T[]> {
   const body = await unwrap<T[] | { items: T[] }>(path, init);
   return Array.isArray(body) ? body : body.items;
 }

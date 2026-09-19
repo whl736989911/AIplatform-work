@@ -1,0 +1,65 @@
+/* WorkBuddy console → Approvals: notification strip + inbox layout. */
+
+.panel {
+  width: 100%;
+  min-width: 0;
+}
+
+.strip {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--fn-border-primary, rgba(0, 0, 0, 0.08));
+  border-radius: 8px;
+  background: var(--fn-bg-layout, rgba(0, 0, 0, 0.02));
+}
+
+.stripHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.stripList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.stripRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 4px 0;
+  border-top: 1px solid var(--fn-border-primary, rgba(0, 0, 0, 0.06));
+}
+
+.stripEmpty {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.blockHint {
+  display: block;
+  margin: 6px 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.challengeBlock {
+  padding: 12px;
+  border: 1px solid var(--fn-border-primary, rgba(0, 0, 0, 0.08));
+  border-radius: 8px;
+}
+
+.tokenInput {
+  margin-top: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}

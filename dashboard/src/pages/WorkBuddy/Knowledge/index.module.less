@@ -1,0 +1,124 @@
+/* WorkBuddy 知识库 (/workbuddy/knowledge) — panels share one tab layout. */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+
+.centered {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.notice {
+  margin-bottom: 16px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.fullWidth {
+  width: 100%;
+}
+
+.baseSelect {
+  min-width: 220px;
+}
+
+.stepBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--fn-border-primary);
+}
+
+.kv {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.kvKey {
+  flex: 0 0 110px;
+  font-size: 12px;
+  color: var(--fn-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+.hint {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.permissionSelect {
+  width: 120px;
+}
+
+.searchForm {
+  row-gap: 8px;
+  margin-bottom: 16px;
+}
+
+.searchQueryItem {
+  flex: 1;
+  min-width: 260px;
+}
+
+.resultMeta {
+  margin-bottom: 12px;
+}
+
+.hitList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hitCard {
+  padding: 12px 14px;
+  border: 1px solid var(--fn-border-primary);
+  border-radius: 8px;
+}
+
+.hitHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.hitBody {
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 767px) {
+  .kv {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .kvKey {
+    flex: none;
+  }
+
+  .baseSelect {
+    min-width: 160px;
+  }
+
+  .searchQueryItem {
+    min-width: 100%;
+  }
+}

@@ -30,7 +30,11 @@ export default function CatalogPanel({ kind }: { kind: "tool" | "model" }) {
   const timeZone = useServerTimezone();
   const [query, setQuery] = useState("");
   const isTool = kind === "tool";
-  const { data: items, loading, refresh } = useAsyncResource<CatalogItem[]>(
+  const {
+    data: items,
+    loading,
+    refresh,
+  } = useAsyncResource<CatalogItem[]>(
     [],
     async () =>
       (isTool

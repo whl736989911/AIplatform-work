@@ -125,7 +125,11 @@ export default function InvitationsPanel() {
         message.success(t("tenantGovernance.invitations.revokeSuccess"));
       } catch (err) {
         message.error(
-          apiErrorMessage(err, t("tenantGovernance.invitations.revokeFailed"), t),
+          apiErrorMessage(
+            err,
+            t("tenantGovernance.invitations.revokeFailed"),
+            t,
+          ),
         );
       } finally {
         setRevokingId(null);
@@ -201,7 +205,9 @@ export default function InvitationsPanel() {
             </Button>
           </Popconfirm>
         ) : (
-          <Text type="secondary">{t("tenantGovernance.invitations.terminalHint")}</Text>
+          <Text type="secondary">
+            {t("tenantGovernance.invitations.terminalHint")}
+          </Text>
         ),
     },
   ];
@@ -332,7 +338,9 @@ export default function InvitationsPanel() {
               allowClear
               showSearch
               optionFilterProp="label"
-              placeholder={t("tenantGovernance.invitations.departmentPlaceholder")}
+              placeholder={t(
+                "tenantGovernance.invitations.departmentPlaceholder",
+              )}
               options={departmentOptions}
             />
           </Form.Item>
