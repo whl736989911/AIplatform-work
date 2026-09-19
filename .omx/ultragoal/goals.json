@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "createdAt": "2026-09-19T22:27:35.941Z",
+  "updatedAt": "2026-09-19T22:27:57.452Z",
+  "briefPath": ".omx/ultragoal/brief.md",
+  "goalsPath": ".omx/ultragoal/goals.json",
+  "ledgerPath": ".omx/ultragoal/ledger.jsonl",
+  "codexGoalMode": "aggregate",
+  "goals": [
+    {
+      "id": "G001",
+      "title": "批次 1：前端 IA 重组 + 三个小缺陷（A-01、A-19、A-20、A-21）",
+      "objective": "完成 A 线批次 1 四项任务，每项达到 brief 的完成标准并留可复现证据。A-01 前端 IA 重组：新侧边栏与路由（员工只看 工作台/收件箱/工作流/运行），工作流详情页做中枢，去掉“个人版/企业版”二分痕迹，旧路由重定向且不 404。A-19 修缺陷：提案“分配审核人” /reviewers 接口可用（当前 404）。A-20 修缺陷：生命周期“重新认证 / download challenge”前后端行为一致（当前未接线）。A-21 修缺陷：市场“安装列表”接口可用（安装台账可查）。证据：后端 ruff check / ruff format --check / mypy src/octop 全通过；前端 npm run lint 0 error、tsc -b、vitest run 通过；界面改动用真实服务人工冒烟；状态与证据写回 docs/plan/ledger/machine-a.json 批次 1。",
+      "status": "in_progress",
+      "attempt": 1,
+      "createdAt": "2026-09-19T22:27:35.941Z",
+      "updatedAt": "2026-09-19T22:27:57.452Z",
+      "startedAt": "2026-09-19T22:27:57.452Z"
+    },
+    {
+      "id": "G002",
+      "title": "批次 2：节点元数据 + 编译器诊断 + 运行详情 + 版本 diff（A-04、A-05、A-02、A-03）",
+      "objective": "A-04 后端节点元数据契约（fields/types/required/引用语法），使前端可据此渲染表单；A-05 编译器诊断聚合：收集式多错、每条带 path 与错误码→修复提示（收敛 workflow_compiler.py 的 46 处 raise）；A-02 运行详情增强：逐节点输入输出、耗时、token、重跑到此、重试、取消、对账（复用 A-01 的新 IA）；A-03 版本对比：定义级 diff，两版差异可读。证据：后端三套件 + 前端 lint/tsc/vitest + 真实服务冒烟（A-02/A-03）+ 状态写回 machine-a.json 批次 2。",
+      "status": "pending",
+      "attempt": 0,
+      "createdAt": "2026-09-19T22:27:35.941Z",
+      "updatedAt": "2026-09-19T22:27:53.974Z"
+    },
+    {
+      "id": "G003",
+      "title": "批次 3：创建向导 + 节点集显式化（A-06、A-07）",
+      "objective": "A-06 创建向导：输入/步骤/数据/输出四步 + 实时校验 + 试运行，非技术员工能建出可运行工作流；A-07 节点集扩展：input/knowledge/output 显式化，编译通过且旧定义兼容。证据：向导端到端建出一个可运行工作流（真实服务人工冒烟 + 试运行输出）；旧定义回归编译通过；状态写回 machine-a.json 批次 3。",
+      "status": "pending",
+      "attempt": 0,
+      "createdAt": "2026-09-19T22:27:35.941Z",
+      "updatedAt": "2026-09-19T22:27:53.974Z"
+    },
+    {
+      "id": "G004",
+      "title": "批次 4：运行中提问 + 产出审核 + 收件箱三合一（A-08、A-09、A-11）",
+      "objective": "A-08 ask 人类表单节点 + waiting_input 状态 + 输入请求表 + resume 载数据（迁移 031+），链路：运行中提问→收件箱填表→执行继续；A-09 产出审核：末节点产出可被人工修正后确认/采纳/重跑；A-11 收件箱：审批 + 提问 + 审核三合一 + 表单抽屉，员工每天只来这一页。证据：迁移三态（既有库升级/全新 PG/全新 SQLite）+ 数量对账与抽样检索对比；端到端跑一次“提问→填表→继续”；状态写回 machine-a.json 批次 4。",
+      "status": "pending",
+      "attempt": 0,
+      "createdAt": "2026-09-19T22:27:35.941Z",
+      "updatedAt": "2026-09-19T22:27:53.974Z"
+    },
+    {
+      "id": "G005",
+      "title": "批次 5：纠正采集 → 归因 → 分析器 → Agent 生成（A-12、A-13、A-14、A-15）",
+      "objective": "A-12 纠正/反馈采集表 workbuddy_execution_feedback + 接口（每次修正留结构化记录）；A-13 纠正归因与范围界定（输出“改哪、影响面多大”）；A-14 分析器（PG 版）产出提案候选并接入既有治理链（影子/灰度/提升）；A-15 Agent 生成工作流：受限 DSL + 编译闭环 + 补丁式生成 + 可解释输出，自然语言→≤2 轮编译通过→人工确认。证据：从一次真实纠正到一条可审提案的端到端跑通；Agent 生成在 ≤2 轮内编译通过；状态写回 machine-a.json 批次 5。",
+      "status": "pending",
+      "attempt": 0,
+      "createdAt": "2026-09-19T22:27:35.941Z",
+      "updatedAt": "2026-09-19T22:27:53.974Z"
+    },
+    {
+      "id": "G006",
+      "title": "批次 6：画布 + Chatflow + 触发器/outbox + 租户指标（A-16、A-17、A-22、A-23、A-24）",
+      "objective": "A-16 画布（React Flow @xyflow/react）+ 字段映射面板 + JSON 双向同步；A-17 Chatflow 形态：消息可触发流程；A-22 触发器投递执行接线：Webhook 事件真正启动执行；A-23 outbox 传输实现（端口→实体）：事件真正投递 + 死信可查；A-24 租户级指标口径与暴露：员工看自己、管理员看租户。证据：Webhook 事件触发一次真实执行并可审计；画布与 JSON 双向一致；指标口径可见；状态写回 machine-a.json 批次 6 并推进 integrator.json 的 next_batch。",
+      "status": "pending",
+      "attempt": 0,
+      "createdAt": "2026-09-19T22:27:35.941Z",
+      "updatedAt": "2026-09-19T22:27:53.974Z"
+    }
+  ],
+  "codexObjective": "Complete the durable ultragoal plan in .omx/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .omx/ultragoal/ledger.jsonl as the audit trail.",
+  "goalsRefinement": {
+    "reason": "create-goals 从简报散句切出 17 条非任务型目标；收敛为 6 个批次（= 6 个 story）以对齐 docs/plan/two-machine-workstreams.md 第 4 节批次计划",
+    "refinedAt": "2026-09-19T22:27:53.974Z",
+    "refinedBy": "machine-A",
+    "source": "docs/plan/machine-a-brief.md"
+  },
+  "activeGoalId": "G001"
+}

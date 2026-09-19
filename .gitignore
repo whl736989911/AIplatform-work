@@ -108,3 +108,8 @@ scripts/lh_image_install_octop_tencentos.sh
 # WorkBuddy local verification state
 .jspace/
 artifacts/
+
+# OMX 运行时状态（只保留 goal 计划产物 .omx/ultragoal/）
+.omx/*
+!.omx/ultragoal/
+!.omx/ultragoal/**

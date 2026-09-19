@@ -1,0 +1,3 @@
+{"ts":"2026-09-19T22:27:35.941Z","event":"plan_created","message":"17 goal(s) created"}
+{"ts": "2026-09-19T22:27:53.974Z", "type": "goals_refined", "actor": "machine-A", "from": 17, "to": 6, "goalIds": ["G001", "G002", "G003", "G004", "G005", "G006"], "evidence": "docs/plan/machine-a-brief.md 的批次表与 docs/plan/two-machine-workstreams.md 第 4 节一致"}
+{"ts":"2026-09-19T22:27:57.452Z","event":"goal_started","goalId":"G001","status":"in_progress","message":"Attempt 1"}
