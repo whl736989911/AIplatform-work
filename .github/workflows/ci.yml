@@ -21,6 +21,33 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12"]
+    # The live-database gates need PostgreSQL with pgvector and Redis. PostgreSQL
+    # 16 matches the pg_dump/pg_restore client bundled by ubuntu-latest; newer
+    # servers reject that client during the backup round-trip test. Both service
+    # images are digest-pinned so registry tag movement cannot change the gate.
+    # Windows runners cannot host service containers, so that job keeps them
+    # skipped and each Windows machine runs them against its own container.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7.4@sha256:c6eabf748fc7a61dbb5a705c78bcf3d6377b1127a97d0ce965c11c44ba46896f
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +67,15 @@ jobs:
 
       - name: Test
         run: make test
+
+      # The database-backed suites reset the public schema and flush Redis, so
+      # they cannot share a database with a parallel worker: this step runs them
+      # serially, after the parallel pass, against the service containers.
+      - name: Live database tests
+        env:
+          OCTOP_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          OCTOP_TEST_REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest -m "postgresql or redis" -n 0 -p no:randomly
 
   test-windows:
     name: Windows / Python 3.12
@@ -64,6 +100,40 @@ jobs:
 
       - name: Test
         run: make test
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    # The dashboard's suite, lint and build only ever ran from a pre-commit hook
+    # or by hand, which is how five broken specs sat on main unnoticed. This job
+    # runs what that hook runs, so the same breakage fails a PR instead.
+    if: ${{ !startsWith(github.head_ref, 'chore/sync-develop-after-') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Lint
+        working-directory: dashboard
+        run: npm run lint
+
+      - name: Test
+        working-directory: dashboard
+        run: npm test
+
+      # ``tsc -b`` runs inside the build, so this proves the production bundle
+      # type-checks as well as compiling.
+      - name: Build
+        working-directory: dashboard
+        run: npm run build
 
   live-tests:
     name: "Live tests (real credentials)"

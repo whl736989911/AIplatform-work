@@ -155,6 +155,7 @@ def test_redis_url_resolves_to_the_shared_store(monkeypatch: pytest.MonkeyPatch)
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.redis
 @pytest.mark.skipif(
     not __import__("os").environ.get("OCTOP_TEST_REDIS_URL"),
     reason="OCTOP_TEST_REDIS_URL is not configured",
@@ -195,6 +196,7 @@ def test_redis_window_store_counts_the_same_way() -> None:
         client.close()
 
 
+@pytest.mark.redis
 @pytest.mark.skipif(
     not __import__("os").environ.get("OCTOP_TEST_REDIS_URL"),
     reason="OCTOP_TEST_REDIS_URL is not configured",

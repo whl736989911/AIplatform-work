@@ -2,6 +2,11 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TrajectoryEvent } from "../../../api/modules/trajectory";
 
+// Importing the markdown renderer up front resolves the lazy chunk the preview
+// renders through, so the markdown assertions below see rendered output instead
+// of the plain-text fallback the suspense boundary shows while it loads.
+import "../../../components/Markdown/index";
+
 const eventMock = vi.fn();
 
 vi.mock("../../../api/modules/trajectory", async (importOriginal) => {

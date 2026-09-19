@@ -15,6 +15,55 @@ import "@testing-library/jest-dom/vitest";
 import { afterEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 
+// ``pdfjs-dist`` builds a canvas transform matrix while its module initialises,
+// so any test whose import graph reaches the PDF preview (document previews,
+// skill drawers, markdown previews) crashes at import time without these. The
+// suites that pull it in don't render a PDF, so the shapes only need to exist.
+if (typeof globalThis.DOMMatrix === "undefined") {
+  class _DOMMatrix {
+    constructor(init?: number[]) {
+      const values = init && init.length === 6 ? init : [1, 0, 0, 1, 0, 0];
+      this.a = values[0];
+      this.b = values[1];
+      this.c = values[2];
+      this.d = values[3];
+      this.e = values[4];
+      this.f = values[5];
+    }
+    a = 1;
+    b = 0;
+    c = 0;
+    d = 1;
+    e = 0;
+    f = 0;
+  }
+  Object.defineProperty(globalThis, "DOMMatrix", {
+    value: _DOMMatrix,
+    configurable: true,
+    writable: true,
+  });
+}
+if (typeof globalThis.Path2D === "undefined") {
+  class _Path2D {
+    addPath() {}
+    closePath() {}
+    moveTo() {}
+    lineTo() {}
+    bezierCurveTo() {}
+    quadraticCurveTo() {}
+    arc() {}
+    arcTo() {}
+    ellipse() {}
+    rect() {}
+    roundRect() {}
+  }
+  Object.defineProperty(globalThis, "Path2D", {
+    value: _Path2D,
+    configurable: true,
+    writable: true,
+  });
+}
+
 // Auto-mock react-i18next so components' ``t(key, fallback)`` calls
 // resolve synchronously to ``fallback`` without needing the real
 // i18n module (which would async-fetch tool labels and add 1-2s of
