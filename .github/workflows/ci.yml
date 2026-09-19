@@ -100,6 +100,40 @@ jobs:
       - name: Test
         run: make test
 
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    # The dashboard's suite, lint and build only ever ran from a pre-commit hook
+    # or by hand, which is how five broken specs sat on main unnoticed. This job
+    # runs what that hook runs, so the same breakage fails a PR instead.
+    if: ${{ !startsWith(github.head_ref, 'chore/sync-develop-after-') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Lint
+        working-directory: dashboard
+        run: npm run lint
+
+      - name: Test
+        working-directory: dashboard
+        run: npm test
+
+      # ``tsc -b`` runs inside the build, so this proves the production bundle
+      # type-checks as well as compiling.
+      - name: Build
+        working-directory: dashboard
+        run: npm run build
+
   live-tests:
     name: "Live tests (real credentials)"
     runs-on: ubuntu-latest
