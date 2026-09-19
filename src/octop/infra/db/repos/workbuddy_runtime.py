@@ -246,6 +246,9 @@ class StepRunRow:
     duration_ms: int | None
     started_at: Any
     finished_at: Any
+    tool_id: str | None = None
+    tool_call_key: str | None = None
+    dispatch_intent_at: Any = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> StepRunRow:
@@ -265,6 +268,9 @@ class StepRunRow:
             duration_ms=row["duration_ms"],
             started_at=row["started_at"],
             finished_at=row["finished_at"],
+            tool_id=row["tool_id"],
+            tool_call_key=row["tool_call_key"],
+            dispatch_intent_at=row["dispatch_intent_at"],
         )
 
 
@@ -1253,6 +1259,35 @@ class WorkBuddyRuntimeRepo:
                   AND status IN ('queued', 'running')
                 """,
                 tuple(params),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def mark_step_dispatch_intent(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        execution_id: str,
+        node_id: str,
+        attempt: int,
+        fence: int,
+        tool_id: str | None,
+        tool_call_key: str,
+        conn: Any | None = None,
+    ) -> bool:
+        """Record what this attempt is about to call, before it calls it.
+
+        Written once per attempt: the first decision to dispatch is the intent,
+        and a second write would only move the moment the call left the process.
+        """
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_step_runs
+                SET tool_id = ?, tool_call_key = ?, dispatch_intent_at = now()
+                WHERE execution_id = ? AND node_id = ? AND attempt = ? AND fence = ?
+                  AND status = 'running' AND dispatch_intent_at IS NULL
+                """,
+                (tool_id, tool_call_key, execution_id, node_id, int(attempt), int(fence)),
             )
             return bool(getattr(cursor, "rowcount", 0))
 

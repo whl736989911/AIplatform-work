@@ -1688,6 +1688,87 @@ def test_a_dead_worker_lease_is_taken_over_with_a_new_fence(
     assert dying.worker_id == "dead-worker"
 
 
+async def test_the_dispatch_intent_is_durable_before_an_external_call(
+    app: FastAPI, pool: Any, tenant: dict[str, Any], monkeypatch: Any
+) -> None:
+    """T13: the operation key is written before the call can leave the process."""
+    from octop.api.routers import workbuddy_runtime as router_module
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    repo = WorkBuddyRuntimeRepo(pool)
+
+    class InspectingToolPort:
+        """Reads the step row from inside the call: what a crash would leave."""
+
+        def __init__(self) -> None:
+            self.seen: dict[str, Any] = {}
+
+        def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
+            steps = repo.list_step_runs(ctx, self.execution_id)
+            current = next(step for step in steps if step.node_id == node.id)
+            self.seen = {
+                "status": current.status,
+                "tool_id": current.tool_id,
+                "tool_call_key": current.tool_call_key,
+                "dispatch_intent_at": current.dispatch_intent_at,
+            }
+            return {"ok": True}
+
+        def execute_llm(self, *, node: Any, activation: Any) -> Any:
+            raise AssertionError("this workflow has no llm node")
+
+        def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:
+            raise AssertionError("chat is not part of this workflow")
+
+    definition = {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {},
+        "nodes": [
+            {
+                "id": "submit",
+                "type": "tool",
+                "name": "Submit",
+                "config": {"tool_name": "bidding.submit", "parameters": {}},
+            }
+        ],
+        "edges": [],
+    }
+    workflow_id = _publish(pool, tenant, definition, "Dispatch intent runtime")
+    port = InspectingToolPort()
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    monkeypatch.setattr(router_module, "_service", lambda server: service)
+    actor = RuntimeActor(
+        tenant_id=tenant["tenant_id"],
+        user_id=tenant["owner_user_id"],
+        role="owner",
+        tenant_status="active",
+    )
+    worker = WorkBuddyExecutionWorker(pool, service=service, worker_id="intent-worker")
+    worker.drain()
+    execution_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+    port.execution_id = execution_id
+    worker.run_once()
+
+    # Inside the call the row already carried the intent, under our fence.
+    assert port.seen["status"] == "running", port.seen
+    assert port.seen["tool_id"] == "bidding.submit", port.seen
+    assert port.seen["tool_call_key"] == f"{execution_id}:submit", port.seen
+    assert port.seen["dispatch_intent_at"] is not None, port.seen
+
+    async with _client(app, _principal(tenant)) as client:
+        detail = (await client.get(f"/executions/{execution_id}")).json()["data"]
+    step = next(item for item in detail["steps"] if item["node_id"] == "submit")
+    assert step["tool_call_key"] == f"{execution_id}:submit", step
+    assert step["tool_id"] == "bidding.submit", step
+    assert step["dispatch_intent_at"] is not None, step
+    assert detail["status"] == "success", detail
+
+
 async def test_cancelling_a_running_execution_stops_before_the_next_call(
     app: FastAPI, pool: Any, tenant: dict[str, Any], monkeypatch: Any
 ) -> None:

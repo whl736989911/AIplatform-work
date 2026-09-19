@@ -754,6 +754,7 @@ def run_graph(
     on_step_start: Callable[[GraphNode], None] | None = None,
     on_step_settled: Callable[[StepOutcome], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    on_step_dispatch: Callable[[GraphNode], None] | None = None,
 ) -> GraphRun:
     """Execute the graph once, deterministically, and aggregate the outcome.
 
@@ -766,8 +767,10 @@ def run_graph(
 
     ``on_step_start`` and ``on_step_settled`` let the caller persist a step the
     moment it starts and the moment it settles, so an observer of a long run sees
-    ``running`` rather than waiting for the attempt to commit. Replayed outcomes
-    are not announced: they belong to the attempt that produced them.
+    ``running`` rather than waiting for the attempt to commit. ``on_step_dispatch``
+    fires immediately before an external call, so the operation's intent is
+    durable before the call can leave the process. Replayed outcomes are not
+    announced: they belong to the attempt that produced them.
     """
     replay = replay or ReplayState()
     decisions = dict(decisions or {})
@@ -1082,6 +1085,10 @@ def run_graph(
             continue
         try:
             activation = _activation(graph, node, inputs=inputs, bindings=bindings)
+            if on_step_dispatch is not None:
+                # Durable before the call leaves the process: a worker that dies
+                # here leaves the operation key, not a mystery.
+                on_step_dispatch(node)
             if node.type == "tool":
                 value = port.execute_tool(
                     node=node,
@@ -1476,6 +1483,9 @@ class StepRunView:
     started_at: str | None = None
     finished_at: str | None = None
     duration_ms: int | None = None
+    tool_id: str | None = None
+    tool_call_key: str | None = None
+    dispatch_intent_at: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -1489,6 +1499,10 @@ class StepRunView:
             "finished_at": self.finished_at,
             "duration_ms": self.duration_ms,
             "error_code": self.error_code,
+            # The operation key an operator quotes when reconciling a lost answer.
+            "tool_id": self.tool_id,
+            "tool_call_key": self.tool_call_key,
+            "dispatch_intent_at": self.dispatch_intent_at,
         }
 
 
@@ -2346,6 +2360,7 @@ class WorkBuddyRuntimeService:
             # A cancel is noticed between nodes, so the call already in flight
             # lands and nothing new is dispatched.
             should_stop=lambda: self._repo.cancel_requested(ctx, claim.execution_id),
+            on_step_dispatch=lambda node: self._mark_step_dispatch(actor, claim, node, attempt),
         )
         if run.status == "canceled":
             self._repo.cancel_pending_steps(
@@ -2366,6 +2381,30 @@ class WorkBuddyRuntimeService:
             node_id=node.id,
             attempt=attempt,
             fence=claim.fence,
+        )
+
+    def _mark_step_dispatch(
+        self, actor: RuntimeActor, claim: ExecutionClaim, node: GraphNode, attempt: int
+    ) -> None:
+        """Persist the operation key before the call can leave the process.
+
+        ``tool_id`` is the tool (or model) the definition declared; a deployment
+        resolves its published revision from that. The call key is the stable
+        logical operation key every attempt of this node reuses, which is what an
+        idempotent provider de-duplicates on and what an operator quotes when
+        reconciling a lost answer.
+        """
+        config = node.config if isinstance(node.config, Mapping) else {}
+        declared = config.get("tool_name") if node.type == "tool" else config.get("model")
+        self._repo.mark_step_dispatch_intent(
+            self._ctx(actor),
+            execution_id=claim.execution_id,
+            node_id=node.id,
+            attempt=attempt,
+            fence=claim.fence,
+            # The key is the one the engine hands the adapter, so both agree.
+            tool_call_key=f"{claim.execution_id}:{node.id}",
+            tool_id=str(declared) if declared else None,
         )
 
     def _persist_step(
@@ -2793,6 +2832,9 @@ class WorkBuddyRuntimeService:
                 started_at=_iso(step.started_at),
                 finished_at=_iso(step.finished_at),
                 duration_ms=step.duration_ms,
+                tool_id=step.tool_id,
+                tool_call_key=step.tool_call_key,
+                dispatch_intent_at=_iso(step.dispatch_intent_at),
             )
             for step in self._repo.list_step_runs(ctx, execution_id)
         ]
