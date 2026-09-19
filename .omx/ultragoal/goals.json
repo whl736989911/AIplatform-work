@@ -1,7 +1,7 @@
 {
   "version": 1,
   "createdAt": "2026-09-19T22:27:35.941Z",
-  "updatedAt": "2026-09-19T22:27:57.452Z",
+  "updatedAt": "2026-09-19T22:55:49Z",
   "briefPath": ".omx/ultragoal/brief.md",
   "goalsPath": ".omx/ultragoal/goals.json",
   "ledgerPath": ".omx/ultragoal/ledger.jsonl",
@@ -11,11 +11,12 @@
       "id": "G001",
       "title": "批次 1：前端 IA 重组 + 三个小缺陷（A-01、A-19、A-20、A-21）",
       "objective": "完成 A 线批次 1 四项任务，每项达到 brief 的完成标准并留可复现证据。A-01 前端 IA 重组：新侧边栏与路由（员工只看 工作台/收件箱/工作流/运行），工作流详情页做中枢，去掉“个人版/企业版”二分痕迹，旧路由重定向且不 404。A-19 修缺陷：提案“分配审核人” /reviewers 接口可用（当前 404）。A-20 修缺陷：生命周期“重新认证 / download challenge”前后端行为一致（当前未接线）。A-21 修缺陷：市场“安装列表”接口可用（安装台账可查）。证据：后端 ruff check / ruff format --check / mypy src/octop 全通过；前端 npm run lint 0 error、tsc -b、vitest run 通过；界面改动用真实服务人工冒烟；状态与证据写回 docs/plan/ledger/machine-a.json 批次 1。",
-      "status": "in_progress",
+      "status": "complete",
       "attempt": 1,
       "createdAt": "2026-09-19T22:27:35.941Z",
-      "updatedAt": "2026-09-19T22:27:57.452Z",
-      "startedAt": "2026-09-19T22:27:57.452Z"
+      "updatedAt": "2026-09-19T22:55:49Z",
+      "startedAt": "2026-09-19T22:27:57.452Z",
+      "completedAt": "2026-09-19T22:55:49Z"
     },
     {
       "id": "G002",
