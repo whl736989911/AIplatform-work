@@ -1,0 +1,21 @@
+{
+  "machine": "machine-B",
+  "line": "B",
+  "owner": "对端机器（权限与知识库）",
+  "updated": "2026-09-20T00:00:00Z",
+  "batches": {
+    "1": {
+      "state": "pending",
+      "tasks": ["B-01", "B-08", "B-09"],
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": "待对端机器按 docs/plan/two-machine-workstreams.md 第 5.2 节循环推进"
+    },
+    "2": { "state": "pending", "tasks": ["B-02", "B-03", "B-04"], "pr": null, "commits": [], "evidence": "", "notes": "" },
+    "3": { "state": "pending", "tasks": ["B-05", "B-06", "B-07"], "pr": null, "commits": [], "evidence": "", "notes": "" },
+    "4": { "state": "pending", "tasks": ["B-10", "B-12"], "pr": null, "commits": [], "evidence": "", "notes": "" },
+    "5": { "state": "pending", "tasks": ["B-13", "B-14", "B-15"], "pr": null, "commits": [], "evidence": "", "notes": "" },
+    "6": { "state": "pending", "tasks": ["B-11", "B-16"], "pr": null, "commits": [], "evidence": "", "notes": "B-16 合规后端需先签合规政策，未签则跳过" }
+  }
+}
