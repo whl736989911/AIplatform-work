@@ -533,9 +533,7 @@ def _submission_body(definition: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _publish_template(
-    app: FastAPI, pool: Any, tenant: dict[str, Any]
-) -> dict[str, str]:
+async def _publish_template(app: FastAPI, pool: Any, tenant: dict[str, Any]) -> dict[str, str]:
     """Submit, freeze and platform-approve one template version."""
     async with _client(app, _principal(tenant)) as client:
         created = await client.post(
@@ -603,9 +601,7 @@ async def test_installed_template_version_runs_on_the_spine(
                     # The consent hashes are recomputed the way the platform does:
                     # canonical JSON over the capabilities the version declares.
                     "capabilities_hash": marketplace_service.sha256_hex(
-                        marketplace_service.canonical_json(
-                            list(version["required_capabilities"])
-                        )
+                        marketplace_service.canonical_json(list(version["required_capabilities"]))
                     ),
                 },
                 "bindings": {},
@@ -615,9 +611,7 @@ async def test_installed_template_version_runs_on_the_spine(
         )
         assert installed.status_code == 202, installed.text
         installation_id = installed.json()["data"]["installation"]["id"]
-        state = (
-            await client.get(f"/marketplace/installations/{installation_id}")
-        ).json()["data"]
+        state = (await client.get(f"/marketplace/installations/{installation_id}")).json()["data"]
         assert state["status"] == "installed", state
         workflow_id = state["workflow_id"]
         workflow_version_id = state["installed_version_id"]
