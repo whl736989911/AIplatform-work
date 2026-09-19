@@ -12,10 +12,11 @@ Paths are relative to the ``/api/v1`` prefix mounted by the application factory.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from octop.api.deps import get_server
@@ -27,6 +28,7 @@ from octop.api.routers.workbuddy_identity import (
 )
 from octop.infra.db.pool import DatabasePool
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.workbuddy.ratelimit import BUSINESS_LIMIT, WORKFLOW_EXECUTE_LIMIT
 from octop.infra.workbuddy.runtime import (
     APPROVAL_DECISIONS,
     RECONCILIATION_DECISIONS,
@@ -36,7 +38,68 @@ from octop.infra.workbuddy.runtime import (
     execution_wait_facts,
 )
 
-router = APIRouter()
+
+def rate_limit_dependency(policy: str) -> Any:
+    """FastAPI dependency enforcing one published rate-limit policy.
+
+    The subject is the tenant plus the member (or the actor key for a run), so a
+    client cannot escape its allowance by changing anything else about the
+    request. The contract's headers ride on both answers: the allowance is
+    reported on success and ``Retry-After`` accompanies the refusal.
+    """
+
+    async def _dependency(
+        response: Response,
+        principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+        server: Any = Depends(get_server),
+    ) -> None:
+        from octop.infra.workbuddy.ratelimit import (
+            DEFAULT_LIMITS,
+            RateLimitUnavailable,
+            SlidingWindowLimiter,
+            resolve_window_store,
+        )
+
+        limit = DEFAULT_LIMITS[policy]
+        services = getattr(server, "services", None)
+        store = getattr(services, "rate_limit_store", None) or resolve_window_store()
+        if store is None:
+            # Nothing is configured to enforce: a deployment gap the dependency
+            # probe already reports, not a failing dependency.
+            logger.warning("rate limiting is not configured; %s requests are not counted", policy)
+            return
+        limiter = SlidingWindowLimiter(store)
+        subject = f"{principal.tenant_id}:{principal.member_id or principal.user.id}"
+        try:
+            decision = limiter.check(policy, subject)
+        except RateLimitUnavailable:
+            _refuse_when_unlimited(limit, policy)
+            return
+        response.headers.update(decision.headers())
+        if not decision.allowed:
+            raise OctopError(
+                ErrorCode.RATE_LIMITED,
+                "rate limit exceeded; retry after the interval suggested in Retry-After",
+                details={"policy": policy, "limit": limit.limit},
+                headers=decision.headers(),
+            )
+
+    return _dependency
+
+
+def _refuse_when_unlimited(limit: Any, policy: str) -> None:
+    """A missing limiter must not silently relax a sensitive entry point."""
+    if not limit.fail_closed:
+        logger.warning("rate limiting is unavailable for %s; the request proceeded", policy)
+        return
+    raise OctopError(
+        ErrorCode.DEPENDENCY_UNAVAILABLE,
+        f"rate limiting is unavailable, so {policy} requests are refused",
+        details={"policy": policy},
+    )
+
+
+router = APIRouter(dependencies=[Depends(rate_limit_dependency(BUSINESS_LIMIT))])
 
 _Principal = Annotated[WorkBuddyPrincipal, Depends(workbuddy_principal)]
 _AdminPrincipal = Annotated[WorkBuddyPrincipal, Depends(require_workbuddy_admin())]
@@ -45,6 +108,8 @@ _DATABASE_NOT_CONFIGURED = "control-plane database not configured yet"
 _POSTGRES_REQUIRED = "WorkBuddy runtime requires the PostgreSQL control plane"
 
 _MAX_TEXT = 4_000
+
+logger = logging.getLogger(__name__)
 
 
 def _service(server: Any) -> WorkBuddyRuntimeService:
@@ -126,6 +191,7 @@ async def execute_workflow(
     principal: _Principal,
     server: Any = Depends(get_server),
     idempotency_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    _execute_limit: None = Depends(rate_limit_dependency(WORKFLOW_EXECUTE_LIMIT)),
 ) -> dict[str, Any]:
     """Accept a run of the workflow's active immutable version.
 

@@ -957,3 +957,57 @@ async def test_a_token_does_not_make_you_an_approver(
     async with _client(app, _principal(tenant)) as client:
         settled = await client.get(f"/executions/{execution_id}")
     assert settled.json()["data"]["status"] == "waiting_approval", settled.text
+
+
+class _WindowStore:
+    """The limiter's sliding-window semantics in process, for the tests."""
+
+    def __init__(self) -> None:
+        self._marks: dict[str, list[int]] = {}
+
+    def admit(self, key: str, *, now_ms: int, limit: int, window_ms: int) -> int:
+        marks = [mark for mark in self._marks.get(key, []) if mark > now_ms - window_ms]
+        marks.append(now_ms)
+        self._marks[key] = marks
+        return len(marks)
+
+
+async def test_rate_limited_answers_carry_the_contract_headers(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T27: the allowance is visible, and a refusal tells the client when to retry."""
+    from octop.api.deps import get_server
+    from octop.api.routers import workbuddy_runtime as router_module
+    from octop.infra.workbuddy.ratelimit import WORKFLOW_EXECUTE_LIMIT
+
+    store = _WindowStore()
+    application = FastAPI()
+    application.include_router(router_module.router)
+
+    @application.exception_handler(OctopError)
+    async def _octop_error(_: Request, exc: OctopError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status,
+            content=exc.to_envelope(),
+            headers=dict(exc.headers or {}),
+        )
+
+    application.dependency_overrides[get_server] = lambda: SimpleNamespace(
+        services=SimpleNamespace(db=pool, rate_limit_store=store)
+    )
+
+    # A run's allowance is 20 per minute; the twenty-first must be refused.
+    workflow_id = _publish(pool, tenant, hello_definition(), "Rate limit runtime")
+    async with _client(application, _principal(tenant)) as client:
+        allowed = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        assert allowed.status_code == 202, allowed.text
+        assert allowed.headers["X-RateLimit-Limit"] == "20", allowed.headers
+
+        for _ in range(int(WORKFLOW_EXECUTE_LIMIT and 19)):
+            await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        refused = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+
+    assert refused.status_code == 429, refused.text
+    assert refused.json()["error"]["code"] == ErrorCode.RATE_LIMITED.value, refused.text
+    assert int(refused.headers["Retry-After"]) >= 1, refused.headers
+    assert refused.headers["X-RateLimit-Remaining"] == "0", refused.headers

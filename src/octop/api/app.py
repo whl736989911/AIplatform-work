@@ -88,7 +88,11 @@ def _install_exception_handlers(app: FastAPI) -> None:
                 exc_info=exc,
             )
         locale = resolve_request_locale(request)
-        return JSONResponse(status_code=exc.status, content=exc.to_envelope(locale=locale))
+        return JSONResponse(
+            status_code=exc.status,
+            content=exc.to_envelope(locale=locale),
+            headers=dict(exc.headers or {}),
+        )
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
