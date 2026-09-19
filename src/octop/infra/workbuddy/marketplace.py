@@ -37,6 +37,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any, Protocol
 
 from octop.infra.workbuddy.workflow_compiler import (
@@ -299,7 +300,10 @@ class CapabilityDeclaration:
             raise MarketplaceError(
                 ERROR_SUBMISSION_INVALID, "capability declaration must be an object", path=path
             )
-        unknown = sorted(set(value) - {"kind", "key", "label", "effect", "revision_id", "placeholder_id", "required"})
+        unknown = sorted(
+            set(value)
+            - {"kind", "key", "label", "effect", "revision_id", "placeholder_id", "required"}
+        )
         if unknown:
             raise MarketplaceError(
                 ERROR_SUBMISSION_INVALID,
@@ -358,7 +362,9 @@ class CapabilityDeclaration:
         if kind in ("credential", "knowledge_base") or kind == "model":
             pass
         placeholder_raw = value.get("placeholder_id")
-        placeholder_id = None if placeholder_raw in (None, "") else str(placeholder_raw).strip().lower()
+        placeholder_id = (
+            None if placeholder_raw in (None, "") else str(placeholder_raw).strip().lower()
+        )
         if placeholder_id is not None and not is_placeholder_uuid(placeholder_id):
             raise MarketplaceError(
                 ERROR_SUBMISSION_INVALID,
@@ -397,8 +403,10 @@ class CapabilityDeclaration:
 def parse_declarations(value: Any, *, path: str = "capabilities") -> list[CapabilityDeclaration]:
     if value is None:
         return []
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or not isinstance(
-        value, list
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes))
+        or not isinstance(value, list)
     ):
         raise MarketplaceError(
             ERROR_SUBMISSION_INVALID, "capability declarations must be a list", path=path
@@ -509,11 +517,7 @@ def _node_map(definition: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
 
 
 def _tool_nodes(definition: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    return [
-        node
-        for node in _node_map(definition).values()
-        if str(node.get("type")) == "tool"
-    ]
+    return [node for node in _node_map(definition).values() if str(node.get("type")) == "tool"]
 
 
 def _edge_pairs(definition: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -553,11 +557,11 @@ def _approval_guarded_tool_ids(definition: Mapping[str, Any]) -> set[str]:
     return guarded
 
 
-def _declared_tool_keys(capabilities: Sequence[CapabilityDeclaration]) -> dict[str, CapabilityDeclaration]:
+def _declared_tool_keys(
+    capabilities: Sequence[CapabilityDeclaration],
+) -> dict[str, CapabilityDeclaration]:
     return {
-        declaration.key: declaration
-        for declaration in capabilities
-        if declaration.kind == "tool"
+        declaration.key: declaration for declaration in capabilities if declaration.kind == "tool"
     }
 
 
@@ -588,7 +592,10 @@ def _validate_declaration_coverage(
             )
         used_placeholders[value] = path
     for declaration in capabilities:
-        if declaration.placeholder_id is not None and declaration.placeholder_id not in used_placeholders:
+        if (
+            declaration.placeholder_id is not None
+            and declaration.placeholder_id not in used_placeholders
+        ):
             raise MarketplaceError(
                 ERROR_SUBMISSION_INVALID,
                 "a declared binding slot is never used by the definition",
@@ -610,8 +617,9 @@ def _validate_declaration_coverage(
                 path=f"definition.nodes.{node_id}.config.tool_name",
                 details={"node": node_id},
             )
-        if declaration.effect == EFFECT_EXTERNAL_WRITE and node_id not in _approval_guarded_tool_ids(
-            definition
+        if (
+            declaration.effect == EFFECT_EXTERNAL_WRITE
+            and node_id not in _approval_guarded_tool_ids(definition)
         ):
             raise MarketplaceError(
                 ERROR_SUBMISSION_INVALID,
@@ -628,9 +636,7 @@ def _validate_declaration_coverage(
             path="capabilities",
         )
     has_approval = any(str(node.get("type")) == "approval" for node in nodes.values())
-    if has_approval and not any(
-        declaration.kind == "approver" for declaration in capabilities
-    ):
+    if has_approval and not any(declaration.kind == "approver" for declaration in capabilities):
         raise MarketplaceError(
             ERROR_SUBMISSION_INVALID,
             "an approval node requires a declared approver slot",
@@ -656,9 +662,7 @@ def sanitize_submission(
     """
     clean_name = str(name or "").strip()
     if not clean_name or len(clean_name) > MAX_NAME_LENGTH:
-        raise MarketplaceError(
-            ERROR_SUBMISSION_INVALID, "submission name is required", path="name"
-        )
+        raise MarketplaceError(ERROR_SUBMISSION_INVALID, "submission name is required", path="name")
     clean_summary = str(summary or "").strip()
     if len(clean_summary) > MAX_SUMMARY_LENGTH:
         raise MarketplaceError(
@@ -666,21 +670,15 @@ def sanitize_submission(
         )
     clean_industry = str(industry or "").strip()
     if len(clean_industry) > MAX_INDUSTRY_LENGTH:
-        raise MarketplaceError(
-            ERROR_SUBMISSION_INVALID, "industry is too long", path="industry"
-        )
+        raise MarketplaceError(ERROR_SUBMISSION_INVALID, "industry is too long", path="industry")
     clean_license = str(license_id or "").strip()
     if not _LICENSE_ID_RE.match(clean_license):
-        raise MarketplaceError(
-            ERROR_SUBMISSION_INVALID, "license id is invalid", path="license_id"
-        )
+        raise MarketplaceError(ERROR_SUBMISSION_INVALID, "license id is invalid", path="license_id")
     _scan_text(clean_name, path="name")
     _scan_text(clean_summary, path="summary")
     _scan_text(clean_industry, path="industry")
     if not isinstance(license_text, str) or not license_text.strip():
-        raise MarketplaceError(
-            ERROR_SUBMISSION_INVALID, "license text is required", path="license"
-        )
+        raise MarketplaceError(ERROR_SUBMISSION_INVALID, "license text is required", path="license")
     _scan_text(license_text, path="license")
 
     declarations = parse_declarations(capabilities)
@@ -893,9 +891,7 @@ class BindingSet:
                 bindings, nested_key="knowledge_bases", path="bindings.knowledge_bases"
             ),
             approvers=_slot_map(bindings, nested_key="approvers", path="bindings.approvers"),
-            credentials=_slot_map(
-                credential_bindings, nested_key=None, path="credential_bindings"
-            ),
+            credentials=_slot_map(credential_bindings, nested_key=None, path="credential_bindings"),
         )
 
 
@@ -904,18 +900,14 @@ def _slot_map(value: Any, *, nested_key: str | None, path: str) -> dict[str, str
     if value is None:
         return {}
     if not isinstance(value, Mapping):
-        raise MarketplaceError(
-            ERROR_REBINDING_INCOMPLETE, "bindings must be an object", path=path
-        )
+        raise MarketplaceError(ERROR_REBINDING_INCOMPLETE, "bindings must be an object", path=path)
     entries: Any = value
     if nested_key is not None:
         entries = value.get(nested_key)
         if entries is None:
             return {}
     if not isinstance(entries, Mapping) or len(entries) > MAX_BINDINGS:
-        raise MarketplaceError(
-            ERROR_REBINDING_INCOMPLETE, "too many bindings", path=path
-        )
+        raise MarketplaceError(ERROR_REBINDING_INCOMPLETE, "too many bindings", path=path)
     out: dict[str, str] = {}
     for raw_key, raw_value in entries.items():
         key = str(raw_key).strip()
@@ -1004,8 +996,20 @@ def rebind_definition(
     return ReboundDefinition(
         definition=rebound,
         definition_sha256=definition_sha256(rebound),
-        knowledge_base_ids=tuple(sorted(replacements[declaration.placeholder_id] for declaration in declarations if declaration.kind == "knowledge_base")),
-        approver_ids=tuple(sorted(replacements[declaration.placeholder_id] for declaration in declarations if declaration.kind == "approver")),
+        knowledge_base_ids=tuple(
+            sorted(
+                replacements[declaration.placeholder_id]
+                for declaration in declarations
+                if declaration.kind == "knowledge_base" and declaration.placeholder_id is not None
+            )
+        ),
+        approver_ids=tuple(
+            sorted(
+                replacements[declaration.placeholder_id]
+                for declaration in declarations
+                if declaration.kind == "approver" and declaration.placeholder_id is not None
+            )
+        ),
     )
 
 
@@ -1210,9 +1214,10 @@ def build_install_plan(
 ) -> InstallPlan:
     """Validate consent, rebinding and capabilities, then compile the definition."""
     stored_definition_hash = str(published.definition_hash or "").lower()
-    if not _SHA256_RE.match(stored_definition_hash) or definition_sha256(
-        published.definition
-    ) != stored_definition_hash:
+    if (
+        not _SHA256_RE.match(stored_definition_hash)
+        or definition_sha256(published.definition) != stored_definition_hash
+    ):
         raise MarketplaceError(
             ERROR_VERSION_IMMUTABLE,
             "the stored template version does not match its recorded hash",
@@ -1645,7 +1650,9 @@ def prepare_fixture_install(
 class MarketplaceStorePort(Protocol):
     """Marketplace persistence + the shared WorkBuddy job rows."""
 
-    def list_published_templates(self, *, industry: Any = None, limit: Any = None, offset: Any = None) -> list[dict[str, Any]]: ...
+    def list_published_templates(
+        self, *, industry: Any = None, limit: Any = None, offset: Any = None
+    ) -> list[dict[str, Any]]: ...
 
     def get_template(self, template_id: Any) -> dict[str, Any] | None: ...
 
@@ -1657,37 +1664,59 @@ class MarketplaceStorePort(Protocol):
 
     def create_submission(self, tenant_id: Any, **kwargs: Any) -> dict[str, Any]: ...
 
-    def get_submission(self, tenant_id: Any, submission_id: Any, **kwargs: Any) -> dict[str, Any] | None: ...
+    def get_submission(
+        self, tenant_id: Any, submission_id: Any, **kwargs: Any
+    ) -> dict[str, Any] | None: ...
 
     def list_submissions(self, tenant_id: Any, **kwargs: Any) -> list[dict[str, Any]]: ...
 
-    def freeze_submission(self, tenant_id: Any, submission_id: Any, **kwargs: Any) -> dict[str, Any]: ...
+    def freeze_submission(
+        self, tenant_id: Any, submission_id: Any, **kwargs: Any
+    ) -> dict[str, Any]: ...
 
-    def decide_submission(self, tenant_id: Any, submission_id: Any, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]: ...
+    def decide_submission(
+        self, tenant_id: Any, submission_id: Any, **kwargs: Any
+    ) -> tuple[dict[str, Any], dict[str, Any]]: ...
 
-    def list_submission_reviews(self, tenant_id: Any, submission_id: Any, **kwargs: Any) -> list[dict[str, Any]]: ...
+    def list_submission_reviews(
+        self, tenant_id: Any, submission_id: Any, **kwargs: Any
+    ) -> list[dict[str, Any]]: ...
 
     def create_installation(self, tenant_id: Any, **kwargs: Any) -> dict[str, Any]: ...
 
-    def get_installation(self, tenant_id: Any, installation_id: Any, **kwargs: Any) -> dict[str, Any] | None: ...
+    def get_installation(
+        self, tenant_id: Any, installation_id: Any, **kwargs: Any
+    ) -> dict[str, Any] | None: ...
 
     def list_installations(self, tenant_id: Any, **kwargs: Any) -> list[dict[str, Any]]: ...
 
-    def update_installation(self, tenant_id: Any, installation_id: Any, **kwargs: Any) -> dict[str, Any]: ...
+    def update_installation(
+        self, tenant_id: Any, installation_id: Any, **kwargs: Any
+    ) -> dict[str, Any]: ...
 
-    def record_credential_bindings(self, tenant_id: Any, installation_id: Any, bindings: Mapping[str, str], **kwargs: Any) -> list[dict[str, Any]]: ...
+    def record_credential_bindings(
+        self, tenant_id: Any, installation_id: Any, bindings: Mapping[str, str], **kwargs: Any
+    ) -> list[dict[str, Any]]: ...
 
-    def list_credential_bindings(self, tenant_id: Any, installation_id: Any, **kwargs: Any) -> list[dict[str, Any]]: ...
+    def list_credential_bindings(
+        self, tenant_id: Any, installation_id: Any, **kwargs: Any
+    ) -> list[dict[str, Any]]: ...
 
     def record_consent(self, tenant_id: Any, **kwargs: Any) -> dict[str, Any]: ...
 
-    def list_consents(self, tenant_id: Any, installation_id: Any, **kwargs: Any) -> list[dict[str, Any]]: ...
+    def list_consents(
+        self, tenant_id: Any, installation_id: Any, **kwargs: Any
+    ) -> list[dict[str, Any]]: ...
 
     def create_upgrade(self, tenant_id: Any, **kwargs: Any) -> dict[str, Any]: ...
 
-    def get_upgrade(self, tenant_id: Any, upgrade_id: Any, **kwargs: Any) -> dict[str, Any] | None: ...
+    def get_upgrade(
+        self, tenant_id: Any, upgrade_id: Any, **kwargs: Any
+    ) -> dict[str, Any] | None: ...
 
-    def list_upgrades(self, tenant_id: Any, installation_id: Any, **kwargs: Any) -> list[dict[str, Any]]: ...
+    def list_upgrades(
+        self, tenant_id: Any, installation_id: Any, **kwargs: Any
+    ) -> list[dict[str, Any]]: ...
 
     def update_upgrade(self, tenant_id: Any, upgrade_id: Any, **kwargs: Any) -> dict[str, Any]: ...
 
@@ -1779,9 +1808,9 @@ class UpgradeOutcome:
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class MarketplaceService:
@@ -1820,7 +1849,9 @@ class MarketplaceService:
         row = self._store.get_published_version(template_id, version_id)
         if row is None:
             raise MarketplaceError(
-                ERROR_MARKETPLACE_NOT_FOUND, "template version not found", path="template_version_id"
+                ERROR_MARKETPLACE_NOT_FOUND,
+                "template version not found",
+                path="template_version_id",
             )
         return row
 
@@ -1868,7 +1899,9 @@ class MarketplaceService:
     ) -> dict[str, Any]:
         """A submission plus its review trail; authors and tenant admins only."""
         row = self._store.get_submission(tenant_id, submission_id)
-        if row is None or not self._may_manage_submission(row, member_id=member_id, is_admin=is_admin):
+        if row is None or not self._may_manage_submission(
+            row, member_id=member_id, is_admin=is_admin
+        ):
             raise MarketplaceError(
                 ERROR_MARKETPLACE_NOT_FOUND, "submission not found", path="submission_id"
             )
@@ -1891,7 +1924,9 @@ class MarketplaceService:
         expected_revision: int | None = None,
     ) -> dict[str, Any]:
         row = self._store.get_submission(tenant_id, submission_id)
-        if row is None or not self._may_manage_submission(row, member_id=member_id, is_admin=is_admin):
+        if row is None or not self._may_manage_submission(
+            row, member_id=member_id, is_admin=is_admin
+        ):
             raise MarketplaceError(
                 ERROR_MARKETPLACE_NOT_FOUND, "submission not found", path="submission_id"
             )
@@ -1939,9 +1974,7 @@ class MarketplaceService:
                 ERROR_SUBMISSION_INVALID, "review decision is not supported", path="decision"
             )
         if note is not None and len(str(note)) > MAX_REVIEW_NOTE_LENGTH:
-            raise MarketplaceError(
-                ERROR_SUBMISSION_INVALID, "review note is too long", path="note"
-            )
+            raise MarketplaceError(ERROR_SUBMISSION_INVALID, "review note is too long", path="note")
         published_version: dict[str, Any] | None = None
         if decision == "approved":
             frozen = row.get("frozen_definition")

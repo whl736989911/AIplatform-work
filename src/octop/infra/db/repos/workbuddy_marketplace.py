@@ -29,7 +29,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow
@@ -93,7 +93,9 @@ _JOB_COLUMNS = (
 class WorkBuddyMarketplaceError(ValueError):
     """A marketplace persistence refusal carrying a stable code."""
 
-    def __init__(self, code: str, message: str, *, details: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self, code: str, message: str, *, details: Mapping[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
@@ -127,7 +129,9 @@ def _db_errors(*, code: str = ERROR_INVALID_ARGUMENT) -> Iterator[None]:
                 code, "the request references an object this tenant does not have"
             ) from exc
         if state == _SQLSTATE_CHECK:
-            raise WorkBuddyMarketplaceError(code, "the marketplace row violates its contract") from exc
+            raise WorkBuddyMarketplaceError(
+                code, "the marketplace row violates its contract"
+            ) from exc
         raise
 
 
@@ -356,7 +360,7 @@ class _AmbientTransaction:
     def __enter__(self) -> Any:
         return self._conn
 
-    def __exit__(self, *exc_info: object) -> bool:
+    def __exit__(self, *exc_info: object) -> Literal[False]:
         return False
 
 
@@ -375,7 +379,9 @@ class WorkBuddyMarketplaceRepo:
 
     # ── context helpers ──────────────────────────────────────────────────────
 
-    def _tenant_context(self, tenant_id: object, *, user_id: object = None, ctx: Any = None) -> WorkBuddyDbContext:
+    def _tenant_context(
+        self, tenant_id: object, *, user_id: object = None, ctx: Any = None
+    ) -> WorkBuddyDbContext:
         if ctx is not None:
             return coerce_workbuddy_context(ctx)
         return WorkBuddyDbContext.for_tenant(tenant_id, user_id=user_id)
@@ -502,9 +508,10 @@ class WorkBuddyMarketplaceRepo:
             if existing_template_id
             else None
         )
-        with _db_errors(code=ERROR_SUBMISSION_INVALID), workbuddy_transaction(
-            self._db, self._platform_context()
-        ) as conn:
+        with (
+            _db_errors(code=ERROR_SUBMISSION_INVALID),
+            workbuddy_transaction(self._db, self._platform_context()) as conn,
+        ):
             if template_id is None:
                 row = conn.execute(
                     "INSERT INTO marketplace_templates("
@@ -560,9 +567,7 @@ class WorkBuddyMarketplaceRepo:
                 (version_id, template_id),
             ).fetchone()
             if updated is None:
-                raise WorkBuddyMarketplaceError(
-                    ERROR_MARKETPLACE_NOT_FOUND, "template not found"
-                )
+                raise WorkBuddyMarketplaceError(ERROR_MARKETPLACE_NOT_FOUND, "template not found")
         version_payload = version_dict(version_row)
         version_payload["template_slug"] = clean_slug
         version_payload["template_name"] = str(name)
@@ -696,7 +701,7 @@ class WorkBuddyMarketplaceRepo:
             params.append(int(expected_revision))
         with _db_errors(code=ERROR_SUBMISSION_INVALID), self._transaction(context, conn) as active:
             row = active.execute(
-                f"UPDATE developer_submissions{''.join(clauses)} RETURNING {_SUBMISSION_COLUMNS}",
+                f"UPDATE developer_submissions {''.join(clauses)} RETURNING {_SUBMISSION_COLUMNS}",
                 tuple(params),
             ).fetchone()
             if row is None:
@@ -764,7 +769,7 @@ class WorkBuddyMarketplaceRepo:
             params.append(int(expected_revision))
         with _db_errors(code=ERROR_SUBMISSION_INVALID), self._transaction(context, conn) as active:
             row = active.execute(
-                f"UPDATE developer_submissions{''.join(clauses)} RETURNING {_SUBMISSION_COLUMNS}",
+                f"UPDATE developer_submissions {''.join(clauses)} RETURNING {_SUBMISSION_COLUMNS}",
                 tuple(params),
             ).fetchone()
             if row is None:
@@ -947,17 +952,17 @@ class WorkBuddyMarketplaceRepo:
             if value is not None:
                 assignments.append(f"{column} = ?")
                 params.append(value)
-        for column, value in (
+        for column, reference in (
             ("template_version_id", template_version_id),
             ("workflow_id", workflow_id),
             ("installed_version_id", installed_version_id),
             ("job_id", job_id),
         ):
-            if value is not None:
+            if reference is not None:
                 assignments.append(f"{column} = ?")
-                params.append(normalize_uuid(value, field=column))
+                params.append(normalize_uuid(reference, field=column))
         params.extend([identifier, installation])
-        clause = f" WHERE tenant_id = ? AND id = ?"
+        clause = " WHERE tenant_id = ? AND id = ?"
         if expected_revision is not None:
             clause += " AND revision = ?"
             params.append(int(expected_revision))
@@ -1211,7 +1216,11 @@ class WorkBuddyMarketplaceRepo:
         upgrade = normalize_uuid(upgrade_id, field="upgrade_id")
         assignments = ["updated_at = now()"]
         params: list[object] = []
-        for column, value in (("status", status), ("error_code", error_code), ("error_detail", error_detail)):
+        for column, value in (
+            ("status", status),
+            ("error_code", error_code),
+            ("error_detail", error_detail),
+        ):
             if value is not None:
                 assignments.append(f"{column} = ?")
                 params.append(value)
@@ -1227,9 +1236,7 @@ class WorkBuddyMarketplaceRepo:
                 tuple(params),
             ).fetchone()
             if row is None:
-                raise WorkBuddyMarketplaceError(
-                    ERROR_MARKETPLACE_NOT_FOUND, "upgrade not found"
-                )
+                raise WorkBuddyMarketplaceError(ERROR_MARKETPLACE_NOT_FOUND, "upgrade not found")
         return upgrade_dict(row)
 
     # ── marketplace jobs (shared workbuddy_jobs table) ───────────────────────
@@ -1271,7 +1278,9 @@ class WorkBuddyMarketplaceRepo:
             raise WorkBuddyMarketplaceError(ERROR_DEPENDENCY_UNAVAILABLE, "job row was not created")
         return job_dict(row)
 
-    def get_job(self, tenant_id: object, job_id: object, *, ctx: Any = None) -> dict[str, Any] | None:
+    def get_job(
+        self, tenant_id: object, job_id: object, *, ctx: Any = None
+    ) -> dict[str, Any] | None:
         identifier = normalize_uuid(tenant_id, field="tenant_id")
         job = normalize_uuid(job_id, field="job_id")
         context = self._tenant_context(identifier, ctx=ctx)
