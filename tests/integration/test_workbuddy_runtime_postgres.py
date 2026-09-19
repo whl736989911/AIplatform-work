@@ -2334,3 +2334,135 @@ async def test_a_job_reports_queued_then_running_then_its_result(
 
     listed = [row.id for row in repo.list_jobs(ctx)]
     assert job_id in listed, listed
+
+
+class _RecordingPublisher:
+    """Stands in for the broker: the contract fixes the semantics, not the channel.
+
+    The dispatcher is a system tier, so it may legitimately claim events other
+    tests committed; ``fail_for`` narrows the failure to the event under test.
+    """
+
+    def __init__(self, *, fail_for: str | None = None) -> None:
+        self.published: list[tuple[str, str, dict[str, Any]]] = []
+        self.fail_for = fail_for
+        self.attempts = 0
+        self.failed_attempts = 0
+
+    def publish(self, event: Any) -> None:
+        self.attempts += 1
+        if self.fail_for is not None and event.id == self.fail_for:
+            self.failed_attempts += 1
+            raise RuntimeError("broker refused the publish")
+        self.published.append((event.topic, event.dedupe_key, event.payload))
+
+    def deliveries_of(self, dedupe_key: str) -> list[tuple[str, str, dict[str, Any]]]:
+        return [item for item in self.published if item[1] == dedupe_key]
+
+
+def _enqueue_outbox(pool: Any, tenant: dict[str, Any], *, dedupe_key: str) -> str:
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    return WorkBuddyRuntimeRepo(pool).enqueue_outbox(
+        ctx,
+        tenant_id=tenant["tenant_id"],
+        topic="workbuddy.execution.finished",
+        dedupe_key=dedupe_key,
+        payload={"execution_id": dedupe_key.split(":")[0], "status": "success"},
+    )
+
+
+def _outbox_row(pool: Any, outbox_id: str) -> dict[str, Any]:
+    with pool.connect() as conn:
+        row = conn.execute(
+            "SELECT status, dispatched_at, attempts, last_error FROM workbuddy_outbox WHERE id = ?",
+            (outbox_id,),
+        ).fetchone()
+    return dict(row) if row is not None else {}
+
+
+def _dispatch_until_attempted(dispatcher: Any, pool: Any, outbox_id: str, attempts: int) -> None:
+    """Dispatch until this event has been attempted ``attempts`` times.
+
+    The outbox is a system queue: other tests commit events into the same
+    database, and a dispatcher pass claims the oldest batch, so the event under
+    test may not be in the first batch.
+    """
+    for _ in range(200):
+        if int(_outbox_row(pool, outbox_id).get("attempts") or 0) >= attempts:
+            return
+        if dispatcher.dispatch_once().claimed == 0:
+            break
+    raise AssertionError(
+        f"event {outbox_id} was never attempted {attempts} times: {_outbox_row(pool, outbox_id)}"
+    )
+
+
+async def test_a_committed_event_is_published_once_and_marked(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """One claim, one publish, and the row records when it happened."""
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.outbox import WorkBuddyOutboxDispatcher
+
+    outbox_id = _enqueue_outbox(pool, tenant, dedupe_key="exec-published:success")
+    publisher = _RecordingPublisher()
+    dispatcher = WorkBuddyOutboxDispatcher(pool, publisher)
+
+    _dispatch_until_attempted(dispatcher, pool, outbox_id, 1)
+
+    deliveries = publisher.deliveries_of("exec-published:success")
+    assert len(deliveries) == 1, publisher.published
+    topic, _, payload = deliveries[0]
+    assert topic == "workbuddy.execution.finished", topic
+    assert payload["status"] == "success", payload
+
+    # A delivered event is not due again: further passes publish nothing more for
+    # it, so a consumer sees exactly one delivery to de-duplicate.
+    dispatcher.dispatch_once()
+    assert len(publisher.deliveries_of("exec-published:success")) == 1, publisher.published
+
+    row = _outbox_row(pool, outbox_id)
+    assert row["status"] == "dispatched", row
+    assert row["dispatched_at"] is not None, row
+    assert int(row["attempts"]) == 1, row
+    pending = WorkBuddyRuntimeRepo(pool).list_pending_outbox(
+        WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    )
+    assert outbox_id not in [item.id for item in pending], pending
+
+
+async def test_a_refused_event_backs_off_then_is_dead_lettered(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """A broker that keeps refusing ends in a dead letter, not an endless retry."""
+    from octop.infra.workbuddy.outbox import WorkBuddyOutboxDispatcher
+
+    outbox_id = _enqueue_outbox(pool, tenant, dedupe_key="exec-refused:success")
+    publisher = _RecordingPublisher(fail_for=outbox_id)
+    dispatcher = WorkBuddyOutboxDispatcher(
+        pool, publisher, max_attempts=2, base_backoff_seconds=1, visibility_timeout_seconds=1
+    )
+
+    _dispatch_until_attempted(dispatcher, pool, outbox_id, 1)
+
+    assert publisher.failed_attempts == 1, publisher.failed_attempts
+    assert publisher.deliveries_of("exec-refused:success") == []
+    after_first = _outbox_row(pool, outbox_id)
+    assert after_first["status"] == "pending", after_first
+    assert int(after_first["attempts"]) == 1, after_first
+    assert "broker refused the publish" in str(after_first["last_error"]), after_first
+
+    # The backoff holds it back for a moment, then it is attempted once more and
+    # the ceiling turns it into a dead letter carrying the error.
+    time.sleep(1.1)
+    _dispatch_until_attempted(dispatcher, pool, outbox_id, 2)
+
+    assert publisher.failed_attempts == 2, publisher.failed_attempts
+    dead = _outbox_row(pool, outbox_id)
+    assert dead["status"] == "failed", dead
+    assert int(dead["attempts"]) == 2, dead
+    assert "broker refused the publish" in str(dead["last_error"]), dead

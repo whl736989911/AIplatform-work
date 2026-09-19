@@ -1888,17 +1888,83 @@ class WorkBuddyRuntimeRepo:
             ).fetchall()
         return [OutboxRow.from_row(r) for r in rows]
 
-    def mark_outbox_dispatched(
-        self, ctx: WorkBuddyDbContext, outbox_id: str, *, conn: Any | None = None
-    ) -> bool:
-        with runtime_transaction(self._db, ctx, conn) as c:
+    def claim_due_outbox(self, *, limit: int = 50, visibility_seconds: int = 60) -> list[OutboxRow]:
+        """Claim the oldest due events for publishing, counting one attempt each.
+
+        The claim is a system operation (contract §8.1: the API tier holds no
+        queue of its own), so it runs under the platform context and locks only
+        the rows it returns -- ``SKIP LOCKED`` keeps two dispatchers from
+        publishing the same event. The attempt is counted here, at the start,
+        because that is the moment the event may be handed to a broker: an event
+        whose dispatcher dies mid-publish must not look unattempted. The claim
+        also pushes ``available_at`` out by the visibility window, so a second
+        dispatcher cannot pick the same event up while the first is publishing;
+        if the first dies, the event becomes due again when that window lapses.
+        """
+        with runtime_transaction(self._db, WorkBuddyDbContext.platform()) as c:
+            rows = c.execute(
+                """
+                UPDATE workbuddy_outbox
+                SET attempts = attempts + 1,
+                    available_at = now() + make_interval(secs => ?)
+                WHERE (tenant_id, id) IN (
+                    SELECT tenant_id, id
+                    FROM workbuddy_outbox
+                    WHERE status = 'pending' AND available_at <= now()
+                    ORDER BY available_at, id
+                    LIMIT ?
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING *
+                """,
+                (max(1, int(visibility_seconds)), max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [OutboxRow.from_row(r) for r in rows]
+
+    def mark_outbox_dispatched(self, outbox_id: str) -> bool:
+        """Record a delivered event; the publish already happened outside PG."""
+        with runtime_transaction(self._db, WorkBuddyDbContext.platform()) as c:
             cursor = c.execute(
                 """
                 UPDATE workbuddy_outbox
-                SET status = 'dispatched', dispatched_at = now(), attempts = attempts + 1
+                SET status = 'dispatched', dispatched_at = now()
                 WHERE id = ? AND status = 'pending'
                 """,
                 (outbox_id,),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def reschedule_outbox(
+        self,
+        outbox_id: str,
+        *,
+        delay_seconds: int,
+        error: str | None = None,
+    ) -> bool:
+        """Put a failed event back in the queue, due again after the backoff."""
+        with runtime_transaction(self._db, WorkBuddyDbContext.platform()) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_outbox
+                SET status = 'pending',
+                    available_at = now() + make_interval(secs => ?),
+                    last_error = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (max(1, int(delay_seconds)), error, outbox_id),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def dead_letter_outbox(self, outbox_id: str, *, error: str | None = None) -> bool:
+        """Stop retrying an event: it stays readable with the error that killed it."""
+        with runtime_transaction(self._db, WorkBuddyDbContext.platform()) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_outbox
+                SET status = 'failed', last_error = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (error, outbox_id),
             )
             return bool(getattr(cursor, "rowcount", 0))
 
