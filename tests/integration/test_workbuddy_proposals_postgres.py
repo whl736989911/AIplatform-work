@@ -78,7 +78,16 @@ def tenant(pool: Any) -> dict[str, Any]:
         f"pp-{uuid.uuid4().hex[:8]}", "Proposal tenant", owner_user_id=owner_id
     )
     reviewer_member = repo.add_membership(tenant_row["tenant_id"], reviewer_id, role="member")
-    owner_member = repo.list_members(tenant_row["tenant_id"])[0]
+    # ``list_members`` has no ORDER BY, so taking its first row is not "the
+    # owner": on a freshly built database the heap order differed and the owner's
+    # membership id silently became the reviewer's, which turned the roster
+    # assignment below into "assign the creator" — a refusal the contract wants.
+    # Select the owner's own row instead of trusting row order.
+    owner_member = next(
+        row
+        for row in repo.list_members(tenant_row["tenant_id"])
+        if row.get("user_id") == owner_id
+    )
     return {
         "tenant_id": tenant_row["tenant_id"],
         "slug": tenant_row["slug"],
