@@ -504,7 +504,9 @@ def test_publish_requires_at_least_one_valid_approver() -> None:
 
     with pytest.raises(WorkflowCompileError) as caught:
         # Every declared approver has left the tenant.
-        definition["nodes"][0]["config"]["approver_user_ids"] = ["9d1e5b3c-7a42-4f18-8c62-5b0d9e3a7f21"]
+        definition["nodes"][0]["config"]["approver_user_ids"] = [
+            "9d1e5b3c-7a42-4f18-8c62-5b0d9e3a7f21"
+        ]
         compile_workflow_definition(definition, resolver=Resolver())
     # Nobody can approve, so the version must not reach a tenant.
     assert caught.value.code == "APPROVAL_NO_VALID_APPROVER"

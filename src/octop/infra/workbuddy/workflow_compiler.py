@@ -590,7 +590,6 @@ class _Compiler:
 
     # -- graph ------------------------------------------------------------- #
 
-
     @staticmethod
     def _check_embedded_schema(schema: Any, *, path: str) -> None:
         """Validate a node's embedded Draft 7 result schema.
@@ -604,7 +603,8 @@ class _Compiler:
             return
         if not isinstance(schema, Mapping):
             raise WorkflowCompileError(
-                WORKFLOW_SCHEMA_INVALID, "output_schema must be a schema object or boolean",
+                WORKFLOW_SCHEMA_INVALID,
+                "output_schema must be a schema object or boolean",
                 path=path,
             )
         _reject_non_local_references(schema, path=path)

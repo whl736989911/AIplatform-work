@@ -222,9 +222,7 @@ class GraphRun:
     error_message: str | None = None
     waiting_approval_node_id: str | None = None
     reconciliation_node_id: str | None = None
-    approval_candidates: dict[str, tuple[tuple[int, str | None], ...]] = field(
-        default_factory=dict
-    )
+    approval_candidates: dict[str, tuple[tuple[int, str | None], ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,16 +485,12 @@ def render_template(
         if not matches:
             return value
         if len(matches) == 1 and matches[0].group(0) == value:
-            return _resolve_reference(
-                matches[0].group(1), inputs=inputs, node_results=node_results
-            )
+            return _resolve_reference(matches[0].group(1), inputs=inputs, node_results=node_results)
         parts: list[str] = []
         cursor = 0
         for match in matches:
             parts.append(value[cursor : match.start()])
-            resolved = _resolve_reference(
-                match.group(1), inputs=inputs, node_results=node_results
-            )
+            resolved = _resolve_reference(match.group(1), inputs=inputs, node_results=node_results)
             parts.append(resolved if isinstance(resolved, str) else canonical_json(resolved))
             cursor = match.end()
         parts.append(value[cursor:])
@@ -507,9 +501,7 @@ def render_template(
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
-        return [
-            render_template(item, inputs=inputs, node_results=node_results) for item in value
-        ]
+        return [render_template(item, inputs=inputs, node_results=node_results) for item in value]
     return value
 
 
@@ -675,9 +667,7 @@ def run_graph(
         if node.type == "condition":
             raw = value.get("branch") if isinstance(value, Mapping) else None
             if raw not in {"true", "false"}:
-                raise _invalid(
-                    f"recorded condition branch for node '{node.id}' is not replayable"
-                )
+                raise _invalid(f"recorded condition branch for node '{node.id}' is not replayable")
             branch = str(raw)
         store(node, value)
         processed.add(node.id)
@@ -759,7 +749,9 @@ def run_graph(
                 )
                 value = _evaluate(
                     expression,
-                    _activation(graph, node, inputs=inputs, bindings=bindings, input_value=rendered),
+                    _activation(
+                        graph, node, inputs=inputs, bindings=bindings, input_value=rendered
+                    ),
                     node,
                 )
             except OctopError as exc:
@@ -829,9 +821,7 @@ def run_graph(
                             node,
                             "failed",
                             error_code=ErrorCode.APPROVAL_NO_VALID_APPROVER.value,
-                            error_message=(
-                                f"approval node '{node.id}' has no eligible approver"
-                            ),
+                            error_message=(f"approval node '{node.id}' has no eligible approver"),
                             timing=elapsed(),
                         )
                     )
@@ -1287,7 +1277,9 @@ def _audit_view(row: AuditLogRow) -> AuditLogView:
     )
 
 
-def _chat_session_view(row: ChatSessionRow, messages: Sequence[ChatMessageRow] = ()) -> ChatSessionView:
+def _chat_session_view(
+    row: ChatSessionRow, messages: Sequence[ChatMessageRow] = ()
+) -> ChatSessionView:
     return ChatSessionView(
         id=row.id,
         title=row.title,
@@ -1722,8 +1714,12 @@ class WorkBuddyRuntimeService:
         steps = self._repo.list_step_runs(ctx, execution_id)
         latest = _latest_attempts(steps)
         return ReplayState(
-            outputs={node_id: step.output for node_id, step in latest.items() if step.status == "success"},
-            skipped=frozenset(node_id for node_id, step in latest.items() if step.status == "skipped"),
+            outputs={
+                node_id: step.output for node_id, step in latest.items() if step.status == "success"
+            },
+            skipped=frozenset(
+                node_id for node_id, step in latest.items() if step.status == "skipped"
+            ),
             failed={
                 node_id: (step.error_code, step.error_message)
                 for node_id, step in latest.items()
@@ -2198,9 +2194,7 @@ class WorkBuddyRuntimeService:
             )
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         ctx = self._ctx(actor)
-        if not self._repo.consume_approval_token(
-            ctx, approval_request_id, token_hash=token_hash
-        ):
+        if not self._repo.consume_approval_token(ctx, approval_request_id, token_hash=token_hash):
             raise OctopError(
                 ErrorCode.APPROVAL_TOKEN_INVALID,
                 "approval token is invalid, expired, or already used",
@@ -2292,9 +2286,7 @@ class WorkBuddyRuntimeService:
         """
         self._require_postgres()
         if not actor.is_admin:
-            raise OctopError(
-                ErrorCode.FORBIDDEN, "reconciliation requires tenant admin"
-            )
+            raise OctopError(ErrorCode.FORBIDDEN, "reconciliation requires tenant admin")
         if decision not in RECONCILIATION_DECISIONS:
             raise _invalid("decision must be 'confirmed_success' or 'confirmed_failed'")
         normalized_reason = str(reason or "").strip()
@@ -2307,9 +2299,7 @@ class WorkBuddyRuntimeService:
                 "execution is not waiting for a reconciliation",
             )
         ctx = self._ctx(actor)
-        step = self._repo.find_step_run(
-            ctx, execution_id, node_id, status="waiting_reconciliation"
-        )
+        step = self._repo.find_step_run(ctx, execution_id, node_id, status="waiting_reconciliation")
         if step is None:
             raise _not_found()
         graph = self._graph_from_snapshot(execution)
@@ -2353,7 +2343,9 @@ class WorkBuddyRuntimeService:
             step.id,
             status="success" if decision == "confirmed_success" else "failed",
             output=result,
-            error_code=None if decision == "confirmed_success" else "RECONCILIATION_CONFIRMED_FAILED",
+            error_code=None
+            if decision == "confirmed_success"
+            else "RECONCILIATION_CONFIRMED_FAILED",
             error_message=None if decision == "confirmed_success" else normalized_reason,
         ):
             raise OctopError(
@@ -2521,7 +2513,10 @@ class WorkBuddyRuntimeService:
         request_hash = _hash_json(dict(request or {}))[0]
         if idempotency_key:
             existing = self._repo.get_job_by_idempotency(
-                self._ctx(actor), tenant_id=actor.tenant_id, kind=kind, idempotency_key=idempotency_key
+                self._ctx(actor),
+                tenant_id=actor.tenant_id,
+                kind=kind,
+                idempotency_key=idempotency_key,
             )
             if existing is not None:
                 if existing.request_hash != request_hash:
@@ -2581,7 +2576,9 @@ class WorkBuddyRuntimeService:
             raise _not_found()
         return _job_view(row)
 
-    def list_jobs(self, actor: RuntimeActor, *, status: str | None = None, limit: int = 50) -> list[JobView]:
+    def list_jobs(
+        self, actor: RuntimeActor, *, status: str | None = None, limit: int = 50
+    ) -> list[JobView]:
         self._require_postgres()
         rows = self._repo.list_jobs(
             self._ctx(actor), requested_by_user_id=actor.user_id, status=status, limit=limit
@@ -2642,9 +2639,7 @@ class WorkBuddyRuntimeService:
             )
         else:
             session = self._repo.get_chat_session(ctx, session_id)
-            if session is None or (
-                not actor.is_admin and session.user_id != actor.user_id
-            ):
+            if session is None or (not actor.is_admin and session.user_id != actor.user_id):
                 raise _not_found()
         history = self._repo.list_chat_messages(ctx, session_id)
         self._repo.insert_chat_message(
@@ -2654,9 +2649,7 @@ class WorkBuddyRuntimeService:
             role="user",
             content=content,
         )
-        reply = self._effects.respond_chat(
-            session_id=session_id, message=content, history=history
-        )
+        reply = self._effects.respond_chat(session_id=session_id, message=content, history=history)
         self._repo.insert_chat_message(
             ctx,
             tenant_id=actor.tenant_id,
@@ -2675,15 +2668,11 @@ class WorkBuddyRuntimeService:
         session_row = self._repo.get_chat_session(ctx, session_id)
         if session_row is None:
             raise _not_found()
-        return _chat_session_view(
-            session_row, self._repo.list_chat_messages(ctx, session_id)
-        )
+        return _chat_session_view(session_row, self._repo.list_chat_messages(ctx, session_id))
 
     def list_chat_sessions(self, actor: RuntimeActor, *, limit: int = 50) -> list[ChatSessionView]:
         self._require_postgres()
-        rows = self._repo.list_chat_sessions(
-            self._ctx(actor), user_id=actor.user_id, limit=limit
-        )
+        rows = self._repo.list_chat_sessions(self._ctx(actor), user_id=actor.user_id, limit=limit)
         return [_chat_session_view(row) for row in rows]
 
     def get_chat_session(self, actor: RuntimeActor, session_id: str) -> ChatSessionView:

@@ -179,9 +179,7 @@ async def get_execution(
     return workbuddy_envelope(request, payload)
 
 
-@router.post(
-    "/executions/{execution_id}/cancel", status_code=202, summary="Cancel an execution"
-)
+@router.post("/executions/{execution_id}/cancel", status_code=202, summary="Cancel an execution")
 async def cancel_execution(
     execution_id: str,
     request: Request,
@@ -214,9 +212,7 @@ async def resume_execution(
     return workbuddy_envelope(request, view.to_payload())
 
 
-@router.post(
-    "/executions/{execution_id}/reconciliations", summary="Record external-write evidence"
-)
+@router.post("/executions/{execution_id}/reconciliations", summary="Record external-write evidence")
 async def record_reconciliation(
     execution_id: str,
     body: ReconciliationBody,
@@ -283,9 +279,7 @@ async def get_approval_request(
 ) -> dict[str, Any]:
     service = _service(server)
     actor = _actor(principal)
-    view = service.get_approval_request(
-        actor, _uuid(approval_request_id, field="approval request")
-    )
+    view = service.get_approval_request(actor, _uuid(approval_request_id, field="approval request"))
     payload = view.to_payload()
     payload["candidates"] = [
         {"user_id": candidate.user_id, "status": candidate.status}

@@ -134,9 +134,7 @@ def _require_secret_backend(server: Any) -> Any:
         # expects an external secret manager this deployment cannot serve.
         declared = "vault" if (os.environ.get(_VAULT_ADDR_ENV) or "").strip() else "octop"
     if declared not in _SUPPORTED_SECRET_BACKENDS:
-        raise OctopError(
-            ErrorCode.DEPENDENCY_UNAVAILABLE, _SECRET_BACKEND_UNSUPPORTED
-        )
+        raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _SECRET_BACKEND_UNSUPPORTED)
     secret_repo = getattr(getattr(server, "services", None), "secret_repo", None)
     if secret_repo is None:
         raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _SECRET_STORE_UNAVAILABLE)
@@ -164,9 +162,7 @@ def _store_credential_secret(secret_repo: Any, key: str, secret: dict[str, Any] 
         blob = encrypt_credentials(secret_repo, payload)
         secret_repo.get_or_create(key, lambda: blob)
     except Exception as exc:  # noqa: BLE001 - any key/store failure must fail closed
-        raise OctopError(
-            ErrorCode.DEPENDENCY_UNAVAILABLE, _SECRET_STORE_UNAVAILABLE
-        ) from exc
+        raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _SECRET_STORE_UNAVAILABLE) from exc
 
 
 # Class-level fallbacks for refusals raised without an operation-specific code.

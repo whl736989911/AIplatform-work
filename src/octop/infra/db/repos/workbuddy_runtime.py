@@ -449,9 +449,7 @@ class AuditLogRow:
     def from_row(cls, row: Mapping[str, Any]) -> AuditLogRow:
         return cls(
             id=str(row["id"]),
-            actor_user_id=(
-                int(row["actor_user_id"]) if row["actor_user_id"] is not None else None
-            ),
+            actor_user_id=(int(row["actor_user_id"]) if row["actor_user_id"] is not None else None),
             actor_kind=str(row["actor_kind"]),
             action=str(row["action"]),
             resource_type=str(row["resource_type"]),
@@ -1829,7 +1827,12 @@ class WorkBuddyRuntimeRepo:
         return [NotificationRow.from_row(r) for r in rows]
 
     def mark_notification_read(
-        self, ctx: WorkBuddyDbContext, notification_id: str, *, user_id: int, conn: Any | None = None
+        self,
+        ctx: WorkBuddyDbContext,
+        notification_id: str,
+        *,
+        user_id: int,
+        conn: Any | None = None,
     ) -> bool:
         with runtime_transaction(self._db, ctx, conn) as c:
             cursor = c.execute(

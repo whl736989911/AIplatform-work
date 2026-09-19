@@ -294,9 +294,7 @@ async def test_condition_branches_and_joins_once(
             steps = {step["node_id"]: step for step in data["steps"]}
             assert data["outputs"]["out"] == expected, data
             # Exactly one branch ran; the other never executed.
-            taken, untaken = (
-                ("yes", "no") if expected == "accepted" else ("no", "yes")
-            )
+            taken, untaken = ("yes", "no") if expected == "accepted" else ("no", "yes")
             assert steps[taken]["status"] == "success", steps
             assert steps[untaken]["status"] == "skipped", steps
             # A branch nobody selected was not chosen, not blocked.
@@ -353,10 +351,7 @@ async def test_terminal_execution_cannot_be_cancelled(
             f"/executions/{execution_id}/cancel", json={"reason": "no longer needed"}
         )
         assert cancelled.status_code == 409, cancelled.text
-        assert (
-            cancelled.json()["error"]["code"]
-            == ErrorCode.STATE_CONFLICT.value
-        )
+        assert cancelled.json()["error"]["code"] == ErrorCode.STATE_CONFLICT.value
 
 
 async def test_suspended_tenant_cannot_start_new_executions(
@@ -371,9 +366,7 @@ async def test_suspended_tenant_cannot_start_new_executions(
         repo.suspend_tenant(tenant["tenant_id"], reason="billing review")
         suspended = _principal({**tenant})
         async with _client(app, suspended) as client:
-            refused = await client.post(
-                f"/workflows/{workflow_id}/execute", json={"inputs": {}}
-            )
+            refused = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
         assert refused.status_code == 403, refused.text
         assert refused.json()["error"]["code"] in {
             ErrorCode.TENANT_SUSPENDED.value,
@@ -500,7 +493,9 @@ class _LostResponsePort:
     def execute_llm(self, *, node: Any, activation: Any) -> Any:  # pragma: no cover
         raise AssertionError("this workflow has no llm node")
 
-    def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:  # pragma: no cover
+    def respond_chat(
+        self, *, session_id: str, message: str, history: Any
+    ) -> Any:  # pragma: no cover
         raise AssertionError("chat is not part of this workflow")
 
 
@@ -690,9 +685,7 @@ async def test_reconciliation_requires_admin_and_evidence(
         "reason": "the provider says nothing was written",
     }
     async with _client(app, _principal(tenant, role="member")) as member_client:
-        refused = await member_client.post(
-            f"/executions/{execution_id}/reconciliations", json=body
-        )
+        refused = await member_client.post(f"/executions/{execution_id}/reconciliations", json=body)
         assert refused.status_code == 403, refused.text
 
     async with _client(app, _principal(tenant)) as client:
