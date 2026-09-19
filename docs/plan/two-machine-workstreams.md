@@ -13,6 +13,70 @@
 
 ---
 
+## 0.1 对端机器如何开始（**只用 git 远端与仓库相对路径，不依赖任何本机路径**）
+
+### 仓库
+
+```
+远端：https://github.com/whl736989911/AIplatform-work.git   （origin）
+```
+
+获取代码（二选一）：
+
+```bash
+# A) 还没有本地副本
+git clone https://github.com/whl736989911/AIplatform-work.git && cd AIplatform-work
+
+# B) 已有本地副本
+git fetch origin --prune && git checkout main && git pull --ff-only
+```
+
+> 若 `main` 上还没有本文件（PR 未合并），先取它所在的分支：
+> `git fetch origin docs/two-machine-workstreams && git checkout docs/two-machine-workstreams`
+> 等合并后切回 `main` 继续。
+
+### 开工前必读（全部为仓库相对路径）
+
+| 文件 | 用途 |
+|---|---|
+| `docs/plan/two-machine-workstreams.md` | 本文件：任务表、契约、批次、协议 |
+| `docs/plan/ledger/integrator.json` | `next_batch`（当前该做第几批）、`verified`、`blocked` |
+| `docs/plan/ledger/machine-a.json` | A 线进度（对端只读） |
+| `docs/plan/ledger/machine-b.json` | B 线进度（**B 线机器写自己的**；A 线只读） |
+
+### 环境准备（同一套命令可用于 Linux / macOS / Windows）
+
+```bash
+# Python 3.12 + 依赖
+uv sync
+
+# 前端依赖（涉及前端任务时）
+cd dashboard && npm ci && cd ..
+
+# 数据库（WorkBuddy 需要 PostgreSQL + pgvector；SQLite 仅个人面）
+export OCTOP_TEST_DATABASE_URL='postgresql://<user>:<pass>@<host>:<port>/<db>'
+# 限流相关测试需要 Redis（可选）
+export OCTOP_TEST_REDIS_URL='redis://<host>:<port>/0'
+# 需要 pgvector：
+#   psql -d <db> -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+```
+
+### 定位自己的任务
+
+1. 看 `integrator.json` 的 `next_batch`（例如 `1`）→ 到第 4 节批次表找到该批次属于你那条线的任务号；
+2. 到第 2 节任务表看每个任务的"主要文件 / 依赖 / 验收"；
+3. 只改第 3 节契约 5 里属于你那条线的文件；
+4. 完成后按第 5.2 节写你自己的 ledger 并提 PR。
+
+### 分支与提交
+
+```bash
+git checkout main && git pull --ff-only
+git checkout -b feat/<你的线>-<主题>        # A 线: feat/orchestration-*；B 线: feat/rbac-kb-*
+```
+
+---
+
 ## 1. 两机分工
 
 | 机器 | 线 | 范围 | 迁移号段 | i18n 命名空间 | 分支前缀 |
