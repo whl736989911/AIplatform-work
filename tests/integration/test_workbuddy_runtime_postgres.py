@@ -16,6 +16,7 @@ Without it the module is skipped; SQLite cannot stand in for any of this.
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -164,15 +165,20 @@ def tenant(pool: Any) -> dict[str, Any]:
 
     repo = WorkBuddyIdentityRepo(pool)
     owner_id = _seed_user(pool, f"rt-owner-{uuid.uuid4().hex[:8]}")
+    reviewer_id = _seed_user(pool, f"rt-rev-{uuid.uuid4().hex[:8]}")
     tenant_row = repo.create_tenant(
         f"rt-{uuid.uuid4().hex[:8]}", "Runtime tenant", owner_user_id=owner_id
     )
-    owner_member = repo.list_members(tenant_row["tenant_id"])[0]
+    reviewer_member = repo.add_membership(tenant_row["tenant_id"], reviewer_id, role="member")
+    members = repo.list_members(tenant_row["tenant_id"])
+    owner_member = next(member for member in members if str(member.get("role")) == "owner")
     return {
         "tenant_id": tenant_row["tenant_id"],
         "slug": tenant_row["slug"],
         "owner_user_id": owner_id,
         "owner_member_id": owner_membership_id(owner_member),
+        "reviewer_user_id": reviewer_id,
+        "reviewer_member_id": owner_membership_id(reviewer_member),
     }
 
 
@@ -180,10 +186,17 @@ def owner_membership_id(member: dict[str, Any]) -> str:
     return str(member.get("membership_id") or member.get("id"))
 
 
-def _principal(tenant: dict[str, Any], *, role: str = "owner") -> WorkBuddyPrincipal:
+def _principal(
+    tenant: dict[str, Any],
+    *,
+    role: str = "owner",
+    user_id: int | None = None,
+    member_id: str | None = None,
+) -> WorkBuddyPrincipal:
+    owner = user_id is None or user_id == tenant["owner_user_id"]
     return WorkBuddyPrincipal(
         user=User(
-            id=tenant["owner_user_id"],
+            id=user_id if user_id is not None else tenant["owner_user_id"],
             username=f"rt-{tenant['tenant_id'][:8]}",
             role=Role.USER,
             display_name=None,
@@ -191,7 +204,8 @@ def _principal(tenant: dict[str, Any], *, role: str = "owner") -> WorkBuddyPrinc
         tenant_id=tenant["tenant_id"],
         tenant_slug=tenant["slug"],
         tenant_name="Runtime tenant",
-        member_id=tenant["owner_member_id"],
+        member_id=member_id
+        or (tenant["owner_member_id"] if owner else tenant["reviewer_member_id"]),
         role=role,
         department_id=None,
         member_status="active",
@@ -774,3 +788,226 @@ async def test_cancel_during_unknown_write_waits_for_evidence(
     assert settled["status"] == "canceled", settled
     assert settled["cancel_requested"] is True, settled
     assert len(lost_response.calls) == 1, lost_response.calls
+
+
+class _UsagePort:
+    """A model adapter that reports what the call spent, in the platform's shape."""
+
+    def __init__(self, *, total_tokens: int) -> None:
+        self.total_tokens = total_tokens
+        self.calls = 0
+
+    def execute_llm(self, *, node: Any, activation: Any) -> Any:
+        self.calls += 1
+        return {"text": "hello", "usage": {"total_tokens": self.total_tokens}}
+
+    def execute_tool(
+        self, *, node: Any, activation: Any, idempotency_key: str
+    ) -> Any:  # pragma: no cover
+        raise AssertionError("this workflow has no tool node")
+
+    def respond_chat(
+        self, *, session_id: str, message: str, history: Any
+    ) -> Any:  # pragma: no cover
+        raise AssertionError("chat is not part of this workflow")
+
+
+def llm_definition() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {"who": {"type": "string", "required": True, "default": "world"}},
+        "nodes": [
+            {
+                "id": "summarise",
+                "type": "llm",
+                "name": "Summarise",
+                "config": {"model": "test-model", "prompt": "summarise {{ inputs.who }}"},
+                "save_as": "summary",
+            }
+        ],
+        "edges": [],
+    }
+
+
+async def test_model_tokens_are_recorded_for_the_metrics(
+    app: FastAPI, pool: Any, tenant: dict[str, Any], monkeypatch: Any
+) -> None:
+    """The canary token metric needs a source: what the adapter reported."""
+    from octop.api.routers import workbuddy_runtime as router_module
+    from octop.infra.workbuddy.runtime import WorkBuddyRuntimeService
+
+    port = _UsagePort(total_tokens=42)
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    monkeypatch.setattr(router_module, "_service", lambda server: service)
+
+    workflow_id = _publish(pool, tenant, llm_definition(), "Token runtime")
+    async with _client(app, _principal(tenant)) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "tokens"}}
+        )
+        assert accepted.status_code == 202, accepted.text
+        execution = accepted.json()["data"]
+
+    assert port.calls == 1, port.calls
+    assert execution["status"] == "success", execution
+    assert execution["token_usage"] == 42, execution
+    assert execution["active_duration_ms"] >= 0, execution
+
+
+async def test_a_superseded_runner_cannot_commit(pool: Any, tenant: dict[str, Any]) -> None:
+    """T13: fencing, not politeness, is what stops the old worker."""
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    repo = WorkBuddyRuntimeRepo(pool)
+    lease = f"execution:{uuid.uuid4()}"
+    first = repo.acquire_lease(
+        ctx,
+        tenant_id=tenant["tenant_id"],
+        lease_name=lease,
+        holder="worker-a",
+        ttl_seconds=1,
+    )
+    assert first is not None, first
+    # While the lease is live, nobody else may take it.
+    assert (
+        repo.acquire_lease(
+            ctx,
+            tenant_id=tenant["tenant_id"],
+            lease_name=lease,
+            holder="worker-b",
+            ttl_seconds=60,
+        )
+        is None
+    ), "a live lease must not be taken over"
+
+    # Once it has expired, another runner takes over and the fence moves on.
+    time.sleep(1.2)
+    second = repo.acquire_lease(
+        ctx,
+        tenant_id=tenant["tenant_id"],
+        lease_name=lease,
+        holder="worker-b",
+        ttl_seconds=60,
+    )
+    assert second is not None and second > first, (first, second)
+
+    # The old holder can neither commit nor keep the lease alive.
+    assert (
+        repo.verify_fence(
+            ctx,
+            tenant_id=tenant["tenant_id"],
+            lease_name=lease,
+            holder="worker-a",
+            fence=first,
+        )
+        is False
+    ), "a superseded fence must not verify"
+    assert (
+        repo.verify_fence(
+            ctx,
+            tenant_id=tenant["tenant_id"],
+            lease_name=lease,
+            holder="worker-b",
+            fence=second,
+        )
+        is True
+    ), "the current holder keeps its fence"
+
+
+async def test_a_token_does_not_make_you_an_approver(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T09: holding the one-time token is not enough; the candidate list decides."""
+    definition = approval_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Approver candidate runtime")
+    async with _client(app, _principal(tenant)) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        assert accepted.status_code == 202, accepted.text
+        execution_id = accepted.json()["data"]["id"]
+        listed = await client.get("/approval-requests")
+        request_item = listed.json()["data"]["items"][0]
+        # The candidate (the owner) issues the token; a second member tries to use it.
+        challenge = await client.post(f"/approval-requests/{request_item['id']}/challenge")
+        assert challenge.status_code == 200, challenge.text
+        token = challenge.json()["token"]
+
+    outsider = _principal(
+        tenant,
+        user_id=tenant["reviewer_user_id"],
+        role="member",
+        member_id=tenant["reviewer_member_id"],
+    )
+    async with _client(app, outsider) as client:
+        refused = await client.post(
+            f"/executions/{execution_id}/resume",
+            json={
+                "approval_request_id": request_item["id"],
+                "decision": "approved",
+                "token": token,
+            },
+        )
+        # A non-candidate cannot even see the request, so the refusal is the
+        # uniform not-found rather than a distinction the tenant could probe.
+        assert refused.status_code == 404, refused.text
+        assert refused.json()["error"]["code"] == ErrorCode.RESOURCE_NOT_FOUND.value, refused.text
+
+    async with _client(app, _principal(tenant)) as client:
+        settled = await client.get(f"/executions/{execution_id}")
+    assert settled.json()["data"]["status"] == "waiting_approval", settled.text
+
+
+class _WindowStore:
+    """The limiter's sliding-window semantics in process, for the tests."""
+
+    def __init__(self) -> None:
+        self._marks: dict[str, list[int]] = {}
+
+    def admit(self, key: str, *, now_ms: int, limit: int, window_ms: int) -> int:
+        marks = [mark for mark in self._marks.get(key, []) if mark > now_ms - window_ms]
+        marks.append(now_ms)
+        self._marks[key] = marks
+        return len(marks)
+
+
+async def test_rate_limited_answers_carry_the_contract_headers(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T27: the allowance is visible, and a refusal tells the client when to retry."""
+    from octop.api.deps import get_server
+    from octop.api.routers import workbuddy_runtime as router_module
+    from octop.infra.workbuddy.ratelimit import WORKFLOW_EXECUTE_LIMIT
+
+    store = _WindowStore()
+    application = FastAPI()
+    application.include_router(router_module.router)
+
+    @application.exception_handler(OctopError)
+    async def _octop_error(_: Request, exc: OctopError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status,
+            content=exc.to_envelope(),
+            headers=dict(exc.headers or {}),
+        )
+
+    application.dependency_overrides[get_server] = lambda: SimpleNamespace(
+        services=SimpleNamespace(db=pool, rate_limit_store=store)
+    )
+
+    # A run's allowance is 20 per minute; the twenty-first must be refused.
+    workflow_id = _publish(pool, tenant, hello_definition(), "Rate limit runtime")
+    async with _client(application, _principal(tenant)) as client:
+        allowed = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        assert allowed.status_code == 202, allowed.text
+        assert allowed.headers["X-RateLimit-Limit"] == "20", allowed.headers
+
+        for _ in range(int(WORKFLOW_EXECUTE_LIMIT and 19)):
+            await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        refused = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+
+    assert refused.status_code == 429, refused.text
+    assert refused.json()["error"]["code"] == ErrorCode.RATE_LIMITED.value, refused.text
+    assert int(refused.headers["Retry-After"]) >= 1, refused.headers
+    assert refused.headers["X-RateLimit-Remaining"] == "0", refused.headers

@@ -16,13 +16,14 @@ delivery hints derived from those rows.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import secrets
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos.workbuddy_runtime import (
@@ -152,6 +153,7 @@ class StepOutcome:
     skip_reason: str | None = None
     started_at: float | None = None
     duration_ms: int | None = None
+    tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +220,7 @@ class GraphRun:
     steps: tuple[StepOutcome, ...]
     edges: tuple[EdgeOutcome, ...]
     outputs: dict[str, Any]
+    tokens: int = 0
     error_code: str | None = None
     error_message: str | None = None
     waiting_approval_node_id: str | None = None
@@ -232,6 +235,39 @@ class ChatReply:
     usage: Mapping[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CanaryRoute:
+    """How one execution is routed while a proposal evaluates a candidate.
+
+    The cohort is decided by the deterministic bucket, never by the runner, and
+    the candidate runs the candidate version while the baseline runs the version
+    the proposal fixed as its base.
+    """
+
+    proposal_id: str
+    cohort: Literal["canary", "baseline"]
+    version_id: str
+    bucket: int
+    ratio_basis_points: int
+    subject: str
+
+
+class CanaryDirectory(Protocol):
+    """Read side of the active canary, owned by the proposals slice."""
+
+    def route(self, *, tenant_id: str, workflow_id: str, subject: str) -> CanaryRoute | None: ...
+
+
+class NoCanaryEvaluation:
+    """Default: no workflow is under evaluation here."""
+
+    def route(self, *, tenant_id: str, workflow_id: str, subject: str) -> CanaryRoute | None:
+        return None
+
+
+NO_CANARY_EVALUATION = NoCanaryEvaluation()
+
+
 class SideEffectPort(Protocol):
     """Trusted adapter boundary for anything that leaves the process."""
 
@@ -244,6 +280,95 @@ class SideEffectPort(Protocol):
     def respond_chat(
         self, *, session_id: str, message: str, history: Sequence[ChatMessageRow]
     ) -> ChatReply: ...
+
+
+class ReplayUnavailable(RuntimeError):
+    """A shadow run needed a recording that does not exist.
+
+    Shadow never falls back to a live call: a missing recording fails the run,
+    which is exactly what keeps replay-only evidence honest.
+    """
+
+
+class ReplaySideEffects:
+    """Answers every step from recorded outputs, never from a live system.
+
+    The port holds no live adapter at all, so a shadow run cannot reach an
+    external system even if it wanted to: the only thing it can do with an
+    unrecorded step is fail.
+    """
+
+    def __init__(self, recordings: Mapping[str, Any]) -> None:
+        self._recordings = dict(recordings)
+        self.replayed: list[str] = []
+
+    def execute_tool(
+        self, *, node: GraphNode, activation: Mapping[str, Any], idempotency_key: str
+    ) -> Any:
+        return self._replay(node)
+
+    def execute_llm(self, *, node: GraphNode, activation: Mapping[str, Any]) -> Any:
+        return self._replay(node)
+
+    def respond_chat(
+        self, *, session_id: str, message: str, history: Sequence[ChatMessageRow]
+    ) -> Any:
+        raise ReplayUnavailable("chat has no recording to replay")
+
+    def _replay(self, node: GraphNode) -> Any:
+        if node.id not in self._recordings:
+            raise ReplayUnavailable(f"node '{node.id}' has no recorded response")
+        self.replayed.append(node.id)
+        return self._recordings[node.id]
+
+
+class ShadowRunner:
+    """Replays a candidate definition against recorded responses.
+
+    A shadow run evaluates the *candidate* graph on the recordings of an earlier
+    production execution, so it can fail or succeed on real inputs without
+    sending anything to the outside world. Its result is evidence for the shadow
+    phase; it is never a canary sample.
+    """
+
+    def __init__(self, versions: WorkflowVersionSource, db: DatabasePool | None = None) -> None:
+        self._versions = versions
+
+    def run(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        workflow_id: str,
+        candidate_version_id: str,
+        inputs: Mapping[str, Any],
+        recordings: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        locked = self._versions.load_version(ctx, workflow_id, candidate_version_id)
+        graph = compile_locked_definition(
+            locked.definition, locked.definition_sha256, version_id=locked.version_id
+        )
+        port = ReplaySideEffects(recordings)
+        run = run_graph(graph, inputs=dict(inputs), effects=port, execution_id="shadow")
+        record = {
+            "status": run.status,
+            "outputs": run.outputs,
+            "steps": [
+                {"node_id": step.node_id, "status": step.status, "output": step.output}
+                for step in run.steps
+            ],
+            "replayed": sorted(port.replayed),
+        }
+        return {
+            **record,
+            "evidence_hash": hashlib.sha256(
+                json.dumps(record, sort_keys=True, separators=(",", ":"), default=str).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            "replay_only": True,
+            "live_side_effects": 0,
+            "settled": True,
+        }
 
 
 class UnavailableSideEffects:
@@ -629,6 +754,7 @@ def run_graph(
         replayed: bool = False,
         skip_reason: str | None = None,
         timing: tuple[float, int] | None = None,
+        tokens: int = 0,
     ) -> StepOutcome:
         started_at, duration_ms = timing if timing is not None else (None, None)
         outcome = StepOutcome(
@@ -643,6 +769,7 @@ def run_graph(
             skip_reason=skip_reason,
             started_at=started_at,
             duration_ms=duration_ms,
+            tokens=int(tokens or 0),
         )
         steps.append(outcome)
         return outcome
@@ -895,7 +1022,13 @@ def run_graph(
             propagate_skip(node, failed=True)
             continue
         store(node, value)
-        record(node, "success", output=value, timing=elapsed())
+        record(
+            node,
+            "success",
+            output=value,
+            timing=elapsed(),
+            tokens=_reported_tokens(value) if node.type == "llm" else 0,
+        )
         propagate_taken(node)
 
     if reconciliation_node is not None:
@@ -904,6 +1037,7 @@ def run_graph(
             steps=tuple(steps),
             edges=tuple(edge_outcomes),
             outputs=dict(results),
+            tokens=sum(step.tokens for step in steps),
             reconciliation_node_id=reconciliation_node,
         )
     if waiting_node is not None:
@@ -912,6 +1046,7 @@ def run_graph(
             steps=tuple(steps),
             edges=tuple(edge_outcomes),
             outputs=dict(results),
+            tokens=sum(step.tokens for step in steps),
             waiting_approval_node_id=waiting_node,
             approval_candidates=approval_candidates,
         )
@@ -930,6 +1065,7 @@ def run_graph(
             steps=tuple(steps),
             edges=tuple(edge_outcomes),
             outputs=dict(results),
+            tokens=sum(step.tokens for step in steps),
             error_code=first_failure.error_code,
             error_message=first_failure.error_message,
         )
@@ -939,6 +1075,7 @@ def run_graph(
             steps=tuple(steps),
             edges=tuple(edge_outcomes),
             outputs=dict(results),
+            tokens=sum(step.tokens for step in steps),
             error_code="WORKBUDDY_EXECUTION_NO_TERMINAL",
             error_message="the workflow produced neither a successful terminal nor a failure",
         )
@@ -947,12 +1084,168 @@ def run_graph(
         steps=tuple(steps),
         edges=tuple(edge_outcomes),
         outputs=dict(results),
+        tokens=sum(step.tokens for step in steps),
     )
 
 
 # ---------------------------------------------------------------------------
 # Tenant-facing views (secret-free projections)
 # ---------------------------------------------------------------------------
+
+
+class RuntimeShadowRunner:
+    """Replays a proposal's candidate against this tenant's recordings.
+
+    The recordings are the settled step outputs of the workflow's newest
+    successful production run, so a shadow run sees the same inputs the
+    production run saw and cannot reach anything live.
+    """
+
+    def __init__(
+        self,
+        db: DatabasePool,
+        tenant_id: str,
+        *,
+        runs: int = 10,
+    ) -> None:
+        self._db = db
+        self._tenant_id = tenant_id
+        self._runs = max(int(runs), 1)
+
+    @property
+    def _ctx(self) -> WorkBuddyDbContext:
+        return WorkBuddyDbContext.for_tenant(self._tenant_id)
+
+    def _proposal(self, proposal_id: str) -> Any:
+        from octop.infra.db.repos.workbuddy_proposals import WorkBuddyProposalsRepo
+
+        record = WorkBuddyProposalsRepo(self._db, self._ctx).get_proposal(proposal_id)
+        if record is None:  # pragma: no cover - the caller resolved it already
+            raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "proposal is not visible")
+        return record
+
+    def _recordings(self, record: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        repo = WorkBuddyRuntimeRepo(self._db)
+        source_id = repo.latest_succeeded_execution(self._ctx, str(record.workflow_id))
+        if source_id is None:
+            return {}, {}
+        execution = repo.get_execution(self._ctx, source_id)
+        return repo.recorded_outputs(self._ctx, source_id), dict(
+            execution.inputs if execution is not None else {}
+        )
+
+    def can_replay(self, proposal_id: str) -> bool:
+        record = self._proposal(proposal_id)
+        recordings, _inputs = self._recordings(record)
+        return bool(recordings)
+
+    def produce(self, proposal_id: str) -> list[Any]:
+        from octop.infra.workbuddy.proposals import ShadowRunRow
+
+        record = self._proposal(proposal_id)
+        recordings, inputs = self._recordings(record)
+        if not recordings:
+            raise OctopError(
+                ErrorCode.RESOURCE_NOT_FOUND,
+                "no recorded responses are available for this workflow",
+            )
+        runner = ShadowRunner(WorkflowCatalogVersions(self._db))
+        runs: list[Any] = []
+        for index in range(self._runs):
+            outcome = runner.run(
+                self._ctx,
+                workflow_id=str(record.workflow_id),
+                candidate_version_id=str(record.candidate_version_id),
+                inputs={**inputs, "shadow_run": index},
+                recordings=recordings,
+            )
+            runs.append(
+                ShadowRunRow(
+                    run_id=f"{record.proposal_id}:{index}",
+                    settled=bool(outcome["settled"]),
+                    replay_only=bool(outcome["replay_only"]),
+                    live_side_effects=int(outcome["live_side_effects"]),
+                    evidence_hash=str(outcome["evidence_hash"]),
+                    created_at=int(time.time()),
+                )
+            )
+        return runs
+
+
+class RuntimeCanaryMetrics:
+    """Cohort metrics from the runtime's own executions, for the proposals slice.
+
+    The tenant is fixed when the adapter is built, exactly as it is for the
+    repositories, so the proposals service can ask by proposal id alone.
+    """
+
+    def __init__(self, db: DatabasePool, tenant_id: str) -> None:
+        self._db = db
+        self._tenant_id = tenant_id
+
+    @property
+    def _ctx(self) -> WorkBuddyDbContext:
+        # Built on use: constructing the adapter must not require a database.
+        return WorkBuddyDbContext.for_tenant(self._tenant_id)
+
+    def settled_rows(self, proposal_id: str, *, window_start: int, window_end: int) -> list[Any]:
+        from octop.infra.workbuddy.proposals import ExecutionMetricRow
+
+        rows = WorkBuddyRuntimeRepo(self._db).canary_metrics(
+            self._ctx, proposal_id, window_start=window_start, window_end=window_end
+        )
+        return [
+            ExecutionMetricRow(
+                cohort=row["cohort"],
+                success=row["status"] == "success",
+                active_duration_ms=row["active_duration_ms"],
+                wait_ms=row["wait_ms"],
+            )
+            for row in rows
+        ]
+
+
+class ProposalCanaryDirectory:
+    """Active canary routes from the proposals slice (read-only).
+
+    The bucket comes from the proposals module's published formula, so a route
+    computed here is the same one any other implementation of the contract
+    computes for the same subject.
+    """
+
+    def __init__(self, db: DatabasePool) -> None:
+        self._db = db
+
+    def route(self, *, tenant_id: str, workflow_id: str, subject: str) -> CanaryRoute | None:
+        try:
+            from octop.infra.db.repos.workbuddy_proposals import WorkBuddyProposalsRepo
+            from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+            from octop.infra.workbuddy.proposals import (
+                CANARY_BUCKET_MODULUS,
+                canary_bucket,
+                canary_key,
+            )
+        except ImportError as exc:  # pragma: no cover - proposals slice not deployed
+            raise OctopError(
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
+                "the proposals slice is not available",
+            ) from exc
+        ctx = WorkBuddyDbContext.for_tenant(tenant_id)
+        active = WorkBuddyProposalsRepo(self._db, ctx).active_canary(workflow_id)
+        if active is None:
+            return None
+        ratio = int(active.canary_ratio_bp or 0)
+        key = canary_key(tenant_id, str(active.workflow_id), subject)
+        bucket = canary_bucket(key)
+        candidate = bucket < ratio <= CANARY_BUCKET_MODULUS
+        return CanaryRoute(
+            proposal_id=str(active.proposal_id),
+            cohort="canary" if candidate else "baseline",
+            version_id=str(active.candidate_version_id if candidate else active.base_version_id),
+            bucket=bucket,
+            ratio_basis_points=ratio,
+            subject=subject,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -992,6 +1285,13 @@ class ExecutionView:
     started_at: str | None
     finished_at: str | None
     cancel_requested: bool = False
+    active_duration_ms: int = 0
+    token_usage: int = 0
+    cohort: str | None = None
+    proposal_id: str | None = None
+    bucket: int | None = None
+    route_canary_percent: int | None = None
+    subject: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -1003,6 +1303,13 @@ class ExecutionView:
             "inputs": _json_safe(self.inputs),
             "outputs": _json_safe(self.outputs),
             "cancel_requested": self.cancel_requested,
+            "active_duration_ms": self.active_duration_ms,
+            "token_usage": self.token_usage,
+            "cohort": self.cohort,
+            "proposal_id": self.proposal_id,
+            "bucket": self.bucket,
+            "route_canary_percent": self.route_canary_percent,
+            "subject": self.subject,
             "error_code": self.error_code,
             "error_message": self.error_message,
             "created_by_user_id": self.created_by_user_id,
@@ -1170,6 +1477,22 @@ class AuditLogView:
         }
 
 
+def _reported_tokens(value: Any) -> int:
+    """Tokens a model adapter reported, in the shape the platform's chat uses."""
+    usage = value.get("usage") if isinstance(value, Mapping) else None
+    if not isinstance(usage, Mapping):
+        return 0
+    total = usage.get("total_tokens")
+    if total is None:
+        prompt = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        completion = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+        total = prompt + completion if (prompt or completion) else 0
+    try:
+        return max(int(total), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _latest_attempts(steps: Sequence[Any]) -> dict[str, Any]:
     """Newest attempt per node: an earlier attempt must not describe the present."""
     latest: dict[str, Any] = {}
@@ -1216,6 +1539,13 @@ def _execution_view(row: ExecutionRow) -> ExecutionView:
         started_at=_iso(row.started_at),
         finished_at=_iso(row.finished_at),
         cancel_requested=row.cancel_requested_at is not None,
+        active_duration_ms=row.active_duration_ms,
+        token_usage=row.token_usage,
+        cohort=row.cohort,
+        proposal_id=row.proposal_id,
+        bucket=row.bucket,
+        route_canary_percent=row.route_canary_percent,
+        subject=row.subject,
     )
 
 
@@ -1355,6 +1685,7 @@ class WorkBuddyRuntimeService:
         versions: WorkflowVersionSource | None = None,
         effects: SideEffectPort | None = None,
         approver_resolver: Any | None = None,
+        canary: CanaryDirectory | None = None,
     ) -> None:
         self._db = db
         self._repo = repo or WorkBuddyRuntimeRepo(db)
@@ -1363,6 +1694,7 @@ class WorkBuddyRuntimeService:
         self._approver_resolver = (
             approver_resolver if approver_resolver is not None else MembershipApproverResolver(db)
         )
+        self._canary = canary or NO_CANARY_EVALUATION
 
     # -- helpers ------------------------------------------------------------
 
@@ -1604,6 +1936,7 @@ class WorkBuddyRuntimeService:
         idempotency_scope: str | None = None,
         idempotency_key: str | None = None,
         quota_limits: Mapping[str, int] | None = None,
+        subject: str | None = None,
     ) -> ExecutionView:
         """Accept one execution: suspension gate, idempotency, quota, run."""
         self._require_postgres()
@@ -1614,7 +1947,18 @@ class WorkBuddyRuntimeService:
             raise _invalid("workflow inputs exceed the maximum accepted size")
 
         ctx = self._ctx(actor)
-        locked = self._versions.load_active(ctx, workflow_id)
+        # An active canary decides which version this execution runs; the bucket
+        # is deterministic, so the same subject always lands in the same cohort.
+        route = (
+            self._canary.route(tenant_id=actor.tenant_id, workflow_id=workflow_id, subject=subject)
+            if subject
+            else None
+        )
+        locked = (
+            self._versions.load_version(ctx, workflow_id, route.version_id)
+            if route is not None
+            else self._versions.load_active(ctx, workflow_id)
+        )
         graph = compile_locked_definition(
             locked.definition, locked.definition_sha256, version_id=locked.version_id
         )
@@ -1668,6 +2012,11 @@ class WorkBuddyRuntimeService:
                 idempotency_scope=idempotency_scope if idempotency_key else None,
                 idempotency_key=idempotency_key,
                 idempotency_hash=idempotency_hash,
+                proposal_id=route.proposal_id if route is not None else None,
+                cohort="production" if route is None else route.cohort,
+                bucket=route.bucket if route is not None else None,
+                route_canary_percent=(route.ratio_basis_points if route is not None else None),
+                subject=subject,
                 conn=conn,
             ):
                 concurrent = self._existing_for_key(
@@ -1878,6 +2227,10 @@ class WorkBuddyRuntimeService:
                 error_code=run.error_code,
                 error_message=run.error_message,
                 outputs=run.outputs,
+                # Active time is what the steps measured, never the wait for a
+                # human or an operator.
+                active_duration_ms=sum(step.duration_ms or 0 for step in run.steps),
+                token_usage=run.tokens,
                 mark_finished=True,
                 conn=conn,
             )

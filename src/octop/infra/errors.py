@@ -390,6 +390,9 @@ class OctopError(Exception):
     message: str
     status: int = 0
     details: dict[str, Any] = field(default_factory=dict)
+    # Some refusals must reach the client with headers, not only a body: a
+    # rate-limited answer carries Retry-After and the X-RateLimit-* set.
+    headers: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.status == 0:

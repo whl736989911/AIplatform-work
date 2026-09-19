@@ -117,6 +117,13 @@ class ExecutionRow:
     started_at: Any
     finished_at: Any
     cancel_requested_at: Any
+    active_duration_ms: int
+    token_usage: int
+    proposal_id: str | None
+    cohort: str | None
+    bucket: int | None
+    route_canary_percent: int | None
+    subject: str | None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> ExecutionRow:
@@ -144,6 +151,13 @@ class ExecutionRow:
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             cancel_requested_at=row["cancel_requested_at"],
+            active_duration_ms=int(row["active_duration_ms"] or 0),
+            token_usage=int(row["token_usage"] or 0),
+            proposal_id=(str(row["proposal_id"]) if row["proposal_id"] else None),
+            cohort=row["cohort"],
+            bucket=row["bucket"],
+            route_canary_percent=row["route_canary_percent"],
+            subject=row["subject"],
         )
 
     @property
@@ -576,8 +590,9 @@ class WorkBuddyRuntimeRepo:
                 INSERT INTO workbuddy_executions(
                     id, tenant_id, workflow_id, workflow_version_id, workflow_version_hash,
                     definition_snapshot, status, trigger_type, idempotency_scope,
-                    idempotency_key, idempotency_hash, inputs, created_by_user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                    idempotency_key, idempotency_hash, inputs, created_by_user_id,
+                    proposal_id, cohort, bucket, route_canary_percent, subject
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rid,
@@ -640,6 +655,11 @@ class WorkBuddyRuntimeRepo:
         idempotency_scope: str | None = None,
         idempotency_key: str | None = None,
         idempotency_hash: str | None = None,
+        proposal_id: str | None = None,
+        cohort: str | None = None,
+        bucket: int | None = None,
+        route_canary_percent: int | None = None,
+        subject: str | None = None,
         conn: Any | None = None,
     ) -> bool:
         """Insert a new execution; False when the idempotency key already exists.
@@ -654,8 +674,9 @@ class WorkBuddyRuntimeRepo:
                 INSERT INTO workbuddy_executions(
                     id, tenant_id, workflow_id, workflow_version_id, workflow_version_hash,
                     definition_snapshot, status, trigger_type, idempotency_scope,
-                    idempotency_key, idempotency_hash, inputs, created_by_user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                    idempotency_key, idempotency_hash, inputs, created_by_user_id,
+                    proposal_id, cohort, bucket, route_canary_percent, subject
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (tenant_id, idempotency_scope, idempotency_key)
                   WHERE idempotency_key IS NOT NULL DO NOTHING
                 """,
@@ -672,6 +693,11 @@ class WorkBuddyRuntimeRepo:
                     idempotency_hash,
                     _jsonb(inputs),
                     created_by_user_id,
+                    proposal_id,
+                    cohort,
+                    bucket,
+                    route_canary_percent,
+                    subject,
                 ),
             )
             return bool(getattr(cursor, "rowcount", 0))
@@ -742,6 +768,8 @@ class WorkBuddyRuntimeRepo:
         error_code: str | None = None,
         error_message: str | None = None,
         outputs: JsonMap | None = None,
+        active_duration_ms: int | None = None,
+        token_usage: int | None = None,
         mark_started: bool = False,
         mark_finished: bool = False,
         conn: Any | None = None,
@@ -759,6 +787,13 @@ class WorkBuddyRuntimeRepo:
         if outputs is not None:
             assignments.append("outputs = ?")
             params.append(_jsonb(outputs))
+        if active_duration_ms is not None:
+            # Attempts add up: every attempt's measured step time is active time.
+            assignments.append("active_duration_ms = active_duration_ms + ?")
+            params.append(int(active_duration_ms))
+        if token_usage is not None:
+            assignments.append("token_usage = token_usage + ?")
+            params.append(int(token_usage))
         if mark_started:
             assignments.append("started_at = COALESCE(started_at, now())")
         if mark_finished:
@@ -791,6 +826,83 @@ class WorkBuddyRuntimeRepo:
                 (execution_id,),
             )
             return bool(getattr(cursor, "rowcount", 0))
+
+    def latest_succeeded_execution(
+        self, ctx: WorkBuddyDbContext, workflow_id: str, *, conn: Any | None = None
+    ) -> str | None:
+        """The newest successful run of a workflow: the shadow replay source."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            row = c.execute(
+                "SELECT id FROM workbuddy_executions"
+                " WHERE workflow_id = ? AND status = 'success'"
+                " ORDER BY created_at DESC, id DESC LIMIT 1",
+                (workflow_id,),
+            ).fetchone()
+        return str(row["id"]) if row is not None else None
+
+    def recorded_outputs(
+        self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
+    ) -> dict[str, Any]:
+        """What each settled step of an execution produced, by node id."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            rows = c.execute(
+                "SELECT node_id, output FROM workbuddy_step_runs"
+                " WHERE execution_id = ? AND status = 'success' AND output IS NOT NULL"
+                " ORDER BY attempt, node_id",
+                (execution_id,),
+            ).fetchall()
+        return {str(row["node_id"]): row["output"] for row in rows}
+
+    def canary_metrics(
+        self,
+        ctx: WorkBuddyDbContext,
+        proposal_id: str,
+        *,
+        window_start: int | None = None,
+        window_end: int | None = None,
+        conn: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Settled executions of one evaluation, with the time each one spent.
+
+        Active time is what the steps measured; the rest of the execution's life
+        was waiting for a human or an operator, and the contract wants the two
+        reported apart.
+        """
+        clauses = [
+            "proposal_id = ?",
+            "cohort IN ('canary', 'baseline')",
+            # Only settled executions count as samples; a parked one is still
+            # waiting and has no outcome to compare.
+            "status IN ('success', 'failed', 'partial', 'canceled')",
+        ]
+        params: list[Any] = [proposal_id]
+        if window_start is not None:
+            clauses.append("created_at >= to_timestamp(?)")
+            params.append(float(window_start))
+        if window_end is not None:
+            # The window is measured in whole seconds, so it covers the end second
+            # completely: a sample created 84ms into it is inside, not outside.
+            clauses.append("created_at < to_timestamp(?)")
+            params.append(float(window_end) + 1.0)
+        with runtime_transaction(self._db, ctx, conn) as c:
+            rows = c.execute(
+                "SELECT cohort, status, active_duration_ms, token_usage,"
+                " GREATEST(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000"
+                "          - active_duration_ms, 0) AS wait_ms"
+                f" FROM workbuddy_executions WHERE {' AND '.join(clauses)}"
+                " ORDER BY created_at, id",
+                tuple(params),
+            ).fetchall()
+        return [
+            {
+                "cohort": str(row["cohort"]),
+                "status": str(row["status"]),
+                "active_duration_ms": int(row["active_duration_ms"] or 0),
+                "token_usage": int(row["token_usage"] or 0),
+                "wait_ms": int(float(row["wait_ms"] or 0)),
+            }
+            for row in rows
+        ]
 
     def request_cancel_deferred(
         self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
