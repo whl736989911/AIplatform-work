@@ -293,12 +293,37 @@ class _NoMetrics:
         return []
 
 
+class _RecordingJobs:
+    """The job facts, recorded in memory: this suite drives the state machine."""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        self.finished: list[tuple[str, str]] = []
+
+    def start(self, *, kind: str, request: Any = None) -> str:
+        self.started.append(kind)
+        return f"job-{len(self.started)}"
+
+    def finish(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        result: Any = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> bool:
+        self.finished.append((job_id, status))
+        return True
+
+
 def _app(store: _Store, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     monkeypatch.setattr(api, "WorkBuddyProposalsRepo", lambda _db, _ctx: store)
     monkeypatch.setattr(api, "WorkBuddyCatalogRepo", lambda _db: _Catalog())
     # These unit tests drive the state machine, not a replay or an execution store.
     monkeypatch.setattr(api, "RuntimeShadowRunner", lambda _db, _tenant: _ReplayableShadow())
     monkeypatch.setattr(api, "RuntimeCanaryMetrics", lambda _db, _tenant: _NoMetrics())
+    monkeypatch.setattr(api, "RuntimeJobRecorder", lambda _db, _tenant, _user: _RecordingJobs())
     server = SimpleNamespace(services=SimpleNamespace(db=object()))
     app = FastAPI()
     app.include_router(api.router, prefix="/api/v1")

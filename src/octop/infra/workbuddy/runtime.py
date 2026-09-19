@@ -1798,6 +1798,51 @@ class MembershipApproverResolver:
         return resolved
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeJobRecorder:
+    """Record another slice's asynchronous operation in the tenant's job facts.
+
+    Contract §4.6.2 keeps jobs first-class: a client that lost a response can find
+    what it started with ``GET /jobs``. Slices whose work is a job (proposal
+    generation, document indexing, install, export) record it here instead of
+    borrowing their resource id as a job id.
+    """
+
+    db: DatabasePool
+    tenant_id: str
+    user_id: int | None = None
+
+    def start(self, *, kind: str, request: Mapping[str, Any] | None = None) -> str:
+        ctx = WorkBuddyDbContext.for_tenant(self.tenant_id, user_id=self.user_id)
+        return WorkBuddyRuntimeRepo(self.db).insert_job(
+            ctx,
+            tenant_id=self.tenant_id,
+            kind=kind,
+            requested_by_user_id=self.user_id,
+            request_hash=_hash_json(dict(request or {}))[0],
+        )
+
+    def finish(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        result: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> bool:
+        ctx = WorkBuddyDbContext.for_tenant(self.tenant_id, user_id=self.user_id)
+        return WorkBuddyRuntimeRepo(self.db).finish_job(
+            ctx,
+            job_id,
+            status=status,
+            progress=100 if status == "succeeded" else 0,
+            result=dict(result) if result is not None else None,
+            error_code=error_code,
+            error_message=error_message,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------

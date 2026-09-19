@@ -53,7 +53,11 @@ from octop.infra.workbuddy.proposals import (
     ReviewDecision,
     WorkBuddyProposalsService,
 )
-from octop.infra.workbuddy.runtime import RuntimeCanaryMetrics, RuntimeShadowRunner
+from octop.infra.workbuddy.runtime import (
+    RuntimeCanaryMetrics,
+    RuntimeJobRecorder,
+    RuntimeShadowRunner,
+)
 
 router = APIRouter()
 
@@ -217,6 +221,11 @@ def _service(server: Any, principal: WorkBuddyPrincipal) -> WorkBuddyProposalsSe
     )
 
 
+def _job_recorder(server: Any, principal: WorkBuddyPrincipal) -> Any:
+    """The tenant's job facts, which is where a generation operation belongs."""
+    return RuntimeJobRecorder(_db(server), principal.tenant_id, principal.user_id)
+
+
 def _actor(principal: WorkBuddyPrincipal) -> ProposalActor:
     return ProposalActor(
         user_id=principal.user_id,
@@ -282,6 +291,18 @@ async def create_improvement_proposal(
     """
     public_workflow = _public_id(workflow_id)
     service = _service(server, principal)
+    # Generation is a job (contract §4.6.2): a client that lost this response can
+    # find the operation under ``GET /jobs``, and the job id it is given is the
+    # job's own id rather than a re-labelled proposal id.
+    jobs = _job_recorder(server, principal)
+    job_id = jobs.start(
+        kind="improvement_proposal",
+        request={
+            "workflow_id": public_workflow,
+            "workflow_revision": body.workflow_revision,
+            "change_summary": body.change_summary,
+        },
+    )
     try:
         view = service.create(
             workflow_id=public_workflow,
@@ -291,18 +312,28 @@ async def create_improvement_proposal(
             expect_revision=body.workflow_revision,
         )
     except ProposalPolicyError as exc:
+        jobs.finish(job_id, status="failed", error_code=exc.code, error_message=exc.message)
         raise _refusal(exc) from exc
     except ProposalNotFoundError as exc:
+        jobs.finish(
+            job_id, status="failed", error_code="WORKFLOW_NOT_FOUND", error_message=str(exc)
+        )
         raise _not_found() from exc
     except WorkBuddyError as exc:
+        jobs.finish(job_id, status="failed", error_code=exc.code, error_message=exc.message)
         raise _refusal(exc) from exc
     record = view.proposal
+    jobs.finish(
+        job_id,
+        status="succeeded",
+        result={"proposal_id": record.proposal_id, "workflow_id": record.workflow_id},
+    )
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
         content=workbuddy_envelope(
             request,
             {
-                "job_id": record.proposal_id,
+                "job_id": job_id,
                 "proposal_id": record.proposal_id,
                 "workflow_id": record.workflow_id,
                 "status": record.status.value,
