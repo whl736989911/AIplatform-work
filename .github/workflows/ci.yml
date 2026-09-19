@@ -21,6 +21,32 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12"]
+    # The live-database gates need a real PostgreSQL with pgvector and a real
+    # Redis. The image is the same shape as the deployment image and the local
+    # containers, so a gate that passes here passes on a developer's machine.
+    # Windows runners cannot host service containers, so that job keeps them
+    # skipped and each Windows machine runs them against its own container.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7.4
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +66,15 @@ jobs:
 
       - name: Test
         run: make test
+
+      # The database-backed suites reset the public schema and flush Redis, so
+      # they cannot share a database with a parallel worker: this step runs them
+      # serially, after the parallel pass, against the service containers.
+      - name: Live database tests
+        env:
+          OCTOP_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          OCTOP_TEST_REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest -m "postgresql or redis" -n 0 -p no:randomly
 
   test-windows:
     name: Windows / Python 3.12
