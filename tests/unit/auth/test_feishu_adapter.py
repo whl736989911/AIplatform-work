@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import httpx
 import jwt
@@ -55,7 +56,8 @@ def test_feishu_authorize_url_omits_scope_and_uses_region_hosts(service: SsoServ
         code_challenge="challenge",
         redirect_uri="https://octop.example/api/auth/oauth/callback",
     )
-    assert "accounts.larksuite.com" in url
+    # 断言主机本身，而不是「url 里出现过这个字符串」（CodeQL: incomplete URL substring sanitization）
+    assert urlsplit(url).hostname == "accounts.larksuite.com"
     query = httpx.QueryParams(url.split("?", 1)[1])
     assert query["client_id"] == "cli_xxx"
     assert query["response_type"] == "code"
