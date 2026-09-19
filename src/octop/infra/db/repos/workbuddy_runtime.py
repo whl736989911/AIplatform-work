@@ -1699,6 +1699,20 @@ class WorkBuddyRuntimeRepo:
             return bool(getattr(cursor, "rowcount", 0))
 
     # -- quota --------------------------------------------------------------
+    def lock_tenant_quota(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        tenant_id: str,
+        conn: Any,
+    ) -> None:
+        """Serialize quota checks and reservations for one tenant transaction."""
+        row = conn.execute(
+            "SELECT tenant_id FROM workbuddy_tenants WHERE tenant_id = ? FOR UPDATE",
+            (tenant_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("tenant does not exist")
 
     def reserve_quota(
         self,
@@ -1753,7 +1767,7 @@ class WorkBuddyRuntimeRepo:
         execution_id: str | None = None,
         conn: Any | None = None,
     ) -> list[QuotaReservationRow]:
-        clauses = ["tenant_id = ?", "status = 'reserved'"]
+        clauses = ["tenant_id = ?", "status = 'reserved'", "expires_at > now()"]
         params: list[Any] = [tenant_id]
         if quota_key is not None:
             clauses.append("quota_key = ?")

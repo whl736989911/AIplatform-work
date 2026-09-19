@@ -797,6 +797,18 @@ async def test_cancel_during_unknown_write_waits_for_evidence(
     assert settled["status"] == "canceled", settled
     assert settled["cancel_requested"] is True, settled
     assert len(lost_response.calls) == 1, lost_response.calls
+    # A terminal run keeps nothing live: the cancelled execution released its slot
+    # and settled its monthly reservation instead of leaking them until expiry.
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    assert (
+        WorkBuddyRuntimeRepo(pool).list_live_quota_reservations(
+            ctx, tenant_id=tenant["tenant_id"], execution_id=execution_id
+        )
+        == []
+    )
 
 
 class _UsagePort:
@@ -1287,41 +1299,55 @@ async def test_in_flight_execution_finishes_under_suspension(
     assert settled.json()["data"]["status"] in {"success", "running"}, settled.text
 
 
-async def test_concurrent_runs_compete_for_the_tenant_quota(
+async def test_approval_wait_releases_and_resume_reacquires_the_running_slot(
     app: FastAPI, pool: Any, tenant: dict[str, Any]
 ) -> None:
-    """T14: a parked run holds its slot, and settling it frees the next start."""
+    """T14: approval wait frees concurrency; final approval reacquires it atomically."""
     from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
     from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
     from octop.infra.db.workbuddy_context import WorkBuddyDbContext
 
     identity = WorkBuddyIdentityRepo(pool)
+    repo = WorkBuddyRuntimeRepo(pool)
     prior = {row["metric"]: row["limit"] for row in identity.get_quotas(tenant["tenant_id"])}
-    # Other tests share this tenant, and a run one of them left parked still holds
-    # its reservation, so the ceiling is measured from what is live right now.
     ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
-    held = len(
-        WorkBuddyRuntimeRepo(pool).list_live_quota_reservations(
-            ctx, tenant_id=tenant["tenant_id"], quota_key="executions"
+    baseline = sum(
+        item.amount
+        for item in repo.list_live_quota_reservations(
+            ctx, tenant_id=tenant["tenant_id"], quota_key="concurrency"
         )
     )
-    allowed = held + 1  # one more run fits, and one after that does not
     definition = approval_definition([tenant["owner_member_id"]])
-    workflow_id = _publish(pool, tenant, definition, "Quota runtime")
+    workflow_id = _publish(pool, tenant, definition, "Quota wait runtime")
+    blocker_id: str | None = None
+    second_id: str | None = None
     try:
         identity.set_quotas(
-            tenant["tenant_id"], {"concurrency": allowed}, actor_user_id=tenant["owner_user_id"]
+            tenant["tenant_id"],
+            {"concurrency": baseline + 1},
+            actor_user_id=tenant["owner_user_id"],
         )
         async with _client(app, _principal(tenant)) as client:
             first = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
-            assert first.status_code == 202, first.text
-            first_id = first.json()["data"]["id"]
-
-            # The first run is parked at its approval, so its slot stays in use.
             second = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
-            assert second.status_code == 429, second.text
-            assert second.json()["error"]["code"] == ErrorCode.QUOTA_EXCEEDED.value, second.text
+            assert first.status_code == 202, first.text
+            assert second.status_code == 202, second.text
+            first_id = first.json()["data"]["id"]
+            second_id = second.json()["data"]["id"]
 
+            live_after_wait = repo.list_live_quota_reservations(
+                ctx, tenant_id=tenant["tenant_id"], quota_key="concurrency"
+            )
+            assert sum(item.amount for item in live_after_wait) == baseline
+
+            blocker_id = repo.reserve_quota(
+                ctx,
+                tenant_id=tenant["tenant_id"],
+                quota_key="concurrency",
+                amount=1,
+                scope="execution",
+                execution_id=str(uuid.uuid4()),
+            )
             listed = await client.get("/approval-requests")
             approval_id = next(
                 item["id"]
@@ -1329,20 +1355,138 @@ async def test_concurrent_runs_compete_for_the_tenant_quota(
                 if item["status"] == "pending" and item["execution_id"] == first_id
             )
             challenge = await client.post(f"/approval-requests/{approval_id}/challenge")
+            token = challenge.json()["token"]
+
+            blocked = await client.post(
+                f"/executions/{first_id}/resume",
+                json={
+                    "approval_request_id": approval_id,
+                    "decision": "approved",
+                    "token": token,
+                },
+            )
+            assert blocked.status_code == 429, blocked.text
+            assert blocked.json()["error"]["code"] == ErrorCode.QUOTA_EXCEEDED.value
+            pending = await client.get(f"/approval-requests/{approval_id}")
+            assert pending.json()["data"]["status"] == "pending", pending.text
+
+            assert repo.settle_quota_reservation(ctx, blocker_id, status="released")
+            blocker_id = None
             resumed = await client.post(
                 f"/executions/{first_id}/resume",
                 json={
                     "approval_request_id": approval_id,
                     "decision": "approved",
-                    "token": challenge.json()["token"],
+                    "token": token,
                 },
             )
             assert resumed.status_code == 200, resumed.text
-
-            # Settling the first execution released the slot it held.
-            third = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
-            assert third.status_code == 202, third.text
+            assert resumed.json()["data"]["status"] == "success", resumed.text
     finally:
+        if blocker_id is not None:
+            repo.settle_quota_reservation(ctx, blocker_id, status="released")
+        if second_id is not None:
+            async with _client(app, _principal(tenant)) as cleanup_client:
+                await cleanup_client.post(f"/executions/{second_id}/cancel")
+        identity.set_quotas(
+            tenant["tenant_id"],
+            {"concurrency": prior["concurrency"]},
+            actor_user_id=tenant["owner_user_id"],
+        )
+
+
+def test_overlapping_runs_cannot_oversubscribe_the_tenant_slot(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T14: an actually running tool call owns the only available tenant slot."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+
+    class BlockingToolPort:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.calls = 0
+
+        def execute_tool(
+            self, *, node: Any, activation: Any, idempotency_key: str
+        ) -> dict[str, bool]:
+            self.calls += 1
+            self.entered.set()
+            if not self.release.wait(timeout=10):
+                raise AssertionError("test did not release the blocked tool")
+            return {"ok": True}
+
+        def execute_llm(self, *, node: Any, activation: Any) -> Any:
+            raise AssertionError("this workflow has no llm node")
+
+        def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:
+            raise AssertionError("chat is not part of this workflow")
+
+    definition = {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {},
+        "nodes": [
+            {
+                "id": "block",
+                "type": "tool",
+                "name": "Hold the running slot",
+                "config": {"tool_name": "test.block", "parameters": {}},
+            }
+        ],
+        "edges": [],
+    }
+    workflow_id = _publish(pool, tenant, definition, "Concurrent quota runtime")
+    identity = WorkBuddyIdentityRepo(pool)
+    repo = WorkBuddyRuntimeRepo(pool)
+    prior = {row["metric"]: row["limit"] for row in identity.get_quotas(tenant["tenant_id"])}
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    baseline = sum(
+        item.amount
+        for item in repo.list_live_quota_reservations(
+            ctx, tenant_id=tenant["tenant_id"], quota_key="concurrency"
+        )
+    )
+    identity.set_quotas(
+        tenant["tenant_id"],
+        {"concurrency": baseline + 1},
+        actor_user_id=tenant["owner_user_id"],
+    )
+    port = BlockingToolPort()
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    actor = RuntimeActor(
+        tenant_id=tenant["tenant_id"],
+        user_id=tenant["owner_user_id"],
+        role="owner",
+        tenant_status="active",
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(
+                service.start_execution,
+                actor,
+                workflow_id=workflow_id,
+                inputs={},
+            )
+            assert port.entered.wait(timeout=10), "first run never entered its tool"
+            with pytest.raises(OctopError) as refused:
+                service.start_execution(actor, workflow_id=workflow_id, inputs={})
+            assert refused.value.code == ErrorCode.QUOTA_EXCEEDED
+            assert port.calls == 1
+            port.release.set()
+            assert first.result(timeout=10).status == "success"
+
+        third = service.start_execution(actor, workflow_id=workflow_id, inputs={})
+        assert third.status == "success"
+        assert port.calls == 2
+    finally:
+        port.release.set()
         identity.set_quotas(
             tenant["tenant_id"],
             {"concurrency": prior["concurrency"]},
