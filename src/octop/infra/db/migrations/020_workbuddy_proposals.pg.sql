@@ -154,6 +154,9 @@ CREATE TABLE IF NOT EXISTS workbuddy_proposal_evaluations (
   candidate_p95_latency_ms DOUBLE PRECISION NOT NULL,
   baseline_avg_tokens      DOUBLE PRECISION NOT NULL,
   candidate_avg_tokens     DOUBLE PRECISION NOT NULL,
+  -- Approval and reconciliation waits, reported separately from active time.
+  baseline_wait_ms         DOUBLE PRECISION NOT NULL DEFAULT 0,
+  candidate_wait_ms        DOUBLE PRECISION NOT NULL DEFAULT 0,
   safety_violations        INTEGER NOT NULL DEFAULT 0,
   passed                   BOOLEAN NOT NULL,
   safety_stop              BOOLEAN NOT NULL,
@@ -164,7 +167,8 @@ CREATE TABLE IF NOT EXISTS workbuddy_proposal_evaluations (
   CONSTRAINT workbuddy_proposal_evaluations_phase_check CHECK (phase IN ('shadow','canary')),
   CONSTRAINT workbuddy_proposal_evaluations_window_check CHECK (window_end >= window_start),
   CONSTRAINT workbuddy_proposal_evaluations_counts_check CHECK (
-    baseline_settled_runs >= 0 AND candidate_settled_runs >= 0 AND safety_violations >= 0 AND full_days >= 0
+    baseline_settled_runs >= 0 AND candidate_settled_runs >= 0 AND safety_violations >= 0
+    AND full_days >= 0 AND baseline_wait_ms >= 0 AND candidate_wait_ms >= 0
   ),
   CONSTRAINT workbuddy_proposal_evaluations_rates_check CHECK (
     baseline_success_rate BETWEEN 0 AND 1 AND candidate_success_rate BETWEEN 0 AND 1

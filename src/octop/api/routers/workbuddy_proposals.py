@@ -53,6 +53,7 @@ from octop.infra.workbuddy.proposals import (
     ReviewDecision,
     WorkBuddyProposalsService,
 )
+from octop.infra.workbuddy.runtime import RuntimeCanaryMetrics
 
 router = APIRouter()
 
@@ -205,6 +206,8 @@ def _service(server: Any, principal: WorkBuddyPrincipal) -> WorkBuddyProposalsSe
     return WorkBuddyProposalsService(
         _repo(server, principal),
         policy=policy,
+        # The gates are judged on the executions this tenant actually ran.
+        metrics=RuntimeCanaryMetrics(_db(server), principal.tenant_id),
     )
 
 

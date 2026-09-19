@@ -564,7 +564,8 @@ class WorkBuddyProposalsRepo:
                 " candidate_settled_runs, baseline_success_rate, candidate_success_rate,"
                 " baseline_p95_latency_ms, candidate_p95_latency_ms, baseline_avg_tokens,"
                 " candidate_avg_tokens, safety_violations, passed, safety_stop, full_days,"
-                " failures, created_at FROM workbuddy_proposal_evaluations"
+                " failures, created_at, baseline_wait_ms, candidate_wait_ms"
+                " FROM workbuddy_proposal_evaluations"
                 " WHERE tenant_id = ? AND proposal_id = ? ORDER BY created_at, evaluation_id",
                 (tenant_id, public_id),
             )
@@ -599,8 +600,9 @@ class WorkBuddyProposalsRepo:
                 " baseline_settled_runs, candidate_settled_runs, baseline_success_rate,"
                 " candidate_success_rate, baseline_p95_latency_ms, candidate_p95_latency_ms,"
                 " baseline_avg_tokens, candidate_avg_tokens, safety_violations, passed,"
-                " safety_stop, full_days, failures, created_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " safety_stop, full_days, failures, created_at,"
+                " baseline_wait_ms, candidate_wait_ms"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     tenant_id,
                     evaluation_id,
@@ -622,6 +624,8 @@ class WorkBuddyProposalsRepo:
                     int(verdict.full_days),
                     _dump(list(verdict.failures)),
                     created_at,
+                    float(evaluation.baseline.wait_ms),
+                    float(evaluation.candidate.wait_ms),
                 ),
             )
             row = self._one(
@@ -630,7 +634,8 @@ class WorkBuddyProposalsRepo:
                 " candidate_settled_runs, baseline_success_rate, candidate_success_rate,"
                 " baseline_p95_latency_ms, candidate_p95_latency_ms, baseline_avg_tokens,"
                 " candidate_avg_tokens, safety_violations, passed, safety_stop, full_days,"
-                " failures, created_at FROM workbuddy_proposal_evaluations"
+                " failures, created_at, baseline_wait_ms, candidate_wait_ms"
+                " FROM workbuddy_proposal_evaluations"
                 " WHERE tenant_id = ? AND evaluation_id = ?",
                 (tenant_id, evaluation_id),
             )
@@ -883,6 +888,7 @@ def _evaluation_from_row(row: DbRow) -> EvaluationRow:
         p95_latency_ms=float(row["baseline_p95_latency_ms"]),
         avg_tokens=float(row["baseline_avg_tokens"]),
         safety_violations=0,
+        wait_ms=float(row["baseline_wait_ms"] or 0),
     )
     candidate = PhaseMetrics(
         settled_runs=_int(row["candidate_settled_runs"]),
@@ -890,6 +896,7 @@ def _evaluation_from_row(row: DbRow) -> EvaluationRow:
         p95_latency_ms=float(row["candidate_p95_latency_ms"]),
         avg_tokens=float(row["candidate_avg_tokens"]),
         safety_violations=_int(row["safety_violations"]),
+        wait_ms=float(row["candidate_wait_ms"] or 0),
     )
     failures = _as_json(row["failures"]) or []
     return EvaluationRow(

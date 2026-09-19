@@ -774,3 +774,68 @@ async def test_cancel_during_unknown_write_waits_for_evidence(
     assert settled["status"] == "canceled", settled
     assert settled["cancel_requested"] is True, settled
     assert len(lost_response.calls) == 1, lost_response.calls
+
+
+class _UsagePort:
+    """A model adapter that reports what the call spent, in the platform's shape."""
+
+    def __init__(self, *, total_tokens: int) -> None:
+        self.total_tokens = total_tokens
+        self.calls = 0
+
+    def execute_llm(self, *, node: Any, activation: Any) -> Any:
+        self.calls += 1
+        return {"text": "hello", "usage": {"total_tokens": self.total_tokens}}
+
+    def execute_tool(
+        self, *, node: Any, activation: Any, idempotency_key: str
+    ) -> Any:  # pragma: no cover
+        raise AssertionError("this workflow has no tool node")
+
+    def respond_chat(
+        self, *, session_id: str, message: str, history: Any
+    ) -> Any:  # pragma: no cover
+        raise AssertionError("chat is not part of this workflow")
+
+
+def llm_definition() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {"who": {"type": "string", "required": True, "default": "world"}},
+        "nodes": [
+            {
+                "id": "summarise",
+                "type": "llm",
+                "name": "Summarise",
+                "config": {"model": "test-model", "prompt": "summarise {{ inputs.who }}"},
+                "save_as": "summary",
+            }
+        ],
+        "edges": [],
+    }
+
+
+async def test_model_tokens_are_recorded_for_the_metrics(
+    app: FastAPI, pool: Any, tenant: dict[str, Any], monkeypatch: Any
+) -> None:
+    """The canary token metric needs a source: what the adapter reported."""
+    from octop.api.routers import workbuddy_runtime as router_module
+    from octop.infra.workbuddy.runtime import WorkBuddyRuntimeService
+
+    port = _UsagePort(total_tokens=42)
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    monkeypatch.setattr(router_module, "_service", lambda server: service)
+
+    workflow_id = _publish(pool, tenant, llm_definition(), "Token runtime")
+    async with _client(app, _principal(tenant)) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "tokens"}}
+        )
+        assert accepted.status_code == 202, accepted.text
+        execution = accepted.json()["data"]
+
+    assert port.calls == 1, port.calls
+    assert execution["status"] == "success", execution
+    assert execution["token_usage"] == 42, execution
+    assert execution["active_duration_ms"] >= 0, execution

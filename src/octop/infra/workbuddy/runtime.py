@@ -152,6 +152,7 @@ class StepOutcome:
     skip_reason: str | None = None
     started_at: float | None = None
     duration_ms: int | None = None
+    tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +219,7 @@ class GraphRun:
     steps: tuple[StepOutcome, ...]
     edges: tuple[EdgeOutcome, ...]
     outputs: dict[str, Any]
+    tokens: int = 0
     error_code: str | None = None
     error_message: str | None = None
     waiting_approval_node_id: str | None = None
@@ -662,6 +664,7 @@ def run_graph(
         replayed: bool = False,
         skip_reason: str | None = None,
         timing: tuple[float, int] | None = None,
+        tokens: int = 0,
     ) -> StepOutcome:
         started_at, duration_ms = timing if timing is not None else (None, None)
         outcome = StepOutcome(
@@ -676,6 +679,7 @@ def run_graph(
             skip_reason=skip_reason,
             started_at=started_at,
             duration_ms=duration_ms,
+            tokens=int(tokens or 0),
         )
         steps.append(outcome)
         return outcome
@@ -928,7 +932,13 @@ def run_graph(
             propagate_skip(node, failed=True)
             continue
         store(node, value)
-        record(node, "success", output=value, timing=elapsed())
+        record(
+            node,
+            "success",
+            output=value,
+            timing=elapsed(),
+            tokens=_reported_tokens(value) if node.type == "llm" else 0,
+        )
         propagate_taken(node)
 
     if reconciliation_node is not None:
@@ -937,6 +947,7 @@ def run_graph(
             steps=tuple(steps),
             edges=tuple(edge_outcomes),
             outputs=dict(results),
+            tokens=sum(step.tokens for step in steps),
             reconciliation_node_id=reconciliation_node,
         )
     if waiting_node is not None:
@@ -945,6 +956,7 @@ def run_graph(
             steps=tuple(steps),
             edges=tuple(edge_outcomes),
             outputs=dict(results),
+            tokens=sum(step.tokens for step in steps),
             waiting_approval_node_id=waiting_node,
             approval_candidates=approval_candidates,
         )
@@ -963,6 +975,7 @@ def run_graph(
             steps=tuple(steps),
             edges=tuple(edge_outcomes),
             outputs=dict(results),
+            tokens=sum(step.tokens for step in steps),
             error_code=first_failure.error_code,
             error_message=first_failure.error_message,
         )
@@ -972,6 +985,7 @@ def run_graph(
             steps=tuple(steps),
             edges=tuple(edge_outcomes),
             outputs=dict(results),
+            tokens=sum(step.tokens for step in steps),
             error_code="WORKBUDDY_EXECUTION_NO_TERMINAL",
             error_message="the workflow produced neither a successful terminal nor a failure",
         )
@@ -980,12 +994,41 @@ def run_graph(
         steps=tuple(steps),
         edges=tuple(edge_outcomes),
         outputs=dict(results),
+        tokens=sum(step.tokens for step in steps),
     )
 
 
 # ---------------------------------------------------------------------------
 # Tenant-facing views (secret-free projections)
 # ---------------------------------------------------------------------------
+
+
+class RuntimeCanaryMetrics:
+    """Cohort metrics from the runtime's own executions, for the proposals slice.
+
+    The tenant is fixed when the adapter is built, exactly as it is for the
+    repositories, so the proposals service can ask by proposal id alone.
+    """
+
+    def __init__(self, db: DatabasePool, tenant_id: str) -> None:
+        self._db = db
+        self._ctx = WorkBuddyDbContext.for_tenant(tenant_id)
+
+    def settled_rows(self, proposal_id: str, *, window_start: int, window_end: int) -> list[Any]:
+        from octop.infra.workbuddy.proposals import ExecutionMetricRow
+
+        rows = WorkBuddyRuntimeRepo(self._db).canary_metrics(
+            self._ctx, proposal_id, window_start=window_start, window_end=window_end
+        )
+        return [
+            ExecutionMetricRow(
+                cohort=row["cohort"],
+                success=row["status"] == "success",
+                active_duration_ms=row["active_duration_ms"],
+                wait_ms=row["wait_ms"],
+            )
+            for row in rows
+        ]
 
 
 class ProposalCanaryDirectory:
@@ -1068,6 +1111,8 @@ class ExecutionView:
     started_at: str | None
     finished_at: str | None
     cancel_requested: bool = False
+    active_duration_ms: int = 0
+    token_usage: int = 0
     cohort: str | None = None
     proposal_id: str | None = None
     bucket: int | None = None
@@ -1084,6 +1129,8 @@ class ExecutionView:
             "inputs": _json_safe(self.inputs),
             "outputs": _json_safe(self.outputs),
             "cancel_requested": self.cancel_requested,
+            "active_duration_ms": self.active_duration_ms,
+            "token_usage": self.token_usage,
             "cohort": self.cohort,
             "proposal_id": self.proposal_id,
             "bucket": self.bucket,
@@ -1256,6 +1303,22 @@ class AuditLogView:
         }
 
 
+def _reported_tokens(value: Any) -> int:
+    """Tokens a model adapter reported, in the shape the platform's chat uses."""
+    usage = value.get("usage") if isinstance(value, Mapping) else None
+    if not isinstance(usage, Mapping):
+        return 0
+    total = usage.get("total_tokens")
+    if total is None:
+        prompt = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        completion = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+        total = prompt + completion if (prompt or completion) else 0
+    try:
+        return max(int(total), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _latest_attempts(steps: Sequence[Any]) -> dict[str, Any]:
     """Newest attempt per node: an earlier attempt must not describe the present."""
     latest: dict[str, Any] = {}
@@ -1302,6 +1365,8 @@ def _execution_view(row: ExecutionRow) -> ExecutionView:
         started_at=_iso(row.started_at),
         finished_at=_iso(row.finished_at),
         cancel_requested=row.cancel_requested_at is not None,
+        active_duration_ms=row.active_duration_ms,
+        token_usage=row.token_usage,
         cohort=row.cohort,
         proposal_id=row.proposal_id,
         bucket=row.bucket,
@@ -1988,6 +2053,10 @@ class WorkBuddyRuntimeService:
                 error_code=run.error_code,
                 error_message=run.error_message,
                 outputs=run.outputs,
+                # Active time is what the steps measured, never the wait for a
+                # human or an operator.
+                active_duration_ms=sum(step.duration_ms or 0 for step in run.steps),
+                token_usage=run.tokens,
                 mark_finished=True,
                 conn=conn,
             )

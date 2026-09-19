@@ -610,3 +610,58 @@ async def test_production_runs_carry_no_proposal(
     assert execution["route_canary_percent"] is None, execution
     assert execution["bucket"] is None, execution
     assert execution["workflow_version_id"] == workflow["version_id"], execution
+
+
+async def test_apply_is_judged_on_recorded_canary_executions(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """The gate verdict comes from the cohort executions, not from a claim."""
+    workflow = _publish(pool, tenant, "Proposal canary evidence")
+    ratio = 5000
+    proposal_id, _candidate = await _walk_to_canary(app, pool, tenant, workflow, ratio=ratio)
+
+    # One execution per cohort, chosen through the published formula.
+    subjects = [f"user:{uuid.uuid4()}" for _ in range(40)]
+    candidate_subject = next(
+        subject
+        for subject in subjects
+        if _expected_route(tenant["tenant_id"], workflow["workflow_id"], subject, ratio)[0]
+        == "canary"
+    )
+    baseline_subject = next(
+        subject
+        for subject in subjects
+        if _expected_route(tenant["tenant_id"], workflow["workflow_id"], subject, ratio)[0]
+        == "baseline"
+    )
+    for subject in (candidate_subject, baseline_subject):
+        principal = _principal(tenant, member_id=subject.split(":", 1)[1])
+        async with _client(app, principal) as client:
+            accepted = await client.post(
+                f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {}}
+            )
+            assert accepted.status_code == 202, accepted.text
+
+    async with _client(app, _principal(tenant)) as client:
+        refused = await client.post(
+            f"/improvement-proposals/{proposal_id}/promote",
+            json={"action": "apply"},
+            headers={"If-Match": f'"{workflow["revision"]}"'},
+        )
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["error"]["code"] == ErrorCode.PROPOSAL_GATE_NOT_MET.value
+        failures = set(refused.json()["error"]["details"]["failures"])
+        # Evidence was computed from the executions: the floor and the window are
+        # what refuse this promotion, not a missing evaluation.
+        assert "no_canary_evaluation" not in failures, failures
+        assert {"insufficient_window", "insufficient_baseline_samples"} <= failures, failures
+
+        detail = await client.get(f"/improvement-proposals/{proposal_id}")
+        evaluations = detail.json()["data"]["evaluations"]
+        assert evaluations, detail.text
+
+    latest = evaluations[-1]
+    assert latest["baseline"]["settled_runs"] >= 1, latest
+    assert latest["candidate"]["settled_runs"] >= 1, latest
+    # Waits are reported next to active time instead of hiding inside it.
+    assert "wait_ms" in latest["baseline"], latest

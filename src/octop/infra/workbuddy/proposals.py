@@ -75,6 +75,8 @@ __all__ = [
     "canary_bucket",
     "canary_key",
     "canary_lane",
+    "ExecutionMetricRow",
+    "canary_evidence_from_rows",
     "classification_for",
     "compile_proposal",
     "definition_hash",
@@ -83,6 +85,7 @@ __all__ = [
     "evaluate_shadow_proof",
     "is_canary_selected",
     "parse_patch",
+    "phase_metrics",
     "semantic_diff",
     "transition_for",
     "validate_definition",
@@ -1080,6 +1083,9 @@ class PhaseMetrics:
     p95_latency_ms: float
     avg_tokens: float
     safety_violations: int = 0
+    # Approval and reconciliation waits, reported separately: hiding them inside
+    # the active average would make a slower candidate look faster.
+    wait_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1127,6 +1133,55 @@ class GateVerdict:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionMetricRow:
+    """One settled execution, as the metrics reader sees it."""
+
+    cohort: str
+    success: bool
+    active_duration_ms: int
+    wait_ms: int = 0
+    tokens: float = 0.0
+    safety_violations: int = 0
+
+
+def _p95(values: Sequence[int]) -> float:
+    """Nearest-rank p95: deterministic, and defined for every sample size."""
+    if not values:
+        return 0.0
+    ordered = sorted(int(value) for value in values)
+    index = max(0, min(len(ordered) - 1, -(-95 * len(ordered) // 100) - 1))
+    return float(ordered[index])
+
+
+def phase_metrics(rows: Sequence[ExecutionMetricRow]) -> PhaseMetrics:
+    """Aggregate one cohort; only settled executions are counted."""
+    settled = list(rows)
+    if not settled:
+        return PhaseMetrics(settled_runs=0, success_rate=0.0, p95_latency_ms=0.0, avg_tokens=0.0)
+    successes = sum(1 for row in settled if row.success)
+    return PhaseMetrics(
+        settled_runs=len(settled),
+        success_rate=successes / len(settled),
+        p95_latency_ms=_p95([row.active_duration_ms for row in settled]),
+        avg_tokens=sum(float(row.tokens) for row in settled) / len(settled),
+        safety_violations=sum(int(row.safety_violations) for row in settled),
+        wait_ms=sum(int(row.wait_ms) for row in settled) / len(settled),
+    )
+
+
+def canary_evidence_from_rows(
+    rows: Sequence[ExecutionMetricRow], *, window_start: int, window_end: int
+) -> CanaryEvidence:
+    """The evaluation evidence a canary proposal is judged on."""
+    return CanaryEvidence(
+        window_start=int(window_start),
+        window_end=int(window_end),
+        baseline=phase_metrics([row for row in rows if row.cohort == "baseline"]),
+        candidate=phase_metrics([row for row in rows if row.cohort == "canary"]),
+    )
+
+
 def evaluate_canary_gates(
     evidence: CanaryEvidence, thresholds: GateThresholds = DEFAULT_GATE_THRESHOLDS
 ) -> GateVerdict:
@@ -1150,11 +1205,17 @@ def evaluate_canary_gates(
             > thresholds.max_success_drop
         ):
             failures.append("success_rate_regression")
-        if evidence.baseline.p95_latency_ms > 0:
+        # A zero baseline is a zero denominator, and unmeasurable data never
+        # counts as improvement: the comparison fails instead of being skipped.
+        if evidence.baseline.p95_latency_ms <= 0 or evidence.candidate.p95_latency_ms <= 0:
+            failures.append("latency_unmeasurable")
+        else:
             ratio = evidence.candidate.p95_latency_ms / evidence.baseline.p95_latency_ms
             if ratio > thresholds.max_latency_ratio:
                 failures.append("latency_regression")
-        if evidence.baseline.avg_tokens > 0:
+        if evidence.baseline.avg_tokens <= 0 or evidence.candidate.avg_tokens <= 0:
+            failures.append("token_unmeasurable")
+        else:
             ratio = evidence.candidate.avg_tokens / evidence.baseline.avg_tokens
             if ratio > thresholds.max_token_ratio:
                 failures.append("token_regression")
@@ -1455,6 +1516,14 @@ class WorkflowPointer:
 CompileFn = Callable[[Mapping[str, Any]], CompiledProposal]
 
 
+class CanaryMetricsSource(Protocol):
+    """Read side of the executions that took part in one evaluation."""
+
+    def settled_rows(
+        self, proposal_id: str, *, window_start: int, window_end: int
+    ) -> Sequence[ExecutionMetricRow]: ...
+
+
 class ProposalStore(Protocol):
     """Tenant-scoped persistence used by the service.
 
@@ -1589,6 +1658,7 @@ def _metrics_dict(metrics: PhaseMetrics) -> dict[str, Any]:
         "p95_latency_ms": metrics.p95_latency_ms,
         "avg_tokens": metrics.avg_tokens,
         "safety_violations": metrics.safety_violations,
+        "wait_ms": metrics.wait_ms,
     }
 
 
@@ -1607,11 +1677,15 @@ class WorkBuddyProposalsService:
         policy: ProposalPolicy,
         thresholds: GateThresholds = DEFAULT_GATE_THRESHOLDS,
         now: Callable[[], int] = lambda: int(time.time()),
+        metrics: CanaryMetricsSource | None = None,
     ) -> None:
         self._store = store
         self._policy = policy
         self._thresholds = thresholds
         self._now = now
+        # When wired, the gates are computed from the executions that ran; a
+        # deployment without a source still applies on a recorded evaluation.
+        self._metrics = metrics
 
     # -- creation ---------------------------------------------------------- #
 
@@ -1780,6 +1854,9 @@ class WorkBuddyProposalsService:
             )
         elif action is PromotionAction.APPLY:
             transition_for(action, record.status)
+            # The verdict is only as good as the evidence behind it, so the
+            # evaluation is computed from the executions that actually ran.
+            self._record_canary_evaluation(record)
             verdict = self._latest_gate(proposal_id)
             if verdict is None:
                 raise ProposalPolicyError(
@@ -1819,6 +1896,28 @@ class WorkBuddyProposalsService:
         self._store.add_shadow_run(proposal_id, run)
         return self._view(
             record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id)
+        )
+
+    def _record_canary_evaluation(self, record: ProposalRecord) -> None:
+        """Aggregate the cohort executions of this canary into evidence."""
+        if self._metrics is None:
+            return
+        started_at = int(record.canary_started_at or record.created_at)
+        window_end = self._now()
+        rows = self._metrics.settled_rows(
+            record.proposal_id, window_start=started_at, window_end=window_end
+        )
+        evidence = canary_evidence_from_rows(rows, window_start=started_at, window_end=window_end)
+        self.record_evaluation(
+            record.proposal_id,
+            evaluation=NewEvaluation(
+                phase="canary",
+                window_start=started_at,
+                window_end=window_end,
+                baseline=evidence.baseline,
+                candidate=evidence.candidate,
+                created_at=window_end,
+            ),
         )
 
     def record_evaluation(self, proposal_id: str, *, evaluation: NewEvaluation) -> ProposalView:
