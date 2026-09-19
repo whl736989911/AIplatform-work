@@ -43,13 +43,13 @@ from octop.infra.db.repos.workbuddy_proposals import (
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.proposals import (
     MAX_PATCH_OPERATIONS,
+    PromotionAction,
     ProposalActor,
     ProposalNotFoundError,
     ProposalPolicy,
     ProposalPolicyError,
     ProposalStatus,
     ProposalView,
-    PromotionAction,
     ReviewDecision,
     WorkBuddyProposalsService,
 )
@@ -72,9 +72,9 @@ _ERROR_CODES: dict[str, ErrorCode] = {
     "TARGET_CHANGE": ErrorCode.PROPOSAL_GOVERNANCE_REQUIRED,
     "AUTH_BOUNDARY_CHANGE": ErrorCode.PROPOSAL_GOVERNANCE_REQUIRED,
     "APPROVAL_BYPASS": ErrorCode.PROPOSAL_GOVERNANCE_REQUIRED,
-    "UNAPPROVED_TOOL": ErrorCode.WORKBUDDY_CAPABILITY_NOT_APPROVED,
+    "UNAPPROVED_TOOL": ErrorCode.FORBIDDEN_ROLE,
     "PRIVATE_ID": ErrorCode.WORKBUDDY_VALIDATION_FAILED,
-    "INVALID_DEFINITION": ErrorCode.WORKBUDDY_WORKFLOW_INVALID,
+    "INVALID_DEFINITION": ErrorCode.WF_INVALID_SCHEMA,
     "INVALID_PATCH": ErrorCode.PROPOSAL_PATCH_INVALID,
     "NO_SEMANTIC_CHANGE": ErrorCode.PROPOSAL_PATCH_INVALID,
     "ALLOWLIST_UNAVAILABLE": ErrorCode.DEPENDENCY_UNAVAILABLE,
@@ -97,11 +97,11 @@ _ERROR_CODES: dict[str, ErrorCode] = {
     "SHADOW_PROOF_REQUIRED": ErrorCode.PROPOSAL_GATE_NOT_MET,
     "GATES_NOT_PASSED": ErrorCode.PROPOSAL_GATE_NOT_MET,
     "WORKFLOW_NOT_FOUND": ErrorCode.RESOURCE_NOT_FOUND,
-    "WORKBUDDY_POSTGRES_REQUIRED": ErrorCode.WORKBUDDY_POSTGRES_REQUIRED,
+    "DEPENDENCY_UNAVAILABLE": ErrorCode.DEPENDENCY_UNAVAILABLE,
     "WORKBUDDY_CONTEXT_INVALID": ErrorCode.WORKBUDDY_CONTEXT_INVALID,
     "WORKBUDDY_INVALID_ARGUMENT": ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
-    "WORKBUDDY_MEMBERSHIP_REQUIRED": ErrorCode.WORKBUDDY_MEMBERSHIP_REQUIRED,
-    "WORKBUDDY_WORKFLOW_INVALID": ErrorCode.WORKBUDDY_WORKFLOW_INVALID,
+    "FORBIDDEN_ROLE": ErrorCode.FORBIDDEN_ROLE,
+    "WF_INVALID_SCHEMA": ErrorCode.WF_INVALID_SCHEMA,
     "WORKBUDDY_VERSION_IMMUTABLE": ErrorCode.WORKBUDDY_VERSION_IMMUTABLE,
 }
 
@@ -112,7 +112,9 @@ _REVIEWER_HIDDEN_FIELDS = ("reviews",)
 class ProposalCreateBody(BaseModel):
     """RFC 6902 patch against the server-fixed base version."""
 
-    workflow_revision: int = Field(ge=0, description="Workflow revision the patch was drafted from.")
+    workflow_revision: int = Field(
+        ge=0, description="Workflow revision the patch was drafted from."
+    )
     patch: list[dict[str, Any]] = Field(
         min_length=1,
         max_length=MAX_PATCH_OPERATIONS,
@@ -156,7 +158,9 @@ def _public_id(value: str) -> str:
 def _refusal(exc: Exception) -> OctopError:
     code = _ERROR_CODES.get(str(getattr(exc, "code", "")), ErrorCode.WORKBUDDY_VALIDATION_FAILED)
     details = dict(getattr(exc, "details", {}) or {})
-    details.setdefault("reason", str(getattr(exc, "code", "") or ErrorCode.WORKBUDDY_VALIDATION_FAILED))
+    details.setdefault(
+        "reason", str(getattr(exc, "code", "") or ErrorCode.WORKBUDDY_VALIDATION_FAILED)
+    )
     return OctopError(code, str(exc), details=details)
 
 

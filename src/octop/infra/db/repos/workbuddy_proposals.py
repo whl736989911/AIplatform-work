@@ -67,11 +67,11 @@ from octop.infra.workbuddy.proposals import (
     definition_hash,
 )
 
-ERROR_POSTGRES_REQUIRED = "WORKBUDDY_POSTGRES_REQUIRED"
+ERROR_POSTGRES_REQUIRED = "DEPENDENCY_UNAVAILABLE"
 ERROR_CONTEXT_INVALID = "WORKBUDDY_CONTEXT_INVALID"
 ERROR_INVALID_ARGUMENT = "WORKBUDDY_INVALID_ARGUMENT"
-ERROR_MEMBERSHIP_REQUIRED = "WORKBUDDY_MEMBERSHIP_REQUIRED"
-ERROR_WORKFLOW_INVALID = "WORKBUDDY_WORKFLOW_INVALID"
+ERROR_MEMBERSHIP_REQUIRED = "FORBIDDEN_ROLE"
+ERROR_WORKFLOW_INVALID = "WF_INVALID_SCHEMA"
 ERROR_BASE_CONFLICT = "PROPOSAL_BASE_CONFLICT"
 ERROR_CANDIDATE_EXISTS = "PROPOSAL_CANDIDATE_EXISTS"
 ERROR_DUPLICATE_REVIEW = "APPROVAL_ALREADY_DECIDED"
@@ -116,11 +116,14 @@ def _dump(value: Any) -> str:
 
 
 def _is_unique_violation(exc: Exception) -> bool:
-    sqlstate = getattr(exc, "sqlstate", None) or getattr(getattr(exc, "diag", None), "sqlstate", None)
+    sqlstate = getattr(exc, "sqlstate", None) or getattr(
+        getattr(exc, "diag", None), "sqlstate", None
+    )
     if sqlstate == "23505":
         return True
-    if getattr(exc, "__cause__", None) is not None:
-        return _is_unique_violation(exc.__cause__)
+    cause = exc.__cause__
+    if isinstance(cause, Exception):
+        return _is_unique_violation(cause)
     return "23505" in str(exc) or "duplicate key value" in str(exc)
 
 
@@ -178,7 +181,8 @@ class WorkBuddyProposalsRepo:
 
     @staticmethod
     def _one(conn: Any, sql: str, params: Sequence[Any] = ()) -> DbRow | None:
-        return conn.execute(sql, tuple(params)).fetchone()
+        row = conn.execute(sql, tuple(params)).fetchone()
+        return dict(row) if row is not None else None
 
     # ── proposals ────────────────────────────────────────────────────────────
 
@@ -225,7 +229,9 @@ class WorkBuddyProposalsRepo:
                 (tenant_id, workflow_id, base_version_id),
             )
             if base_row is None:
-                raise WorkBuddyError(ERROR_WORKFLOW_INVALID, "the active workflow version is missing")
+                raise WorkBuddyError(
+                    ERROR_WORKFLOW_INVALID, "the active workflow version is missing"
+                )
             base_definition = _as_json(base_row["definition"])
             base_hash = str(base_row["definition_sha256"])
             if definition_hash(base_definition) != base_hash:
@@ -262,7 +268,8 @@ class WorkBuddyProposalsRepo:
                 base_version_id=base_version_id,
                 source_version_id=base_version_id,
                 change_summary=request.change_summary,
-                created_by=membership_id,
+                created_by=created_by,
+                created_by_membership_id=membership_id,
                 created_at=now,
             )
             proposal_id = str(uuid.uuid4())
@@ -373,7 +380,9 @@ class WorkBuddyProposalsRepo:
         public_id = normalize_uuid(proposal_id, field="proposal_id")
         unknown = set(fields) - _PROMOTION_FIELDS
         if unknown:
-            raise WorkBuddyError(ERROR_INVALID_ARGUMENT, f"unknown proposal fields: {sorted(unknown)}")
+            raise WorkBuddyError(
+                ERROR_INVALID_ARGUMENT, f"unknown proposal fields: {sorted(unknown)}"
+            )
         assignments = ["status = ?", "updated_at = ?", *(f"{name} = ?" for name in fields)]
         params: list[Any] = [status.value, now_ts(), *fields.values()]
         params.extend((tenant_id, public_id, expect_status.value, int(expect_revision)))
@@ -510,7 +519,9 @@ class WorkBuddyProposalsRepo:
             raise WorkBuddyError(ERROR_INVALID_ARGUMENT, "live_side_effects must not be negative")
         evidence = str(run.evidence_hash).strip().lower()
         if len(evidence) != 64 or any(char not in "0123456789abcdef" for char in evidence):
-            raise WorkBuddyError(ERROR_INVALID_ARGUMENT, "evidence_hash must be a sha256 hex digest")
+            raise WorkBuddyError(
+                ERROR_INVALID_ARGUMENT, "evidence_hash must be a sha256 hex digest"
+            )
         now = now_ts()
         with self._transaction(conn) as ambient:
             proposal = self._one(
@@ -623,7 +634,9 @@ class WorkBuddyProposalsRepo:
                 (tenant_id, evaluation_id),
             )
             if row is None:  # pragma: no cover - insert just succeeded
-                raise ProposalConflictError(ERROR_STATE_CONFLICT, "evaluation insert was not visible")
+                raise ProposalConflictError(
+                    ERROR_STATE_CONFLICT, "evaluation insert was not visible"
+                )
             return _evaluation_from_row(row)
 
     # ── promotion ────────────────────────────────────────────────────────────
@@ -695,7 +708,9 @@ class WorkBuddyProposalsRepo:
                 base_version_id=record.base_version_id,
                 source_version_id=record.candidate_version_id,
                 change_summary=f"promoted proposal {record.proposal_id}",
-                created_by=record.created_by_membership_id,
+                # The promoted version is created by the promoter, not the author.
+                created_by=actor_user_id,
+                created_by_membership_id=None,
                 created_at=now,
             )
             moved = ambient.execute(
@@ -762,7 +777,8 @@ class WorkBuddyProposalsRepo:
         base_version_id: str,
         source_version_id: str,
         change_summary: str,
-        created_by: str,
+        created_by: int | None,
+        created_by_membership_id: str | None,
         created_at: int,
     ) -> None:
         """Insert an immutable workflow version row (candidate or promoted)."""
@@ -770,8 +786,8 @@ class WorkBuddyProposalsRepo:
             "INSERT INTO workbuddy_workflow_versions ("
             " tenant_id, workflow_version_id, workflow_id, version_number, definition,"
             " definition_sha256, origin, base_version_id, source_version_id, change_summary,"
-            " created_by, created_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, to_timestamp(?))",
+            " created_by, created_by_membership_id, created_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, to_timestamp(?))",
             (
                 tenant_id,
                 version_id,
@@ -784,6 +800,7 @@ class WorkBuddyProposalsRepo:
                 source_version_id,
                 change_summary,
                 created_by,
+                created_by_membership_id,
                 created_at,
             ),
         )
@@ -823,8 +840,12 @@ def _proposal_from_row(row: DbRow) -> ProposalRecord:
         canary_ratio_bp=_optional_int(row["canary_ratio_bp"]),
         canary_started_at=_optional_int(row["canary_started_at"]),
         canary_stopped_at=_optional_int(row["canary_stopped_at"]),
-        canary_stop_reason=None if row["canary_stop_reason"] is None else str(row["canary_stop_reason"]),
-        applied_version_id=None if row["applied_version_id"] is None else str(row["applied_version_id"]),
+        canary_stop_reason=None
+        if row["canary_stop_reason"] is None
+        else str(row["canary_stop_reason"]),
+        applied_version_id=None
+        if row["applied_version_id"] is None
+        else str(row["applied_version_id"]),
         status_reason=None if row["status_reason"] is None else str(row["status_reason"]),
     )
 

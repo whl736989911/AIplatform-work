@@ -22,7 +22,7 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -101,7 +101,9 @@ _WORKFLOW_SCHEMA_RELPATH = Path("contracts") / "workflow-v1.schema.json"
 class ProposalPolicyError(ValueError):
     """A deterministic policy refusal; ``code`` is stable for clients."""
 
-    def __init__(self, code: str, message: str, *, details: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self, code: str, message: str, *, details: Mapping[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
@@ -124,7 +126,9 @@ class PatchError(ValueError):
 
 def canonical_json(value: Any) -> str:
     """Byte-stable JSON: sorted keys, no whitespace, UTF-8 escapes preserved."""
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
 
 
 def definition_hash(definition: Any) -> str:
@@ -143,7 +147,9 @@ def _json_equal(left: Any, right: Any) -> bool:
             return False
         return all(_json_equal(left[key], right[key]) for key in left)
     if isinstance(left, list) and isinstance(right, list):
-        return len(left) == len(right) and all(_json_equal(a, b) for a, b in zip(left, right))
+        return len(left) == len(right) and all(
+            _json_equal(a, b) for a, b in zip(left, right, strict=True)
+        )
     if type(left) is not type(right):
         return False
     return bool(left == right)
@@ -222,7 +228,7 @@ def _pointer_get(document: Any, tokens: Sequence[str]) -> Any:
 
 def _pointer_add(document: Any, tokens: Sequence[str], value: Any) -> None:
     parent, token = _resolve_parent(document, tokens)
-    if isinstance(parent, Mapping):
+    if isinstance(parent, MutableMapping):
         parent[token] = value
     elif isinstance(parent, list):
         parent.insert(_array_index(token, len(parent), allow_append=True), value)
@@ -232,7 +238,7 @@ def _pointer_add(document: Any, tokens: Sequence[str], value: Any) -> None:
 
 def _pointer_remove(document: Any, tokens: Sequence[str]) -> Any:
     parent, token = _resolve_parent(document, tokens)
-    if isinstance(parent, Mapping):
+    if isinstance(parent, MutableMapping):
         if token not in parent:
             raise PatchError("missing_target", f"path segment {token!r} does not exist")
         return parent.pop(token)
@@ -245,7 +251,7 @@ def _pointer_replace(document: Any, tokens: Sequence[str], value: Any) -> None:
     if not tokens:
         raise PatchError("invalid_pointer", "operation cannot target the document root")
     parent, token = _resolve_parent(document, tokens)
-    if isinstance(parent, Mapping):
+    if isinstance(parent, MutableMapping):
         if token not in parent:
             raise PatchError("missing_target", f"path segment {token!r} does not exist")
         parent[token] = value
@@ -281,14 +287,18 @@ def parse_patch(patch: Sequence[Mapping[str, Any]]) -> tuple[PatchOperation, ...
     if isinstance(patch, (str, bytes)) or not isinstance(patch, Sequence):
         raise PatchError("invalid_patch", "patch must be a list of operations")
     if len(patch) > MAX_PATCH_OPERATIONS:
-        raise PatchError("patch_too_large", f"patch has more than {MAX_PATCH_OPERATIONS} operations")
+        raise PatchError(
+            "patch_too_large", f"patch has more than {MAX_PATCH_OPERATIONS} operations"
+        )
     operations: list[PatchOperation] = []
     for position, raw in enumerate(patch):
         if not isinstance(raw, Mapping):
             raise PatchError("invalid_patch", f"operation {position} must be an object")
         unknown = set(raw) - {"op", "path", "value", "from"}
         if unknown:
-            raise PatchError("invalid_patch", f"operation {position} has unknown members: {sorted(unknown)}")
+            raise PatchError(
+                "invalid_patch", f"operation {position} has unknown members: {sorted(unknown)}"
+            )
         op = raw.get("op")
         if not isinstance(op, str) or op not in _PATCH_OPS:
             raise PatchError("invalid_patch", f"operation {position} has unsupported op {op!r}")
@@ -296,13 +306,15 @@ def parse_patch(patch: Sequence[Mapping[str, Any]]) -> tuple[PatchOperation, ...
         if not isinstance(path, str):
             raise PatchError("invalid_patch", f"operation {position} is missing a string path")
         parse_pointer(path)
-        value = raw["value"] if "value" in raw else _MISSING
+        value = raw.get("value", _MISSING)
         from_path = raw.get("from")
         if op in _VALUE_OPS and value is _MISSING:
             raise PatchError("invalid_patch", f"operation {position} ({op}) requires a value")
         if op in _FROM_OPS:
             if not isinstance(from_path, str):
-                raise PatchError("invalid_patch", f"operation {position} ({op}) requires a from pointer")
+                raise PatchError(
+                    "invalid_patch", f"operation {position} ({op}) requires a from pointer"
+                )
             parse_pointer(from_path)
             from_tokens = parse_pointer(from_path)
             path_tokens = parse_pointer(path)
@@ -376,7 +388,9 @@ def _keyed_list(items: Sequence[Any]) -> bool:
     return bool(items) and all(key is not None for key in keys) and len(set(keys)) == len(keys)
 
 
-def semantic_diff(base: Any, candidate: Any, *, path: tuple[str, ...] = ()) -> tuple[SemanticChange, ...]:
+def semantic_diff(
+    base: Any, candidate: Any, *, path: tuple[str, ...] = ()
+) -> tuple[SemanticChange, ...]:
     """Structural diff between two JSON documents.
 
     Mappings are compared by key; lists of identified objects (workflow nodes)
@@ -401,18 +415,28 @@ def semantic_diff(base: Any, candidate: Any, *, path: tuple[str, ...] = ()) -> t
             for node_id in base_by_id:
                 child = (*path, node_id)
                 if node_id not in candidate_by_id:
-                    changes.append(SemanticChange(render_pointer(child), "removed", base_by_id[node_id], None))
+                    changes.append(
+                        SemanticChange(render_pointer(child), "removed", base_by_id[node_id], None)
+                    )
                 else:
-                    changes.extend(semantic_diff(base_by_id[node_id], candidate_by_id[node_id], path=child))
+                    changes.extend(
+                        semantic_diff(base_by_id[node_id], candidate_by_id[node_id], path=child)
+                    )
             for node_id in candidate_by_id:
                 if node_id not in base_by_id:
                     child = (*path, node_id)
-                    changes.append(SemanticChange(render_pointer(child), "added", None, candidate_by_id[node_id]))
+                    changes.append(
+                        SemanticChange(
+                            render_pointer(child), "added", None, candidate_by_id[node_id]
+                        )
+                    )
             return tuple(changes)
         for index in range(max(len(base), len(candidate))):
             child = (*path, str(index))
             if index >= len(base):
-                changes.append(SemanticChange(render_pointer(child), "added", None, candidate[index]))
+                changes.append(
+                    SemanticChange(render_pointer(child), "added", None, candidate[index])
+                )
             elif index >= len(candidate):
                 changes.append(SemanticChange(render_pointer(child), "removed", base[index], None))
             else:
@@ -561,7 +585,9 @@ _HIGH_RISK_SEGMENTS = frozenset({"tool_name", "model", "knowledge_base_ids"})
 _HIGH_RISK_PREFIXES = ("/output", "/edges")
 _LOW_RISK_TAIL = re.compile(r"^/nodes/[^/]+/name$")
 
-_PII_KEYS = frozenset({"pii", "contains_pii", "personal_data", "pii_fields", "personal_data_fields"})
+_PII_KEYS = frozenset(
+    {"pii", "contains_pii", "personal_data", "pii_fields", "personal_data_fields"}
+)
 _PII_CLASSIFICATIONS = frozenset({"pii", "sensitive", "restricted", "personal"})
 
 
@@ -608,7 +634,11 @@ def _edge_pairs(definition: Any) -> set[tuple[str, str]]:
         return set()
     pairs: set[tuple[str, str]] = set()
     for edge in edges:
-        if isinstance(edge, Mapping) and isinstance(edge.get("from"), str) and isinstance(edge.get("to"), str):
+        if (
+            isinstance(edge, Mapping)
+            and isinstance(edge.get("from"), str)
+            and isinstance(edge.get("to"), str)
+        ):
             pairs.add((edge["from"], edge["to"]))
     return pairs
 
@@ -640,18 +670,24 @@ def _approval_bypass_checks(
             continue
         kept = candidate_nodes.get(node_id)
         if kept is None:
-            violations.append(PolicyViolation("APPROVAL_BYPASS", f"/nodes/{node_id}", "approval node removed"))
+            violations.append(
+                PolicyViolation("APPROVAL_BYPASS", f"/nodes/{node_id}", "approval node removed")
+            )
             continue
         if kept.get("type") != "approval":
             violations.append(
-                PolicyViolation("APPROVAL_BYPASS", f"/nodes/{node_id}/type", "approval node retyped")
+                PolicyViolation(
+                    "APPROVAL_BYPASS", f"/nodes/{node_id}/type", "approval node retyped"
+                )
             )
             continue
         base_exits = {pair for pair in base_edges if pair[0] == node_id}
         candidate_exits = {pair for pair in candidate_edges if pair[0] == node_id}
         if not base_exits.issubset(candidate_exits):
             violations.append(
-                PolicyViolation("APPROVAL_BYPASS", f"/nodes/{node_id}", "approval exit edge removed")
+                PolicyViolation(
+                    "APPROVAL_BYPASS", f"/nodes/{node_id}", "approval exit edge removed"
+                )
             )
     approval_ids = sorted(
         node_id
@@ -703,20 +739,27 @@ def check_policy(
         head = f"/{segments[0]}" if segments else "/"
         tail = segments[-1] if segments else ""
         if head == _TRIGGER_PREFIX:
-            violations.append(PolicyViolation("TRIGGER_CHANGE", change.path, "trigger changes are not allowed"))
+            violations.append(
+                PolicyViolation("TRIGGER_CHANGE", change.path, "trigger changes are not allowed")
+            )
         if head == "/nodes" and len(segments) >= 2:
             node_id = segments[1]
             base_type = (base_nodes.get(node_id) or {}).get("type")
             candidate_type = (candidate_nodes.get(node_id) or {}).get("type")
-            if base_type == "approval" or candidate_type == "approval":
-                if tail != "name":
-                    violations.append(
-                        PolicyViolation("APPROVER_CHANGE", change.path, "approval node attributes are fixed")
+            if (base_type == "approval" or candidate_type == "approval") and tail != "name":
+                violations.append(
+                    PolicyViolation(
+                        "APPROVER_CHANGE", change.path, "approval node attributes are fixed"
                     )
+                )
         if tail in _APPROVER_KEYS:
-            violations.append(PolicyViolation("APPROVER_CHANGE", change.path, "approver configuration is fixed"))
+            violations.append(
+                PolicyViolation("APPROVER_CHANGE", change.path, "approver configuration is fixed")
+            )
         if tail in _TARGET_KEYS:
-            violations.append(PolicyViolation("TARGET_CHANGE", change.path, "execution targets are fixed"))
+            violations.append(
+                PolicyViolation("TARGET_CHANGE", change.path, "execution targets are fixed")
+            )
         if tail in _AUTH_KEYS:
             violations.append(
                 PolicyViolation("AUTH_BOUNDARY_CHANGE", change.path, "auth boundary is fixed")
@@ -739,15 +782,22 @@ def check_policy(
     for change in changes:
         segments = _segments(change.path)
         tail = segments[-1] if segments else ""
-        if tail in _PRIVATE_ID_KEYS or _PRIVATE_ID_KEY_RE.search(tail):
-            if tail not in _ALLOWED_REFERENCE_ID_KEYS and change.kind != "removed":
-                violations.append(PolicyViolation("PRIVATE_ID", change.path, "private identifiers are not allowed"))
+        if (
+            (tail in _PRIVATE_ID_KEYS or _PRIVATE_ID_KEY_RE.search(tail))
+            and tail not in _ALLOWED_REFERENCE_ID_KEYS
+            and change.kind != "removed"
+        ):
+            violations.append(
+                PolicyViolation("PRIVATE_ID", change.path, "private identifiers are not allowed")
+            )
         if change.kind == "removed":
             continue
         for value in _iter_scalar_values(change.new):
             if isinstance(value, str) and value in policy.private_ids:
                 violations.append(
-                    PolicyViolation("PRIVATE_ID", change.path, "private identifier value is not allowed")
+                    PolicyViolation(
+                        "PRIVATE_ID", change.path, "private identifier value is not allowed"
+                    )
                 )
                 break
     return tuple(violations)
@@ -781,9 +831,12 @@ def contains_pii(definition: Any) -> bool:
             folded = str(key).casefold()
             if folded in _PII_KEYS and bool(value):
                 return True
-            if folded == "data_classification" and isinstance(value, str):
-                if value.casefold() in _PII_CLASSIFICATIONS:
-                    return True
+            if (
+                folded == "data_classification"
+                and isinstance(value, str)
+                and value.casefold() in _PII_CLASSIFICATIONS
+            ):
+                return True
             if contains_pii(value):
                 return True
     elif isinstance(definition, list):
@@ -862,11 +915,15 @@ def evaluate_approvals(
 ) -> ApprovalState:
     """Apply the approval gate: one vote per reviewer, reject wins, no self-review."""
     if required_approvals < 1:
-        raise ProposalPolicyError("INVALID_APPROVAL_REQUIREMENT", "required approvals must be at least one")
+        raise ProposalPolicyError(
+            "INVALID_APPROVAL_REQUIREMENT", "required approvals must be at least one"
+        )
     seen: dict[int, ReviewDecision] = {}
     for vote in votes:
         if vote.reviewer_user_id == creator_user_id:
-            raise ProposalPolicyError("CREATOR_SELF_REVIEW", "the proposal creator cannot review it")
+            raise ProposalPolicyError(
+                "CREATOR_SELF_REVIEW", "the proposal creator cannot review it"
+            )
         if vote.reviewer_user_id in seen:
             raise ProposalPolicyError("DUPLICATE_REVIEW", "a reviewer may only vote once")
         seen[vote.reviewer_user_id] = vote.decision
@@ -916,7 +973,11 @@ def is_canary_selected(bucket: int, ratio_basis_points: int) -> bool:
 
 
 def canary_lane(stable_key: str, ratio_basis_points: int) -> Literal["candidate", "baseline"]:
-    return "candidate" if is_canary_selected(canary_bucket(stable_key), ratio_basis_points) else "baseline"
+    return (
+        "candidate"
+        if is_canary_selected(canary_bucket(stable_key), ratio_basis_points)
+        else "baseline"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -939,7 +1000,11 @@ class ShadowProof:
     failures: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
-        return {"complete": self.complete, "settled_runs": self.settled_runs, "failures": list(self.failures)}
+        return {
+            "complete": self.complete,
+            "settled_runs": self.settled_runs,
+            "failures": list(self.failures),
+        }
 
 
 def evaluate_shadow_proof(
@@ -1031,7 +1096,10 @@ def evaluate_canary_gates(
     if evidence.baseline.settled_runs and evidence.candidate.settled_runs:
         if evidence.candidate.success_rate < thresholds.min_success_rate:
             failures.append("success_rate_below_floor")
-        if evidence.baseline.success_rate - evidence.candidate.success_rate > thresholds.max_success_drop:
+        if (
+            evidence.baseline.success_rate - evidence.candidate.success_rate
+            > thresholds.max_success_drop
+        ):
             failures.append("success_rate_regression")
         if evidence.baseline.p95_latency_ms > 0:
             ratio = evidence.candidate.p95_latency_ms / evidence.baseline.p95_latency_ms
@@ -1041,7 +1109,9 @@ def evaluate_canary_gates(
             ratio = evidence.candidate.avg_tokens / evidence.baseline.avg_tokens
             if ratio > thresholds.max_token_ratio:
                 failures.append("token_regression")
-    return GateVerdict(passed=not failures, failures=tuple(failures), safety_stop=safety_stop, full_days=full_days)
+    return GateVerdict(
+        passed=not failures, failures=tuple(failures), safety_stop=safety_stop, full_days=full_days
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1062,7 +1132,12 @@ class ProposalStatus(StrEnum):
 
 
 OPEN_STATUSES = frozenset(
-    {ProposalStatus.UNDER_REVIEW, ProposalStatus.APPROVED, ProposalStatus.SHADOW, ProposalStatus.CANARY}
+    {
+        ProposalStatus.UNDER_REVIEW,
+        ProposalStatus.APPROVED,
+        ProposalStatus.SHADOW,
+        ProposalStatus.CANARY,
+    }
 )
 # ``PENDING_STATUSES`` is the "one open proposal per workflow" gate: shadow and
 # canary proposals are already promoted, so a new idea may be drafted while they
@@ -1114,14 +1189,15 @@ def canary_admission(
     ratio_basis_points: int,
 ) -> None:
     """Validate the shadow evidence gate before candidate traffic starts."""
-    if status is ProposalStatus.SHADOW or requires_manual_shadow:
-        if shadow is None or not shadow.complete:
-            failures = list(shadow.failures) if shadow is not None else ["shadow_not_run"]
-            raise ProposalPolicyError(
-                "SHADOW_PROOF_REQUIRED",
-                "manual replay-only shadow evidence is required before canary traffic",
-                details={"failures": failures},
-            )
+    if (status is ProposalStatus.SHADOW or requires_manual_shadow) and (
+        shadow is None or not shadow.complete
+    ):
+        failures = list(shadow.failures) if shadow is not None else ["shadow_not_run"]
+        raise ProposalPolicyError(
+            "SHADOW_PROOF_REQUIRED",
+            "manual replay-only shadow evidence is required before canary traffic",
+            details={"failures": failures},
+        )
     if not 1 <= ratio_basis_points <= CANARY_BUCKET_MODULUS:
         raise ProposalPolicyError("CANARY_RATIO_INVALID", "canary ratio must be within 1..10000")
 
@@ -1543,7 +1619,9 @@ class WorkBuddyProposalsService:
 
     def get(self, proposal_id: str) -> ProposalView:
         record = self._refresh_staleness(self._require(proposal_id))
-        return self._view(record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id))
+        return self._view(
+            record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id)
+        )
 
     # -- decisions --------------------------------------------------------- #
 
@@ -1562,7 +1640,9 @@ class WorkBuddyProposalsService:
                 f"proposal is {record.status.value}; decisions are not accepted",
             )
         if reviewer.user_id == record.created_by_user_id:
-            raise ProposalPolicyError("CREATOR_SELF_REVIEW", "the proposal creator cannot review it")
+            raise ProposalPolicyError(
+                "CREATOR_SELF_REVIEW", "the proposal creator cannot review it"
+            )
         if decision is ReviewDecision.APPROVED and record.status not in (
             ProposalStatus.UNDER_REVIEW,
             ProposalStatus.APPROVED,
@@ -1588,15 +1668,24 @@ class WorkBuddyProposalsService:
             for row in self._store.list_reviews(proposal_id)
         ]
         state = evaluate_approvals(
-            votes, creator_user_id=record.created_by_user_id, required_approvals=record.required_approvals
+            votes,
+            creator_user_id=record.created_by_user_id,
+            required_approvals=record.required_approvals,
         )
         if state.outcome is ApprovalOutcome.REJECTED:
-            record = self._transition(record, ProposalStatus.REJECTED, self._stop_fields(record, "rejected"))
-        elif state.outcome is ApprovalOutcome.APPROVED and record.status is ProposalStatus.UNDER_REVIEW:
+            record = self._transition(
+                record, ProposalStatus.REJECTED, self._stop_fields(record, "rejected")
+            )
+        elif (
+            state.outcome is ApprovalOutcome.APPROVED
+            and record.status is ProposalStatus.UNDER_REVIEW
+        ):
             record = self._transition(record, ProposalStatus.APPROVED, {"status_reason": None})
         else:
             record = self._require(proposal_id)
-        return self._view(record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id))
+        return self._view(
+            record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id)
+        )
 
     # -- promotion --------------------------------------------------------- #
 
@@ -1612,7 +1701,8 @@ class WorkBuddyProposalsService:
         record = self._refresh_staleness(self._require(proposal_id))
         if record.status is ProposalStatus.STALE:
             raise ProposalPolicyError(
-                "PROPOSAL_STALE", "the workflow baseline changed; reopen the proposal against the new base"
+                "PROPOSAL_STALE",
+                "the workflow baseline changed; reopen the proposal against the new base",
             )
         if if_match_revision != record.workflow_revision:
             raise ProposalPolicyError(
@@ -1621,7 +1711,9 @@ class WorkBuddyProposalsService:
                 details={"workflow_revision": record.workflow_revision},
             )
         if action is PromotionAction.ABORT:
-            record = self._transition(record, ProposalStatus.ABORTED, self._stop_fields(record, "aborted"))
+            record = self._transition(
+                record, ProposalStatus.ABORTED, self._stop_fields(record, "aborted")
+            )
         elif action is PromotionAction.START_SHADOW:
             target = transition_for(action, record.status)
             record = self._transition(record, target, {"status_reason": None})
@@ -1671,7 +1763,9 @@ class WorkBuddyProposalsService:
                     "STALE_REVISION", "the workflow revision changed during promotion; retry"
                 )
             record = updated
-        return self._view(record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id))
+        return self._view(
+            record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id)
+        )
 
     # -- evidence ---------------------------------------------------------- #
 
@@ -1682,7 +1776,9 @@ class WorkBuddyProposalsService:
                 "INVALID_STATE", f"proposal is {record.status.value}; shadow runs are closed"
             )
         self._store.add_shadow_run(proposal_id, run)
-        return self._view(record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id))
+        return self._view(
+            record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id)
+        )
 
     def record_evaluation(self, proposal_id: str, *, evaluation: NewEvaluation) -> ProposalView:
         record = self._require(proposal_id)
@@ -1691,7 +1787,9 @@ class WorkBuddyProposalsService:
                 "INVALID_STATE", f"proposal is {record.status.value}; evaluations are closed"
             )
         if evaluation.phase not in ("shadow", "canary"):
-            raise ProposalPolicyError("INVALID_EVALUATION", "evaluation phase must be shadow or canary")
+            raise ProposalPolicyError(
+                "INVALID_EVALUATION", "evaluation phase must be shadow or canary"
+            )
         verdict = evaluate_canary_gates(
             CanaryEvidence(
                 window_start=evaluation.window_start,
@@ -1703,8 +1801,12 @@ class WorkBuddyProposalsService:
         )
         self._store.add_evaluation(proposal_id, evaluation, verdict)
         if verdict.safety_stop and record.status is ProposalStatus.CANARY:
-            record = self._transition(record, ProposalStatus.ABORTED, self._stop_fields(record, "safety_violation"))
-        return self._view(record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id))
+            record = self._transition(
+                record, ProposalStatus.ABORTED, self._stop_fields(record, "safety_violation")
+            )
+        return self._view(
+            record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id)
+        )
 
     # -- routing ----------------------------------------------------------- #
 
@@ -1792,7 +1894,14 @@ class WorkBuddyProposalsService:
             )
         )
         if not detail:
-            return ProposalView(proposal=record, stale=stale)
+            # The list carries the review record too: the contract gives workflow
+            # managers the full governance picture there, and the API layer strips
+            # it for everyone else.
+            return ProposalView(
+                proposal=record,
+                stale=stale,
+                reviews=tuple(self._store.list_reviews(record.proposal_id)),
+            )
         reviews = tuple(self._store.list_reviews(record.proposal_id))
         evaluations = tuple(self._store.list_evaluations(record.proposal_id))
         return ProposalView(

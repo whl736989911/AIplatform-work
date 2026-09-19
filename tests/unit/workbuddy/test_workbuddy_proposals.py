@@ -28,7 +28,12 @@ def workflow_definition(*, prompt: str = "summarise", pii: bool = False) -> dict
         "trigger": {"type": "manual", "config": {}},
         "inputs": {},
         "nodes": [
-            {"id": "start", "type": "llm", "name": "Start", "config": {"prompt": prompt, "model": "model-a"}},
+            {
+                "id": "start",
+                "type": "llm",
+                "name": "Start",
+                "config": {"prompt": prompt, "model": "model-a"},
+            },
             {
                 "id": "fetch",
                 "type": "tool",
@@ -41,7 +46,12 @@ def workflow_definition(*, prompt: str = "summarise", pii: bool = False) -> dict
                 "name": "Gate",
                 "config": {"approval_message": "approve?", "approver_user_ids": [APPROVER]},
             },
-            {"id": "end", "type": "transform", "name": "End", "config": {"input": {}, "expression": "1"}},
+            {
+                "id": "end",
+                "type": "transform",
+                "name": "End",
+                "config": {"input": {}, "expression": "1"},
+            },
         ],
         "edges": [
             {"from": "start", "to": "fetch"},
@@ -149,7 +159,10 @@ def test_whole_node_array_replacement_cannot_drop_approval() -> None:
     base = workflow_definition()
     reduced = [node for node in base["nodes"] if node["id"] != "gate"]
 
-    assert rejection([{"op": "replace", "path": "/nodes", "value": reduced}], base=base) == "APPROVAL_BYPASS"
+    assert (
+        rejection([{"op": "replace", "path": "/nodes", "value": reduced}], base=base)
+        == "APPROVAL_BYPASS"
+    )
 
 
 def test_rewiring_around_approval_node_is_rejected() -> None:
@@ -229,7 +242,9 @@ def test_name_only_change_is_low_risk_single_approval() -> None:
 
 
 def test_prompt_change_is_medium_risk_two_approvals_and_shadow() -> None:
-    compiled = compile_ok([{"op": "replace", "path": "/nodes/0/config/prompt", "value": "be terse"}])
+    compiled = compile_ok(
+        [{"op": "replace", "path": "/nodes/0/config/prompt", "value": "be terse"}]
+    )
 
     assert compiled.risk.level == "medium"
     assert compiled.risk.required_approvals == 2
@@ -237,14 +252,17 @@ def test_prompt_change_is_medium_risk_two_approvals_and_shadow() -> None:
 
 
 def test_tool_name_change_is_high_risk() -> None:
-    compiled = compile_ok([{"op": "replace", "path": "/nodes/1/config/tool_name", "value": "other_tool"}])
+    compiled = compile_ok(
+        [{"op": "replace", "path": "/nodes/1/config/tool_name", "value": "other_tool"}]
+    )
 
     assert compiled.risk.level == "high"
 
 
 def test_pii_definition_requires_two_approvals_and_shadow() -> None:
     compiled = compile_ok(
-        [{"op": "replace", "path": "/nodes/0/name", "value": "Start2"}], base=workflow_definition(pii=True)
+        [{"op": "replace", "path": "/nodes/0/name", "value": "Start2"}],
+        base=workflow_definition(pii=True),
     )
 
     assert compiled.risk.pii is True
@@ -355,12 +373,12 @@ def shadow_runs(
 def test_shadow_proof_requires_replay_only_and_no_live_side_effects() -> None:
     assert P.evaluate_shadow_proof(shadow_runs(P.SHADOW_MIN_SETTLED_RUNS)).complete is True
     assert P.evaluate_shadow_proof(shadow_runs(1)).failures == ("insufficient_shadow_runs",)
-    assert P.evaluate_shadow_proof(shadow_runs(P.SHADOW_MIN_SETTLED_RUNS, replay_only=False)).failures == (
-        "shadow_not_replay_only",
-    )
-    assert P.evaluate_shadow_proof(shadow_runs(P.SHADOW_MIN_SETTLED_RUNS, side_effects=1)).failures == (
-        "shadow_live_side_effects",
-    )
+    assert P.evaluate_shadow_proof(
+        shadow_runs(P.SHADOW_MIN_SETTLED_RUNS, replay_only=False)
+    ).failures == ("shadow_not_replay_only",)
+    assert P.evaluate_shadow_proof(
+        shadow_runs(P.SHADOW_MIN_SETTLED_RUNS, side_effects=1)
+    ).failures == ("shadow_live_side_effects",)
     assert P.evaluate_shadow_proof(shadow_runs(0)).failures == ("no_settled_shadow_runs",)
 
 
@@ -378,7 +396,9 @@ def canary_evidence(
         window_start=1_700_000_000,
         window_end=1_700_000_000 + days * P.CANARY_FULL_DAY_SECONDS,
         baseline=P.PhaseMetrics(baseline_runs, success[0], latency[0], tokens[0]),
-        candidate=P.PhaseMetrics(candidate_runs, success[1], latency[1], tokens[1], safety_violations),
+        candidate=P.PhaseMetrics(
+            candidate_runs, success[1], latency[1], tokens[1], safety_violations
+        ),
     )
 
 
@@ -448,7 +468,9 @@ class FakeStore:
             record.workflow_id == request.workflow_id and record.status in P.PENDING_STATUSES
             for record in self.proposals.values()
         ):
-            raise P.ProposalConflictError("PROPOSAL_ALREADY_OPEN", "workflow already has an open proposal")
+            raise P.ProposalConflictError(
+                "PROPOSAL_ALREADY_OPEN", "workflow already has an open proposal"
+            )
         compiled = compile(self.definition)
         record = P.ProposalRecord(
             proposal_id=self._id("proposal"),
@@ -562,7 +584,11 @@ class FakeStore:
         fields: Mapping[str, Any],
     ) -> P.ProposalRecord | None:
         record = self.proposals.get(proposal_id)
-        if record is None or record.status is not expect_status or record.workflow_revision != expect_revision:
+        if (
+            record is None
+            or record.status is not expect_status
+            or record.workflow_revision != expect_revision
+        ):
             return None
         updated = replace(record, status=status, updated_at=record.updated_at + 1, **fields)
         self.proposals[proposal_id] = updated
@@ -630,11 +656,17 @@ def create_proposal(
 
 
 def approve_twice(service: P.WorkBuddyProposalsService, proposal_id: str) -> None:
-    service.decide(proposal_id, reviewer=P.ProposalActor(20), decision=P.ReviewDecision.APPROVED, comment="")
-    service.decide(proposal_id, reviewer=P.ProposalActor(21), decision=P.ReviewDecision.APPROVED, comment="")
+    service.decide(
+        proposal_id, reviewer=P.ProposalActor(20), decision=P.ReviewDecision.APPROVED, comment=""
+    )
+    service.decide(
+        proposal_id, reviewer=P.ProposalActor(21), decision=P.ReviewDecision.APPROVED, comment=""
+    )
 
 
-def settle_shadow(service: P.WorkBuddyProposalsService, proposal_id: str, *, runs: int = 10) -> None:
+def settle_shadow(
+    service: P.WorkBuddyProposalsService, proposal_id: str, *, runs: int = 10
+) -> None:
     for index in range(runs):
         service.record_shadow_run(
             proposal_id,
@@ -649,7 +681,9 @@ def settle_shadow(service: P.WorkBuddyProposalsService, proposal_id: str, *, run
         )
 
 
-def start_canary(service: P.WorkBuddyProposalsService, proposal_id: str, *, ratio: int = 5000) -> None:
+def start_canary(
+    service: P.WorkBuddyProposalsService, proposal_id: str, *, ratio: int = 5000
+) -> None:
     service.promote(
         proposal_id,
         action=P.PromotionAction.START_SHADOW,
@@ -733,9 +767,17 @@ def test_creator_cannot_decide_own_proposal() -> None:
 def test_reject_decision_is_terminal_and_beats_approvals() -> None:
     service = make_service(FakeStore(workflow_definition()))
     record = create_proposal(service, actor=P.ProposalActor(10))
-    service.decide(record.proposal_id, reviewer=P.ProposalActor(20), decision=P.ReviewDecision.APPROVED, comment="")
+    service.decide(
+        record.proposal_id,
+        reviewer=P.ProposalActor(20),
+        decision=P.ReviewDecision.APPROVED,
+        comment="",
+    )
     view = service.decide(
-        record.proposal_id, reviewer=P.ProposalActor(21), decision=P.ReviewDecision.REJECTED, comment="risk"
+        record.proposal_id,
+        reviewer=P.ProposalActor(21),
+        decision=P.ReviewDecision.REJECTED,
+        comment="risk",
     )
 
     assert view.proposal.status is P.ProposalStatus.REJECTED
@@ -745,14 +787,27 @@ def test_reject_decision_is_terminal_and_beats_approvals() -> None:
 def test_duplicate_review_is_refused_and_two_approvals_advance() -> None:
     service = make_service(FakeStore(workflow_definition()))
     record = create_proposal(service, actor=P.ProposalActor(10))
-    service.decide(record.proposal_id, reviewer=P.ProposalActor(20), decision=P.ReviewDecision.APPROVED, comment="")
+    service.decide(
+        record.proposal_id,
+        reviewer=P.ProposalActor(20),
+        decision=P.ReviewDecision.APPROVED,
+        comment="",
+    )
 
     with pytest.raises(P.ProposalPolicyError) as caught:
-        service.decide(record.proposal_id, reviewer=P.ProposalActor(20), decision=P.ReviewDecision.APPROVED, comment="")
+        service.decide(
+            record.proposal_id,
+            reviewer=P.ProposalActor(20),
+            decision=P.ReviewDecision.APPROVED,
+            comment="",
+        )
     assert caught.value.code == "DUPLICATE_REVIEW"
 
     view = service.decide(
-        record.proposal_id, reviewer=P.ProposalActor(21), decision=P.ReviewDecision.APPROVED, comment=""
+        record.proposal_id,
+        reviewer=P.ProposalActor(21),
+        decision=P.ReviewDecision.APPROVED,
+        comment="",
     )
 
     assert view.proposal.status is P.ProposalStatus.APPROVED
@@ -818,7 +873,9 @@ def test_medium_risk_canary_requires_a_replay_only_shadow_proof() -> None:
     # A shadow runner that touched live systems is not a proof either.
     service.record_shadow_run(
         record.proposal_id,
-        run=P.ShadowRunRow("shadow-live", True, True, live_side_effects=1, evidence_hash="h", created_at=NOW),
+        run=P.ShadowRunRow(
+            "shadow-live", True, True, live_side_effects=1, evidence_hash="h", created_at=NOW
+        ),
     )
     with pytest.raises(P.ProposalPolicyError) as caught:
         service.promote(
@@ -829,14 +886,22 @@ def test_medium_risk_canary_requires_a_replay_only_shadow_proof() -> None:
             ratio_basis_points=1000,
         )
     assert caught.value.code == "SHADOW_PROOF_REQUIRED"
-    assert caught.value.details["failures"] == ["insufficient_shadow_runs", "shadow_live_side_effects"]
+    assert caught.value.details["failures"] == [
+        "insufficient_shadow_runs",
+        "shadow_live_side_effects",
+    ]
 
 
 def test_low_risk_proposal_can_start_canary_without_shadow() -> None:
     service = make_service(FakeStore(workflow_definition()))
     record = create_proposal(service, actor=P.ProposalActor(10), patch=LOW_PATCH)
     assert record.required_approvals == 1
-    service.decide(record.proposal_id, reviewer=P.ProposalActor(20), decision=P.ReviewDecision.APPROVED, comment="")
+    service.decide(
+        record.proposal_id,
+        reviewer=P.ProposalActor(20),
+        decision=P.ReviewDecision.APPROVED,
+        comment="",
+    )
 
     view = service.promote(
         record.proposal_id,
@@ -946,7 +1011,10 @@ def test_reject_during_canary_stops_traffic() -> None:
     start_canary(service, record.proposal_id, ratio=9999)
 
     view = service.decide(
-        record.proposal_id, reviewer=P.ProposalActor(31), decision=P.ReviewDecision.REJECTED, comment="stop"
+        record.proposal_id,
+        reviewer=P.ProposalActor(31),
+        decision=P.ReviewDecision.REJECTED,
+        comment="stop",
     )
 
     assert view.proposal.status is P.ProposalStatus.REJECTED
@@ -956,7 +1024,12 @@ def test_reject_during_canary_stops_traffic() -> None:
 def test_abort_frees_the_workflow_for_a_new_proposal() -> None:
     service = make_service(FakeStore(workflow_definition()))
     record = create_proposal(service, actor=P.ProposalActor(10))
-    service.decide(record.proposal_id, reviewer=P.ProposalActor(20), decision=P.ReviewDecision.APPROVED, comment="")
+    service.decide(
+        record.proposal_id,
+        reviewer=P.ProposalActor(20),
+        decision=P.ReviewDecision.APPROVED,
+        comment="",
+    )
     aborted = service.promote(
         record.proposal_id,
         action=P.PromotionAction.ABORT,

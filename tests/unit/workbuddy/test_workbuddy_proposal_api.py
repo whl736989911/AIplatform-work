@@ -39,7 +39,12 @@ def workflow_definition() -> dict[str, Any]:
         "trigger": {"type": "manual", "config": {}},
         "inputs": {},
         "nodes": [
-            {"id": "start", "type": "llm", "name": "Start", "config": {"prompt": "summarise", "model": "m"}},
+            {
+                "id": "start",
+                "type": "llm",
+                "name": "Start",
+                "config": {"prompt": "summarise", "model": "m"},
+            },
             {
                 "id": "fetch",
                 "type": "tool",
@@ -52,7 +57,12 @@ def workflow_definition() -> dict[str, Any]:
                 "name": "Gate",
                 "config": {"approval_message": "ok?", "approver_user_ids": [APPROVER]},
             },
-            {"id": "end", "type": "transform", "name": "End", "config": {"input": {}, "expression": "1"}},
+            {
+                "id": "end",
+                "type": "transform",
+                "name": "End",
+                "config": {"input": {}, "expression": "1"},
+            },
         ],
         "edges": [
             {"from": "start", "to": "fetch"},
@@ -182,7 +192,11 @@ class _Store:
         fields: Mapping[str, Any],
     ) -> P.ProposalRecord | None:
         record = self.proposals.get(proposal_id)
-        if record is None or record.status is not expect_status or record.workflow_revision != expect_revision:
+        if (
+            record is None
+            or record.status is not expect_status
+            or record.workflow_revision != expect_revision
+        ):
             return None
         updated = replace(record, status=status, updated_at=record.updated_at + 1, **fields)
         self.proposals[proposal_id] = updated
@@ -250,7 +264,9 @@ class _Store:
         return None
 
 
-def _principal(*, user_id: int = 10, role: str = "member", member_id: str = CREATOR_MEMBER) -> WorkBuddyPrincipal:
+def _principal(
+    *, user_id: int = 10, role: str = "member", member_id: str = CREATOR_MEMBER
+) -> WorkBuddyPrincipal:
     return WorkBuddyPrincipal(
         user=User(id=user_id, username=f"user{user_id}", role=Role.USER, display_name=None),
         tenant_id=TENANT,
@@ -293,7 +309,9 @@ async def _request(
     app.dependency_overrides[api._require_admin] = lambda: admin or principal
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        return await client.request(method, f"/api/v1{path}", json=json_body, headers=dict(headers or {}))
+        return await client.request(
+            method, f"/api/v1{path}", json=json_body, headers=dict(headers or {})
+        )
 
 
 CREATE_PATH = f"/workflows/{WORKFLOW_ID}/improvement-proposals"
@@ -359,11 +377,17 @@ async def test_unknown_and_foreign_proposals_are_indistinguishable(
     store = _Store(workflow_definition())
     app = _app(store, monkeypatch)
 
-    malformed = await _request(app, "GET", "/improvement-proposals/not-a-uuid", principal=_principal())
-    missing = await _request(app, "GET", f"/improvement-proposals/{uuid.uuid4()}", principal=_principal())
+    malformed = await _request(
+        app, "GET", "/improvement-proposals/not-a-uuid", principal=_principal()
+    )
+    missing = await _request(
+        app, "GET", f"/improvement-proposals/{uuid.uuid4()}", principal=_principal()
+    )
 
     assert malformed.status_code == missing.status_code == 404
-    assert malformed.json()["error"]["code"] == missing.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+    assert (
+        malformed.json()["error"]["code"] == missing.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+    )
     assert malformed.json()["error"]["message"] == missing.json()["error"]["message"]
 
 
