@@ -12,6 +12,10 @@
 #   export OCTOP_TEST_DATABASE_URL='postgresql://octop:octop@127.0.0.1:5432/octop'
 #   export OCTOP_DATABASE_URL='postgresql://octop:octop@127.0.0.1:5432/octop'
 #
+# Redis (WorkBuddy shared state: rate-limit windows, dependency probe):
+#   export REDIS_URL='redis://127.0.0.1:6379/0'
+#   export OCTOP_TEST_REDIS_URL='redis://127.0.0.1:6379/0'
+#
 # Init layers (ADR 002):
 #   - Control-plane schema → Octop migrate (NNN_*.pg.sql), not this compose
 #   - CREATE EXTENSION vector → postgres/init-vector.sql (initdb.d only)
@@ -34,6 +38,18 @@ services:
       - ./postgres/init-vector.sql:/docker-entrypoint-initdb.d/01-vector.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: octop-redis
+    restart: unless-stopped
+    ports:
+      - "${OCTOP_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10

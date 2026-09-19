@@ -47,6 +47,9 @@ services:
       - OCTOP_DATABASE_NAME=${OCTOP_DATABASE_NAME:-}
       - OCTOP_DATABASE_USER=${OCTOP_DATABASE_USER:-}
       - OCTOP_DATABASE_PASSWORD=${OCTOP_DATABASE_PASSWORD:-}
+      # WorkBuddy shared state: rate limiting counts in Redis, and the
+      # dependency probe reports it as blocked until this is reachable.
+      - REDIS_URL=${REDIS_URL:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
       - OCTOP_LANGFUSE_ENABLED=${OCTOP_LANGFUSE_ENABLED:-false}
