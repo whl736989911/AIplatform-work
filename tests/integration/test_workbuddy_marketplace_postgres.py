@@ -317,7 +317,7 @@ async def test_publish_install_and_upgrade_roundtrip(
     async with _client(app, _principal(tenants["b"])) as other:
         hidden = await other.get(f"/marketplace/installations/{installation_id}")
         assert hidden.status_code == 404, hidden.text
-        assert hidden.json()["error"]["code"] == ErrorCode.RESOURCE_NOT_FOUND.value
+        assert hidden.json()["error"]["code"] == ErrorCode.WORKBUDDY_MARKETPLACE_NOT_FOUND.value
 
     second = await _publish(
         app,
@@ -376,7 +376,7 @@ async def test_submission_is_invisible_to_another_tenant(
     async with _client(app, _principal(tenants["b"])) as other:
         hidden = await other.get(f"/marketplace/submissions/{submission_id}")
         assert hidden.status_code == 404, hidden.text
-        assert hidden.json()["error"]["code"] == ErrorCode.RESOURCE_NOT_FOUND.value
+        assert hidden.json()["error"]["code"] == ErrorCode.WORKBUDDY_MARKETPLACE_NOT_FOUND.value
 
 
 async def test_install_without_consent_writes_nothing(

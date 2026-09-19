@@ -417,7 +417,7 @@ async def test_a_non_postgres_control_plane_fails_closed(
         app, "GET", "/marketplace/templates", principal=_principal(), headers={}
     )
     assert response.status_code == 503, response.text
-    assert response.json()["error"]["code"] == ErrorCode.DEPENDENCY_UNAVAILABLE.value
+    assert response.json()["error"]["code"] == ErrorCode.WORKBUDDY_POSTGRES_REQUIRED.value
 
 
 async def test_browse_returns_the_reviewed_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -451,7 +451,7 @@ async def test_unpublished_template_version_is_a_uniform_404(
         principal=_principal(),
     )
     assert response.status_code == 404, response.text
-    assert response.json()["error"]["code"] == ErrorCode.RESOURCE_NOT_FOUND.value
+    assert response.json()["error"]["code"] == ErrorCode.WORKBUDDY_MARKETPLACE_NOT_FOUND.value
 
 
 async def test_install_requires_explicitly_accepted_consent(
@@ -591,7 +591,7 @@ async def test_another_members_submission_is_a_uniform_404(
         principal=_principal(member_id=OTHER_MEMBER, user_id=11),
     )
     assert hidden.status_code == 404, hidden.text
-    assert hidden.json()["error"]["code"] == ErrorCode.RESOURCE_NOT_FOUND.value
+    assert hidden.json()["error"]["code"] == ErrorCode.WORKBUDDY_MARKETPLACE_NOT_FOUND.value
 
     visible = await _request(
         app,

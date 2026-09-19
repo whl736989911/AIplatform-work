@@ -84,7 +84,7 @@ INSTALLATION_NOT_FOUND = "installation not found"
 #: that is missing here is a validation refusal, not a server fault.
 _ERROR_CODES: dict[str, ErrorCode] = {
     # The contract's marketplace refusals, mapped onto the frozen code set.
-    "WORKBUDDY_MARKETPLACE_NOT_FOUND": ErrorCode.RESOURCE_NOT_FOUND,
+    "WORKBUDDY_MARKETPLACE_NOT_FOUND": ErrorCode.WORKBUDDY_MARKETPLACE_NOT_FOUND,
     "WORKBUDDY_SUBMISSION_INVALID": ErrorCode.WORKBUDDY_SUBMISSION_INVALID,
     "WORKBUDDY_SUBMISSION_FROZEN": ErrorCode.WORKBUDDY_SUBMISSION_FROZEN,
     "WORKBUDDY_SUBMISSION_NOT_APPROVABLE": ErrorCode.WORKBUDDY_SUBMISSION_NOT_APPROVABLE,
@@ -95,14 +95,10 @@ _ERROR_CODES: dict[str, ErrorCode] = {
         ErrorCode.WORKBUDDY_TEMPLATE_VERSION_NOT_INSTALLABLE
     ),
     "WORKBUDDY_REBINDING_INCOMPLETE": ErrorCode.WORKBUDDY_REBINDING_INCOMPLETE,
-    # No dedicated frozen code exists for an unapproved capability or an
-    # unconfigured model; the workflow slice maps an unapproved tool to
-    # FORBIDDEN_ROLE and model gaps to MODEL_NOT_CONFIGURED, and this surface
-    # follows that precedent.
-    "WORKBUDDY_CAPABILITY_NOT_APPROVED": ErrorCode.FORBIDDEN_ROLE,
-    "WORKBUDDY_MODEL_NOT_CONFIGURED": ErrorCode.MODEL_NOT_CONFIGURED,
-    "WORKBUDDY_DEPENDENCY_UNAVAILABLE": ErrorCode.DEPENDENCY_UNAVAILABLE,
-    "DEPENDENCY_UNAVAILABLE": ErrorCode.DEPENDENCY_UNAVAILABLE,
+    "WORKBUDDY_CAPABILITY_NOT_APPROVED": ErrorCode.WORKBUDDY_CAPABILITY_NOT_APPROVED,
+    "WORKBUDDY_MODEL_NOT_CONFIGURED": ErrorCode.WORKBUDDY_MODEL_NOT_CONFIGURED,
+    "WORKBUDDY_DEPENDENCY_UNAVAILABLE": ErrorCode.WORKBUDDY_DEPENDENCY_UNAVAILABLE,
+    "DEPENDENCY_UNAVAILABLE": ErrorCode.WORKBUDDY_DEPENDENCY_UNAVAILABLE,
     "WORKBUDDY_INVALID_ARGUMENT": ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
     "WORKBUDDY_CONTEXT_INVALID": ErrorCode.WORKBUDDY_CONTEXT_INVALID,
     "WORKBUDDY_VALIDATION_FAILED": ErrorCode.WORKBUDDY_VALIDATION_FAILED,
@@ -199,7 +195,7 @@ class PlatformDecisionBody(BaseModel):
 
 
 def _not_found(message: str) -> OctopError:
-    return OctopError(ErrorCode.RESOURCE_NOT_FOUND, message)
+    return OctopError(ErrorCode.WORKBUDDY_MARKETPLACE_NOT_FOUND, message)
 
 
 def _public_id(value: str) -> str:
@@ -223,8 +219,8 @@ def _refusal(exc: Exception) -> OctopError:
     if isinstance(exc, WorkBuddyPostgresRequiredError):
         # A SQLite control plane fails closed (migration 021): the marketplace
         # tables do not exist there, so this is a deployment fact, not a request
-        # error, and it is not reported as one.
-        return OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, str(exc))
+        # error, and it answers the code the migrations document for it.
+        return OctopError(ErrorCode.WORKBUDDY_POSTGRES_REQUIRED, str(exc))
     if isinstance(exc, DomainRefusal):
         code = _ERROR_CODES.get(
             str(getattr(exc, "code", "") or ""), ErrorCode.WORKBUDDY_VALIDATION_FAILED
@@ -236,7 +232,7 @@ def _refusal(exc: Exception) -> OctopError:
         details.setdefault("reason", str(getattr(exc, "code", "") or code.value))
         return OctopError(code, str(exc), details=details)
     logger.exception("unhandled marketplace store failure", exc_info=exc)
-    return OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _STORE_UNAVAILABLE)
+    return OctopError(ErrorCode.WORKBUDDY_DEPENDENCY_UNAVAILABLE, _STORE_UNAVAILABLE)
 
 
 def _db(server: Any) -> Any:
