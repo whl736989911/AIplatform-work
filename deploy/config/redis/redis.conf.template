@@ -1,0 +1,54 @@
+# =============================================================================
+# Redis production configuration template.
+#
+# deploy/scripts/redis-entrypoint.sh renders this file into tmpfs (/run/redis),
+# substituting __REDIS_PASSWORD__ from /run/secrets/redis_password, and execs
+# redis-server against the rendered copy. The password therefore never appears
+# in the image, in the compose file, in the process environment, or in argv.
+#
+# Values that must fail closed are pinned here rather than left to defaults.
+# =============================================================================
+
+bind 0.0.0.0
+port 6379
+protected-mode yes
+
+# Authentication: the only accepted credential is the injected secret.
+requirepass "__REDIS_PASSWORD__"
+
+# AOF keeps the delivery hints held here across a restart. PostgreSQL is the
+# workflow execution fact store; nothing in this instance is authoritative state.
+appendonly yes
+appendfilename "appendonly.aof"
+appenddirname "appendonlydir"
+appendfsync everysec
+aof-use-rdb-preamble yes
+dir /data
+
+# Memory: bounded by REDIS_MAXMEMORY / REDIS_MAXMEMORY_POLICY (noeviction keeps
+# queued work rather than silently dropping it under pressure).
+maxmemory __REDIS_MAXMEMORY__
+maxmemory-policy __REDIS_MAXMEMORY_POLICY__
+
+# Connections: cap concurrency so a runaway client cannot exhaust the container.
+maxclients 1024
+timeout 0
+tcp-keepalive 60
+tcp-backlog 511
+
+# Persistence snapshots are deliberately off: AOF is the recovery mechanism and
+# the Redis data volume holds only the AOF directory.
+save ""
+
+# Logging: stdout only, no logfile, so `docker compose logs` is the sole sink.
+logfile ""
+loglevel notice
+
+# Disable the latency/command-stat overhead that this deployment does not consume.
+latency-monitor-threshold 0
+slowlog-log-slower-than 10000
+slowlog-max-len 128
+
+# Redis 7 multi-part AOF and cluster are not used here.
+cluster-enabled no
+io-threads 2

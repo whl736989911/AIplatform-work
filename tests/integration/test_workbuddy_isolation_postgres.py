@@ -55,6 +55,9 @@ def _reset_schema(pool: object) -> None:
     with pool.connect() as conn:  # type: ignore[attr-defined]
         conn.execute("DROP SCHEMA public CASCADE")
         conn.execute("CREATE SCHEMA public")
+        # Control-plane migrations declare pgvector columns (WorkBuddy knowledge
+        # embeddings), so the extension has to exist before run_migrations().
+        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
 
 @pytest.fixture(scope="module")

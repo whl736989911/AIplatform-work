@@ -44,7 +44,11 @@ export default function OneTimeTokenModal({
       footer={
         <Space>
           <Button onClick={onClose}>{t("common.close")}</Button>
-          <Button type="primary" icon={<Copy size={14} />} onClick={() => void onCopy()}>
+          <Button
+            type="primary"
+            icon={<Copy size={14} />}
+            onClick={() => void onCopy()}
+          >
             {t("tenantGovernance.invitations.copyToken")}
           </Button>
         </Space>

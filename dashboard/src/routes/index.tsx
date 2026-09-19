@@ -14,6 +14,29 @@ const PersonalizationPage = lazy(
 const TokenUsagePage = lazy(() => import("../pages/Control/TokenUsage"));
 const EnterprisePage = lazy(() => import("../pages/Enterprise"));
 
+// Lazy-loaded pages — WorkBuddy console
+const WorkBuddyKnowledgePage = lazy(
+  () => import("../pages/WorkBuddy/Knowledge"),
+);
+const WorkBuddyWorkflowsPage = lazy(
+  () => import("../pages/WorkBuddy/Workflows"),
+);
+const WorkBuddyApprovalsPage = lazy(
+  () => import("../pages/WorkBuddy/Approvals"),
+);
+const WorkBuddyProposalsPage = lazy(
+  () => import("../pages/WorkBuddy/Proposals"),
+);
+const WorkBuddyMarketplacePage = lazy(
+  () => import("../pages/WorkBuddy/Marketplace"),
+);
+const WorkBuddyCompliancePage = lazy(
+  () => import("../pages/WorkBuddy/Compliance"),
+);
+const WorkBuddyLifecyclePage = lazy(
+  () => import("../pages/WorkBuddy/Lifecycle"),
+);
+
 // Lazy-loaded pages — Control
 const RemoteDesktopPage = lazy(() => import("../pages/Control/RemoteDesktop"));
 
@@ -67,6 +90,14 @@ export const pathToKey: Record<string, string> = {
   "/token-usage": "token-usage",
   // WorkBuddy enterprise governance (authenticated members).
   "/enterprise": "enterprise-governance",
+  // WorkBuddy console (authenticated members; the server owns authorization).
+  "/workbuddy/knowledge": "workbuddy-knowledge",
+  "/workbuddy/workflows": "workbuddy-workflows",
+  "/workbuddy/approvals": "workbuddy-approvals",
+  "/workbuddy/proposals": "workbuddy-proposals",
+  "/workbuddy/marketplace": "workbuddy-marketplace",
+  "/workbuddy/compliance": "workbuddy-compliance",
+  "/workbuddy/lifecycle": "workbuddy-lifecycle",
   "/agent-config": "agent-config",
   // Control
   "/channels": "channels",
@@ -165,6 +196,21 @@ export const routeConfigs: RouteConfig[] = [
   // Enterprise governance (/enterprise) is authenticated-only: the tenant
   // role from GET /api/v1/tenant-context decides which tabs render.
   { path: "/enterprise", element: <EnterprisePage /> },
+
+  // WorkBuddy console (/workbuddy/*) is authenticated-only, like /enterprise.
+  // Each page renders the server's own authorization answer and shows an
+  // explicit "not available yet" state while a backend slice is unmerged.
+  {
+    path: "/workbuddy",
+    element: <RedirectPreserveSearch to="/workbuddy/knowledge" />,
+  },
+  { path: "/workbuddy/knowledge", element: <WorkBuddyKnowledgePage /> },
+  { path: "/workbuddy/workflows", element: <WorkBuddyWorkflowsPage /> },
+  { path: "/workbuddy/approvals", element: <WorkBuddyApprovalsPage /> },
+  { path: "/workbuddy/proposals", element: <WorkBuddyProposalsPage /> },
+  { path: "/workbuddy/marketplace", element: <WorkBuddyMarketplacePage /> },
+  { path: "/workbuddy/compliance", element: <WorkBuddyCompliancePage /> },
+  { path: "/workbuddy/lifecycle", element: <WorkBuddyLifecyclePage /> },
 
   // Control (RequirePermission via pathPermissionKeys in MainLayout)
   { path: "/acp", element: <ACPPage /> },
