@@ -53,7 +53,7 @@ from octop.infra.workbuddy.proposals import (
     ReviewDecision,
     WorkBuddyProposalsService,
 )
-from octop.infra.workbuddy.runtime import RuntimeCanaryMetrics
+from octop.infra.workbuddy.runtime import RuntimeCanaryMetrics, RuntimeShadowRunner
 
 router = APIRouter()
 
@@ -97,6 +97,10 @@ _ERROR_CODES: dict[str, ErrorCode] = {
     "STATE_CONFLICT": ErrorCode.STATE_CONFLICT,
     "SHADOW_PROOF_REQUIRED": ErrorCode.PROPOSAL_GATE_NOT_MET,
     "GATES_NOT_PASSED": ErrorCode.PROPOSAL_GATE_NOT_MET,
+    # A refusal that already speaks the contract's own code stays that code.
+    "PROPOSAL_GATE_NOT_MET": ErrorCode.PROPOSAL_GATE_NOT_MET,
+    "PROPOSAL_REVIEW_REQUIREMENT": ErrorCode.PROPOSAL_REVIEW_REQUIREMENT,
+    "RECONCILIATION_REQUIRED": ErrorCode.RECONCILIATION_REQUIRED,
     "WORKFLOW_NOT_FOUND": ErrorCode.RESOURCE_NOT_FOUND,
     "DEPENDENCY_UNAVAILABLE": ErrorCode.DEPENDENCY_UNAVAILABLE,
     "WORKBUDDY_CONTEXT_INVALID": ErrorCode.WORKBUDDY_CONTEXT_INVALID,
@@ -206,8 +210,10 @@ def _service(server: Any, principal: WorkBuddyPrincipal) -> WorkBuddyProposalsSe
     return WorkBuddyProposalsService(
         _repo(server, principal),
         policy=policy,
-        # The gates are judged on the executions this tenant actually ran.
+        # The gates are judged on the executions this tenant actually ran, and
+        # the shadow phase replays this tenant's recordings.
         metrics=RuntimeCanaryMetrics(_db(server), principal.tenant_id),
+        shadow=RuntimeShadowRunner(_db(server), principal.tenant_id),
     )
 
 

@@ -369,6 +369,12 @@ async def test_promotion_walks_shadow_canary_and_apply(
     """A low-risk candidate can be promoted once the gates have evidence."""
     workflow = _publish(pool, tenant, "Proposal promotion")
     async with _client(app, _principal(tenant)) as client:
+        # The shadow phase replays recordings, so the workflow must have run.
+        ran = await client.post(
+            f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {"who": "source"}}
+        )
+        assert ran.status_code == 202, ran.text
+        assert ran.json()["data"]["status"] == "success", ran.text
         created = await _create(client, workflow, _rename_patch("Promoted"))
         proposal_id = created.json()["data"]["proposal_id"]
 
@@ -509,6 +515,12 @@ async def _walk_to_canary(
 ) -> tuple[str, str]:
     """Approve a low-risk candidate and start canary traffic with replay evidence."""
     async with _client(app, _principal(tenant)) as client:
+        # A production run first: it is the recording the shadow phase replays.
+        ran = await client.post(
+            f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {"who": "source"}}
+        )
+        assert ran.status_code == 202, ran.text
+        assert ran.json()["data"]["status"] == "success", ran.text
         created = await _create(client, workflow, _rename_patch("Canary"))
         proposal_id = created.json()["data"]["proposal_id"]
 
@@ -665,3 +677,90 @@ async def test_apply_is_judged_on_recorded_canary_executions(
     assert latest["candidate"]["settled_runs"] >= 1, latest
     # Waits are reported next to active time instead of hiding inside it.
     assert "wait_ms" in latest["baseline"], latest
+
+
+async def test_shadow_phase_needs_recordings_and_never_goes_live(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """Contract 5.2.3: replay only, and no shadow phase without something to replay."""
+    from octop.infra.workbuddy.runtime import RuntimeShadowRunner
+
+    # A workflow that has never run has nothing to replay.
+    fresh = _publish(pool, tenant, "Proposal shadow unrecorded")
+    async with _client(app, _principal(tenant)) as client:
+        created = await _create(client, fresh, _rename_patch("Shadow"))
+        proposal_id = created.json()["data"]["proposal_id"]
+
+    reviewer = _principal(
+        tenant,
+        user_id=tenant["reviewer_user_id"],
+        role="member",
+        member_id=tenant["reviewer_member_id"],
+    )
+    async with _client(app, reviewer) as client:
+        approved = await client.post(
+            f"/improvement-proposals/{proposal_id}/decisions",
+            json={"decision": "approved", "comment": "reviewed"},
+        )
+        assert approved.status_code == 200, approved.text
+
+    async with _client(app, _principal(tenant)) as client:
+        refused = await client.post(
+            f"/improvement-proposals/{proposal_id}/promote",
+            json={"action": "start_shadow", "ratio_basis_points": 500},
+            headers={"If-Match": f'"{fresh["revision"]}"'},
+        )
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["error"]["code"] == ErrorCode.PROPOSAL_GATE_NOT_MET.value, (
+            refused.text
+        )
+        assert refused.json()["error"]["details"]["reason"] == "SHADOW_NOT_AVAILABLE", refused.text
+
+    # A workflow with a settled production run can be replayed.
+    workflow = _publish(pool, tenant, "Proposal shadow replay")
+    async with _client(app, _principal(tenant)) as client:
+        ran = await client.post(
+            f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {"who": "shadow"}}
+        )
+        assert ran.status_code == 202, ran.text
+        assert ran.json()["data"]["status"] == "success", ran.text
+        created = await _create(client, workflow, _rename_patch("Replayed"))
+        proposal_id = created.json()["data"]["proposal_id"]
+
+    async with _client(app, reviewer) as client:
+        approved = await client.post(
+            f"/improvement-proposals/{proposal_id}/decisions",
+            json={"decision": "approved", "comment": "reviewed"},
+        )
+        assert approved.status_code == 200, approved.text
+
+    async with _client(app, _principal(tenant)) as client:
+        started = await client.post(
+            f"/improvement-proposals/{proposal_id}/promote",
+            json={"action": "start_shadow", "ratio_basis_points": 500},
+            headers={"If-Match": f'"{workflow["revision"]}"'},
+        )
+        assert started.status_code == 200, started.text
+        assert started.json()["data"]["status"] == "shadowing", started.text
+
+    # The runner replays the recordings; every run is replay-only and settled.
+    runner = RuntimeShadowRunner(pool, tenant["tenant_id"], runs=10)
+    assert runner.can_replay(proposal_id) is True
+    produced = runner.produce(proposal_id)
+    assert len(produced) == 10, produced
+    assert all(run.settled and run.replay_only for run in produced), produced
+    assert all(run.live_side_effects == 0 for run in produced), produced
+
+    service = _service(pool, tenant)
+    for run in produced:
+        service.record_shadow_run(proposal_id, run=run)
+
+    # With the replay proof in place the candidate may take real traffic.
+    async with _client(app, _principal(tenant)) as client:
+        canary = await client.post(
+            f"/improvement-proposals/{proposal_id}/promote",
+            json={"action": "start_canary", "ratio_basis_points": 500},
+            headers={"If-Match": f'"{workflow["revision"]}"'},
+        )
+        assert canary.status_code == 200, canary.text
+        assert canary.json()["data"]["status"] == "canary", canary.text

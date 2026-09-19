@@ -280,9 +280,25 @@ def _principal(
     )
 
 
+class _ReplayableShadow:
+    def can_replay(self, proposal_id: str) -> bool:
+        return True
+
+    def produce(self, proposal_id: str) -> list[Any]:  # pragma: no cover - unused here
+        raise AssertionError("the unit suite records shadow runs directly")
+
+
+class _NoMetrics:
+    def settled_rows(self, proposal_id: str, *, window_start: int, window_end: int) -> list[Any]:
+        return []
+
+
 def _app(store: _Store, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     monkeypatch.setattr(api, "WorkBuddyProposalsRepo", lambda _db, _ctx: store)
     monkeypatch.setattr(api, "WorkBuddyCatalogRepo", lambda _db: _Catalog())
+    # These unit tests drive the state machine, not a replay or an execution store.
+    monkeypatch.setattr(api, "RuntimeShadowRunner", lambda _db, _tenant: _ReplayableShadow())
+    monkeypatch.setattr(api, "RuntimeCanaryMetrics", lambda _db, _tenant: _NoMetrics())
     server = SimpleNamespace(services=SimpleNamespace(db=object()))
     app = FastAPI()
     app.include_router(api.router, prefix="/api/v1")

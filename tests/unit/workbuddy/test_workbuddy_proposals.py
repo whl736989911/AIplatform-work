@@ -635,8 +635,20 @@ LOW_PATCH = [{"op": "replace", "path": "/nodes/0/name", "value": "Renamed"}]
 ADMIN = P.ProposalActor(user_id=99, membership_id="m-99", is_admin=True)
 
 
+class _ReplayableShadow:
+    """The state machine tests replay nothing; they only need the capability."""
+
+    def can_replay(self, proposal_id: str) -> bool:
+        return True
+
+    def produce(self, proposal_id: str) -> list[P.ShadowRunRow]:  # pragma: no cover - unused here
+        raise AssertionError("the unit suite records shadow runs directly")
+
+
 def make_service(store: FakeStore) -> P.WorkBuddyProposalsService:
-    return P.WorkBuddyProposalsService(store, policy=POLICY, now=lambda: NOW)
+    return P.WorkBuddyProposalsService(
+        store, policy=POLICY, now=lambda: NOW, shadow=_ReplayableShadow()
+    )
 
 
 def create_proposal(

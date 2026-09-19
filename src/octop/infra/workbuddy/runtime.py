@@ -16,6 +16,7 @@ delivery hints derived from those rows.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import secrets
 import time
@@ -279,6 +280,95 @@ class SideEffectPort(Protocol):
     def respond_chat(
         self, *, session_id: str, message: str, history: Sequence[ChatMessageRow]
     ) -> ChatReply: ...
+
+
+class ReplayUnavailable(RuntimeError):
+    """A shadow run needed a recording that does not exist.
+
+    Shadow never falls back to a live call: a missing recording fails the run,
+    which is exactly what keeps replay-only evidence honest.
+    """
+
+
+class ReplaySideEffects:
+    """Answers every step from recorded outputs, never from a live system.
+
+    The port holds no live adapter at all, so a shadow run cannot reach an
+    external system even if it wanted to: the only thing it can do with an
+    unrecorded step is fail.
+    """
+
+    def __init__(self, recordings: Mapping[str, Any]) -> None:
+        self._recordings = dict(recordings)
+        self.replayed: list[str] = []
+
+    def execute_tool(
+        self, *, node: GraphNode, activation: Mapping[str, Any], idempotency_key: str
+    ) -> Any:
+        return self._replay(node)
+
+    def execute_llm(self, *, node: GraphNode, activation: Mapping[str, Any]) -> Any:
+        return self._replay(node)
+
+    def respond_chat(
+        self, *, session_id: str, message: str, history: Sequence[ChatMessageRow]
+    ) -> Any:
+        raise ReplayUnavailable("chat has no recording to replay")
+
+    def _replay(self, node: GraphNode) -> Any:
+        if node.id not in self._recordings:
+            raise ReplayUnavailable(f"node '{node.id}' has no recorded response")
+        self.replayed.append(node.id)
+        return self._recordings[node.id]
+
+
+class ShadowRunner:
+    """Replays a candidate definition against recorded responses.
+
+    A shadow run evaluates the *candidate* graph on the recordings of an earlier
+    production execution, so it can fail or succeed on real inputs without
+    sending anything to the outside world. Its result is evidence for the shadow
+    phase; it is never a canary sample.
+    """
+
+    def __init__(self, versions: WorkflowVersionSource, db: DatabasePool | None = None) -> None:
+        self._versions = versions
+
+    def run(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        workflow_id: str,
+        candidate_version_id: str,
+        inputs: Mapping[str, Any],
+        recordings: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        locked = self._versions.load_version(ctx, workflow_id, candidate_version_id)
+        graph = compile_locked_definition(
+            locked.definition, locked.definition_sha256, version_id=locked.version_id
+        )
+        port = ReplaySideEffects(recordings)
+        run = run_graph(graph, inputs=dict(inputs), effects=port, execution_id="shadow")
+        record = {
+            "status": run.status,
+            "outputs": run.outputs,
+            "steps": [
+                {"node_id": step.node_id, "status": step.status, "output": step.output}
+                for step in run.steps
+            ],
+            "replayed": sorted(port.replayed),
+        }
+        return {
+            **record,
+            "evidence_hash": hashlib.sha256(
+                json.dumps(record, sort_keys=True, separators=(",", ":"), default=str).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            "replay_only": True,
+            "live_side_effects": 0,
+            "settled": True,
+        }
 
 
 class UnavailableSideEffects:
@@ -1003,6 +1093,85 @@ def run_graph(
 # ---------------------------------------------------------------------------
 
 
+class RuntimeShadowRunner:
+    """Replays a proposal's candidate against this tenant's recordings.
+
+    The recordings are the settled step outputs of the workflow's newest
+    successful production run, so a shadow run sees the same inputs the
+    production run saw and cannot reach anything live.
+    """
+
+    def __init__(
+        self,
+        db: DatabasePool,
+        tenant_id: str,
+        *,
+        runs: int = 10,
+    ) -> None:
+        self._db = db
+        self._tenant_id = tenant_id
+        self._runs = max(int(runs), 1)
+
+    @property
+    def _ctx(self) -> WorkBuddyDbContext:
+        return WorkBuddyDbContext.for_tenant(self._tenant_id)
+
+    def _proposal(self, proposal_id: str) -> Any:
+        from octop.infra.db.repos.workbuddy_proposals import WorkBuddyProposalsRepo
+
+        record = WorkBuddyProposalsRepo(self._db, self._ctx).get_proposal(proposal_id)
+        if record is None:  # pragma: no cover - the caller resolved it already
+            raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "proposal is not visible")
+        return record
+
+    def _recordings(self, record: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        repo = WorkBuddyRuntimeRepo(self._db)
+        source_id = repo.latest_succeeded_execution(self._ctx, str(record.workflow_id))
+        if source_id is None:
+            return {}, {}
+        execution = repo.get_execution(self._ctx, source_id)
+        return repo.recorded_outputs(self._ctx, source_id), dict(
+            execution.inputs if execution is not None else {}
+        )
+
+    def can_replay(self, proposal_id: str) -> bool:
+        record = self._proposal(proposal_id)
+        recordings, _inputs = self._recordings(record)
+        return bool(recordings)
+
+    def produce(self, proposal_id: str) -> list[Any]:
+        from octop.infra.workbuddy.proposals import ShadowRunRow
+
+        record = self._proposal(proposal_id)
+        recordings, inputs = self._recordings(record)
+        if not recordings:
+            raise OctopError(
+                ErrorCode.RESOURCE_NOT_FOUND,
+                "no recorded responses are available for this workflow",
+            )
+        runner = ShadowRunner(WorkflowCatalogVersions(self._db))
+        runs: list[Any] = []
+        for index in range(self._runs):
+            outcome = runner.run(
+                self._ctx,
+                workflow_id=str(record.workflow_id),
+                candidate_version_id=str(record.candidate_version_id),
+                inputs={**inputs, "shadow_run": index},
+                recordings=recordings,
+            )
+            runs.append(
+                ShadowRunRow(
+                    run_id=f"{record.proposal_id}:{index}",
+                    settled=bool(outcome["settled"]),
+                    replay_only=bool(outcome["replay_only"]),
+                    live_side_effects=int(outcome["live_side_effects"]),
+                    evidence_hash=str(outcome["evidence_hash"]),
+                    created_at=int(time.time()),
+                )
+            )
+        return runs
+
+
 class RuntimeCanaryMetrics:
     """Cohort metrics from the runtime's own executions, for the proposals slice.
 
@@ -1012,7 +1181,12 @@ class RuntimeCanaryMetrics:
 
     def __init__(self, db: DatabasePool, tenant_id: str) -> None:
         self._db = db
-        self._ctx = WorkBuddyDbContext.for_tenant(tenant_id)
+        self._tenant_id = tenant_id
+
+    @property
+    def _ctx(self) -> WorkBuddyDbContext:
+        # Built on use: constructing the adapter must not require a database.
+        return WorkBuddyDbContext.for_tenant(self._tenant_id)
 
     def settled_rows(self, proposal_id: str, *, window_start: int, window_end: int) -> list[Any]:
         from octop.infra.workbuddy.proposals import ExecutionMetricRow

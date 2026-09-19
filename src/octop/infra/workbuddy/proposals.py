@@ -1524,6 +1524,14 @@ class CanaryMetricsSource(Protocol):
     ) -> Sequence[ExecutionMetricRow]: ...
 
 
+class ShadowRunnerPort(Protocol):
+    """Whether a candidate can be replayed, and the runs that come out of it."""
+
+    def can_replay(self, proposal_id: str) -> bool: ...
+
+    def produce(self, proposal_id: str) -> Sequence[ShadowRunRow]: ...
+
+
 class ProposalStore(Protocol):
     """Tenant-scoped persistence used by the service.
 
@@ -1678,6 +1686,7 @@ class WorkBuddyProposalsService:
         thresholds: GateThresholds = DEFAULT_GATE_THRESHOLDS,
         now: Callable[[], int] = lambda: int(time.time()),
         metrics: CanaryMetricsSource | None = None,
+        shadow: ShadowRunnerPort | None = None,
     ) -> None:
         self._store = store
         self._policy = policy
@@ -1686,6 +1695,7 @@ class WorkBuddyProposalsService:
         # When wired, the gates are computed from the executions that ran; a
         # deployment without a source still applies on a recorded evaluation.
         self._metrics = metrics
+        self._shadow = shadow
 
     # -- creation ---------------------------------------------------------- #
 
@@ -1831,6 +1841,16 @@ class WorkBuddyProposalsService:
             )
         elif action is PromotionAction.START_SHADOW:
             target = transition_for(action, record.status)
+            # Recorded responses or a verified sandbox are the only ways a shadow
+            # phase may run, and the sandbox registry does not exist yet.
+            if self._shadow is None or not self._shadow.can_replay(proposal_id):
+                # The contract's gate code: the conditions for starting shadow are
+                # not met, and without recordings there are none to meet.
+                raise ProposalPolicyError(
+                    "PROPOSAL_GATE_NOT_MET",
+                    "no recorded responses are available to replay this candidate",
+                    details={"proposal_id": proposal_id, "reason": "SHADOW_NOT_AVAILABLE"},
+                )
             record = self._transition(record, target, {"status_reason": None})
         elif action is PromotionAction.START_CANARY:
             target = transition_for(action, record.status)

@@ -827,6 +827,32 @@ class WorkBuddyRuntimeRepo:
             )
             return bool(getattr(cursor, "rowcount", 0))
 
+    def latest_succeeded_execution(
+        self, ctx: WorkBuddyDbContext, workflow_id: str, *, conn: Any | None = None
+    ) -> str | None:
+        """The newest successful run of a workflow: the shadow replay source."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            row = c.execute(
+                "SELECT id FROM workbuddy_executions"
+                " WHERE workflow_id = ? AND status = 'success'"
+                " ORDER BY created_at DESC, id DESC LIMIT 1",
+                (workflow_id,),
+            ).fetchone()
+        return str(row["id"]) if row is not None else None
+
+    def recorded_outputs(
+        self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
+    ) -> dict[str, Any]:
+        """What each settled step of an execution produced, by node id."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            rows = c.execute(
+                "SELECT node_id, output FROM workbuddy_step_runs"
+                " WHERE execution_id = ? AND status = 'success' AND output IS NOT NULL"
+                " ORDER BY attempt, node_id",
+                (execution_id,),
+            ).fetchall()
+        return {str(row["node_id"]): row["output"] for row in rows}
+
     def canary_metrics(
         self,
         ctx: WorkBuddyDbContext,
@@ -854,10 +880,10 @@ class WorkBuddyRuntimeRepo:
             clauses.append("created_at >= to_timestamp(?)")
             params.append(float(window_start))
         if window_end is not None:
-            # A closed window: the beginning and the end second both count, so a
-            # sample created in the same second as the window end is not lost.
-            clauses.append("created_at <= to_timestamp(?)")
-            params.append(float(window_end))
+            # The window is measured in whole seconds, so it covers the end second
+            # completely: a sample created 84ms into it is inside, not outside.
+            clauses.append("created_at < to_timestamp(?)")
+            params.append(float(window_end) + 1.0)
         with runtime_transaction(self._db, ctx, conn) as c:
             rows = c.execute(
                 "SELECT cohort, status, active_duration_ms, token_usage,"
