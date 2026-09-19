@@ -1,0 +1,10 @@
+# Deployment-local ignores: real settings and every secret stay on the host.
+.env
+*.env
+!.env.example
+backups/
+secrets/*
+!secrets/.gitkeep
+*.dump
+*.dump.json
+restore-drill.json

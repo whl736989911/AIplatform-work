@@ -1,0 +1,472 @@
+# =============================================================================
+# Octop + WorkBuddy — production Linux stack (standalone, not a dev overlay)
+#
+#   cp deploy/production.env.example deploy/.env      # then fill in real values
+#   # host secret files (never committed):
+#   #   deploy/secrets/postgres_password   (octop DB role password)
+#   #   deploy/secrets/redis_password      (redis requirepass)
+#   #   deploy/secrets/jwt_secret          optional: pinned control-plane JWT secret
+#   #   deploy/secrets/aws_access_key_id / aws_secret_access_key / aws_session_token
+#   #   deploy/secrets/vault_role_id / vault_secret_id   (workload identity, profile: vault)
+#   docker compose -f deploy/compose.production.yml --env-file deploy/.env config
+#   docker compose -f deploy/compose.production.yml --env-file deploy/.env up -d
+#
+# Images are DIGEST-PINNED through required env vars (`:?` = hard failure when
+# unset). Tags are rejected by deploy/scripts/verify-deployment-policy.sh, which
+# also enforces every property asserted below, against the rendered config.
+#
+# Component digests in contracts/dependency-lock.json (container_components) are
+# the source of truth for what may run in production; the runtime version gate in
+# deploy/scripts/verify-deployment-policy.sh compares the observed server
+# versions against that lock and refuses to promote the stack otherwise.
+#
+# Vault is opt-in (`--profile vault`) because dependency-lock.json still marks it
+# `source_locked_runtime_poc_and_legal_review_blocked`: no WorkBuddy workload may
+# treat Vault-backed secrets as available until that gate is closed.
+#
+# Secrets stay out of this file and out of the rendered environment: every
+# credential is mounted as a file under /run/secrets and read inside the
+# container entrypoints, which fail closed when a required file is missing.
+# =============================================================================
+name: octop-production
+
+x-logging: &bounded-logs
+  driver: json-file
+  options:
+    max-size: "${OCTOP_LOG_MAX_SIZE:-10m}"
+    max-file: "${OCTOP_LOG_MAX_FILES:-3}"
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+
+services:
+  # --- one-shot: make the named volumes writable by the non-root service users --
+  volume-init:
+    image: ${OCTOP_IMAGE:?set OCTOP_IMAGE to a digest-pinned image reference (repo@sha256:<64 hex>)}
+    pull_policy: always
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/octop-deploy/scripts/init-volumes.sh"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # least privilege for chown() on a fresh named volume, dropped with the process
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    environment:
+      - OCTOP_UID=${OCTOP_UID:-10001}
+      - OCTOP_GID=${OCTOP_GID:-10001}
+      - POSTGRES_UID=${POSTGRES_UID:-999}
+      - POSTGRES_GID=${POSTGRES_GID:-999}
+      - REDIS_UID=${REDIS_UID:-999}
+      - REDIS_GID=${REDIS_GID:-1000}
+      - VAULT_UID=${VAULT_UID:-100}
+      - VAULT_GID=${VAULT_GID:-1000}
+    volumes:
+      - ./scripts:/opt/octop-deploy/scripts:ro
+      - octop_data:/volumes/octop
+      - postgres_data:/volumes/postgres
+      - redis_data:/volumes/redis
+      - vault_data:/volumes/vault
+      - vault_logs:/volumes/vault-logs
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    logging: *bounded-logs
+    deploy:
+      resources:
+        limits:
+          cpus: "${OCTOP_INIT_CPUS:-0.5}"
+          memory: "${OCTOP_INIT_MEMORY:-256m}"
+          pids: 128
+
+  # --- PostgreSQL + pgvector (private network only, never published) -----------
+  postgres:
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE to a digest-pinned pgvector-enabled PostgreSQL 17.6 image reference}
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    # the official entrypoint drops root to the `postgres` role before serving
+    user: "${POSTGRES_UID:-999}:${POSTGRES_GID:-999}"
+    <<: *hardening
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+      - -c
+      - port=5432
+      - -c
+      # no TLS: the instance only listens on the internal `data` network, which
+      # has no external route, and never publishes a host port
+      - ssl=off
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-8MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
+      - -c
+      - statement_timeout=${POSTGRES_STATEMENT_TIMEOUT:-60s}
+      - -c
+      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_TX_TIMEOUT:-120s}
+      - -c
+      - log_min_duration_statement=${POSTGRES_SLOW_QUERY_MS:-2000}
+      - -c
+      - row_security=on
+    shm_size: "${POSTGRES_SHM_SIZE:-256m}"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-octop}
+      - POSTGRES_DB=${POSTGRES_DB:-octop}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - POSTGRES_INITDB_ARGS=--data-checksums
+      - PGDATA=/var/lib/postgresql/data
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # pgvector extension bootstrap; initdb.d runs only on an empty data volume
+      - ./config/postgres/init-vector.sql:/docker-entrypoint-initdb.d/01-vector.sql:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m
+    networks:
+      - data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -q -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\" -h 127.0.0.1 -p 5432",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    logging: *bounded-logs
+    deploy:
+      resources:
+        limits:
+          cpus: "${POSTGRES_CPUS:-2.0}"
+          memory: "${POSTGRES_MEMORY:-2g}"
+          pids: 512
+        reservations:
+          memory: "${POSTGRES_MEMORY_RESERVATION:-512m}"
+
+  # --- Redis (private network only, never published) ---------------------------
+  redis:
+    image: ${REDIS_IMAGE:?set REDIS_IMAGE to a digest-pinned Redis 7.4.x image reference}
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    user: "${REDIS_UID:-999}:${REDIS_GID:-1000}"
+    <<: *hardening
+    entrypoint: ["/bin/sh", "/opt/octop-deploy/scripts/redis-entrypoint.sh"]
+    environment:
+      - REDIS_PASSWORD_FILE=/run/secrets/redis_password
+      - REDIS_CONFIG_TEMPLATE=/opt/octop-deploy/config/redis.conf.template
+      - REDIS_MAXMEMORY=${REDIS_MAXMEMORY:-512mb}
+      - REDIS_MAXMEMORY_POLICY=${REDIS_MAXMEMORY_POLICY:-noeviction}
+    secrets:
+      - redis_password
+    volumes:
+      - ./scripts:/opt/octop-deploy/scripts:ro
+      - ./config/redis/redis.conf.template:/opt/octop-deploy/config/redis.conf.template:ro
+      - redis_data:/data
+    tmpfs:
+      - /run/redis:rw,nosuid,nodev,size=8m
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "/bin/sh /opt/octop-deploy/scripts/redis-healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging: *bounded-logs
+    deploy:
+      resources:
+        limits:
+          cpus: "${REDIS_CPUS:-1.0}"
+          memory: "${REDIS_MEMORY:-768m}"
+          pids: 256
+    stop_grace_period: 30s
+
+  # --- schema migration job: must succeed before the app may start -------------
+  migrate:
+    image: ${OCTOP_IMAGE:?set OCTOP_IMAGE to a digest-pinned image reference (repo@sha256:<64 hex>)}
+    pull_policy: always
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    user: "${OCTOP_UID:-10001}:${OCTOP_GID:-10001}"
+    <<: *hardening
+    entrypoint: ["/bin/sh", "/opt/octop-deploy/scripts/migrate.sh"]
+    environment:
+      - HOME=/data
+      - OCTOP_DEPLOY_SERVICE=migrate
+      - OCTOP_DATABASE_DRIVER=postgresql
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-octop}
+      - POSTGRES_USER=${POSTGRES_USER:-octop}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - OCTOP_MIGRATION_WAIT_SECONDS=${OCTOP_MIGRATION_WAIT_SECONDS:-120}
+      - OCTOP_EXPECTED_DATABASE_SERVER_VERSION=${OCTOP_EXPECTED_DATABASE_SERVER_VERSION:-17.6}
+      - OCTOP_LOG_LEVEL=${OCTOP_LOG_LEVEL:-info}
+    secrets:
+      - postgres_password
+    volumes:
+      - ./scripts:/opt/octop-deploy/scripts:ro
+      - ./contracts:/opt/octop-deploy/contracts:ro
+      - octop_data:/data/.octop
+    networks:
+      - data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    logging: *bounded-logs
+    deploy:
+      resources:
+        limits:
+          cpus: "${OCTOP_JOB_CPUS:-1.0}"
+          memory: "${OCTOP_JOB_MEMORY:-1g}"
+          pids: 256
+
+  # --- optional first-admin bootstrap (profile: bootstrap, run once) -----------
+  bootstrap:
+    profiles: ["bootstrap"]
+    image: ${OCTOP_IMAGE:?set OCTOP_IMAGE to a digest-pinned image reference (repo@sha256:<64 hex>)}
+    pull_policy: always
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    user: "${OCTOP_UID:-10001}:${OCTOP_GID:-10001}"
+    <<: *hardening
+    entrypoint: ["/bin/sh", "/opt/octop-deploy/scripts/bootstrap-admin.sh"]
+    environment:
+      - HOME=/data
+      - OCTOP_DEPLOY_SERVICE=bootstrap
+      - OCTOP_DATABASE_DRIVER=postgresql
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-octop}
+      - POSTGRES_USER=${POSTGRES_USER:-octop}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - OCTOP_ADMIN_USERNAME=${OCTOP_ADMIN_USERNAME:-admin}
+      - OCTOP_ADMIN_DISPLAY_NAME=${OCTOP_ADMIN_DISPLAY_NAME:-Admin}
+      - OCTOP_ADMIN_PASSWORD_FILE=/run/secrets/octop_admin_password
+    secrets:
+      - postgres_password
+      - octop_admin_password
+    volumes:
+      - ./scripts:/opt/octop-deploy/scripts:ro
+      - octop_data:/data/.octop
+    networks:
+      - data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    logging: *bounded-logs
+    deploy:
+      resources:
+        limits:
+          cpus: "${OCTOP_JOB_CPUS:-1.0}"
+          memory: "${OCTOP_JOB_MEMORY:-1g}"
+          pids: 256
+
+  # --- Vault (optional profile `vault`; workload-identity placeholders only) ---
+  # dependency-lock.json keeps Vault at `source_locked_runtime_poc_and_legal_review_blocked`:
+  # enabling this profile does NOT satisfy that gate and no runtime path may
+  # assume Vault-backed secrets exist until the gate is closed.
+  vault:
+    profiles: ["vault"]
+    image: ${VAULT_IMAGE:?set VAULT_IMAGE to a digest-pinned Vault 2.1.1 image reference}
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    user: "${VAULT_UID:-100}:${VAULT_GID:-1000}"
+    <<: *hardening
+    entrypoint: ["/bin/sh", "/opt/octop-deploy/scripts/vault-entrypoint.sh"]
+    environment:
+      - VAULT_CONFIG_DIR=/vault/config
+      - VAULT_ADDR=http://127.0.0.1:8200
+      - VAULT_UI=${VAULT_UI:-false}
+      - VAULT_LOG_LEVEL=${VAULT_LOG_LEVEL:-warn}
+    # cap_add is intentionally empty: Vault only needs IPC_LOCK when mlock is
+    # enabled, and config/vault/vault.hcl disables it (disable_mlock = true).
+    volumes:
+      - ./scripts:/opt/octop-deploy/scripts:ro
+      - ./config/vault:/vault/config:ro
+      - vault_data:/vault/file
+      - vault_logs:/vault/logs
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    networks:
+      - vaultpriv
+    healthcheck:
+      # `vault status` exits 0 unsealed, 1 on error and 2 while sealed. This
+      # profile intentionally starts sealed and stays sealed until the operator
+      # supplies unseal material out of band, so health means "the server answers
+      # on its listener", not "unsealed".
+      test: ["CMD-SHELL", "vault status >/dev/null 2>&1; rc=$$?; [ \"$$rc\" -eq 0 ] || [ \"$$rc\" -eq 2 ]"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *bounded-logs
+    deploy:
+      resources:
+        limits:
+          cpus: "${VAULT_CPUS:-0.5}"
+          memory: "${VAULT_MEMORY:-512m}"
+          pids: 256
+
+  # --- application ------------------------------------------------------------
+  app:
+    image: ${OCTOP_IMAGE:?set OCTOP_IMAGE to a digest-pinned image reference (repo@sha256:<64 hex>)}
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    user: "${OCTOP_UID:-10001}:${OCTOP_GID:-10001}"
+    <<: *hardening
+    entrypoint: ["/bin/sh", "/opt/octop-deploy/scripts/app-entrypoint.sh"]
+    environment:
+      - HOME=/data
+      - OCTOP_DEPLOY_SERVICE=app
+      - OCTOP_BIND_HOST=0.0.0.0
+      - OCTOP_PORT=8088
+      - OCTOP_LOG_LEVEL=${OCTOP_LOG_LEVEL:-info}
+      - OCTOP_ENABLE_DASHBOARD=${OCTOP_ENABLE_DASHBOARD:-true}
+      - OCTOP_ENABLE_API_DOCS=${OCTOP_ENABLE_API_DOCS:-false}
+      - OCTOP_REQUIRE_SETUP_PASSWORD=${OCTOP_REQUIRE_SETUP_PASSWORD:-true}
+      - OCTOP_CORS_ORIGINS=${OCTOP_CORS_ORIGINS:-}
+      - OCTOP_DATABASE_DRIVER=postgresql
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-octop}
+      - POSTGRES_USER=${POSTGRES_USER:-octop}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_PASSWORD_FILE=/run/secrets/redis_password
+      # private S3-compatible object storage (adapter configuration only)
+      - OBJECT_STORAGE_KIND=${OBJECT_STORAGE_KIND:-s3}
+      - OBJECT_STORAGE_ENDPOINT=${OBJECT_STORAGE_ENDPOINT:-}
+      - OBJECT_STORAGE_BUCKET=${OBJECT_STORAGE_BUCKET:-}
+      - OBJECT_STORAGE_PREFIX=${OBJECT_STORAGE_PREFIX:-}
+      - OBJECT_STORAGE_REGION=${OBJECT_STORAGE_REGION:-}
+      - OBJECT_STORAGE_FORCE_PATH_STYLE=${OBJECT_STORAGE_FORCE_PATH_STYLE:-true}
+      - AWS_ACCESS_KEY_ID_FILE=/run/secrets/aws_access_key_id
+      - AWS_SECRET_ACCESS_KEY_FILE=/run/secrets/aws_secret_access_key
+      - AWS_SESSION_TOKEN_FILE=/run/secrets/aws_session_token
+      # locked embedding model revision; leave empty while the quality gate is open
+      - EMBEDDING_MODEL_REVISION=${EMBEDDING_MODEL_REVISION:-}
+      # Vault workload-identity placeholders (file indirection, no inline tokens)
+      - VAULT_ADDR=${VAULT_ADDR:-}
+      - VAULT_NAMESPACE=${VAULT_NAMESPACE:-}
+      - VAULT_ROLE_ID_FILE=/run/secrets/vault_role_id
+      - VAULT_SECRET_ID_FILE=/run/secrets/vault_secret_id
+      - VAULT_CACERT=${VAULT_CACERT:-}
+      - VAULT_WORKLOAD_IDENTITY_REQUIRED=${VAULT_WORKLOAD_IDENTITY_REQUIRED:-false}
+    secrets:
+      - postgres_password
+      - redis_password
+      - aws_access_key_id
+      - aws_secret_access_key
+      - aws_session_token
+      - vault_role_id
+      - vault_secret_id
+    volumes:
+      - ./scripts:/opt/octop-deploy/scripts:ro
+      - ./contracts:/opt/octop-deploy/contracts:ro
+      - octop_data:/data/.octop
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+      - /run/octop:rw,nosuid,nodev,size=16m
+    networks:
+      - edge
+      - data
+      - vaultpriv
+    ports:
+      # publish loopback only; terminate TLS and authenticate at the edge proxy
+      - "${OCTOP_BIND_ADDRESS:-127.0.0.1}:${OCTOP_PORT:-8088}:8088"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    logging: *bounded-logs
+    deploy:
+      resources:
+        limits:
+          cpus: "${OCTOP_APP_CPUS:-2.0}"
+          memory: "${OCTOP_APP_MEMORY:-2g}"
+          pids: 512
+        reservations:
+          memory: "${OCTOP_APP_MEMORY_RESERVATION:-512m}"
+    stop_grace_period: 60s
+
+networks:
+  # egress path for the app (model providers, connectors); no service listens here
+  edge:
+    driver: bridge
+  # datastores: no route to or from the outside
+  data:
+    driver: bridge
+    internal: true
+  # Vault: private, internal, never published
+  vaultpriv:
+    driver: bridge
+    internal: true
+
+volumes:
+  octop_data:
+  postgres_data:
+  redis_data:
+  vault_data:
+  vault_logs:
+
+secrets:
+  postgres_password:
+    file: ${OCTOP_SECRETS_DIR:-./secrets}/postgres_password
+  redis_password:
+    file: ${OCTOP_SECRETS_DIR:-./secrets}/redis_password
+  octop_admin_password:
+    file: ${OCTOP_SECRETS_DIR:-./secrets}/octop_admin_password
+  aws_access_key_id:
+    file: ${OCTOP_SECRETS_DIR:-./secrets}/aws_access_key_id
+  aws_secret_access_key:
+    file: ${OCTOP_SECRETS_DIR:-./secrets}/aws_secret_access_key
+  aws_session_token:
+    file: ${OCTOP_SECRETS_DIR:-./secrets}/aws_session_token
+  vault_role_id:
+    file: ${OCTOP_SECRETS_DIR:-./secrets}/vault_role_id
+  vault_secret_id:
+    file: ${OCTOP_SECRETS_DIR:-./secrets}/vault_secret_id
