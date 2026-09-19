@@ -76,6 +76,33 @@ def _json_map(value: Any) -> dict[str, Any]:
     return {}
 
 
+def execution_lease_name(execution_id: str) -> str:
+    """Lease name of one execution's attempt: one lease per execution.
+
+    Parallel nodes of the same execution share it, so the fence it carries is
+    also the token every write of that attempt is checked against.
+    """
+    return f"execution:{execution_id}"
+
+
+# The oldest execution a worker may try to admit: waiting ones, plus the ones a
+# crashed worker left running on a lease that has since expired. Locking only the
+# execution row lets two workers scan at once and still claim one execution once.
+_CLAIMABLE_EXECUTIONS_SQL = """
+SELECT e.id, e.tenant_id, e.started_at
+FROM workbuddy_executions e
+LEFT JOIN workbuddy_leases l
+  ON l.tenant_id = e.tenant_id
+ AND l.lease_name = 'execution:' || e.id::text
+ AND l.released_at IS NULL
+ AND l.expires_at > now()
+WHERE e.status IN ('queued', 'running') AND l.tenant_id IS NULL
+ORDER BY e.created_at, e.id
+LIMIT ?
+FOR UPDATE OF e SKIP LOCKED
+"""
+
+
 @contextmanager
 def runtime_transaction(
     db: DatabasePool,
@@ -92,6 +119,20 @@ def runtime_transaction(
         return
     with workbuddy_transaction(db, ctx) as opened:
         yield opened
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionClaim:
+    """One execution a worker admitted and now owns under ``fence``.
+
+    ``fence`` is the lease's monotonic fencing token: every later write of this
+    attempt carries it, so a worker that lost the lease cannot commit.
+    """
+
+    tenant_id: str
+    execution_id: str
+    fence: int
+    worker_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +246,9 @@ class StepRunRow:
     duration_ms: int | None
     started_at: Any
     finished_at: Any
+    tool_id: str | None = None
+    tool_call_key: str | None = None
+    dispatch_intent_at: Any = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> StepRunRow:
@@ -224,6 +268,9 @@ class StepRunRow:
             duration_ms=row["duration_ms"],
             started_at=row["started_at"],
             finished_at=row["finished_at"],
+            tool_id=row["tool_id"],
+            tool_call_key=row["tool_call_key"],
+            dispatch_intent_at=row["dispatch_intent_at"],
         )
 
 
@@ -764,7 +811,7 @@ class WorkBuddyRuntimeRepo:
         *,
         status: str,
         expected_status: Sequence[str],
-        fence: int | None = None,
+        expected_fence: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
         outputs: JsonMap | None = None,
@@ -800,15 +847,15 @@ class WorkBuddyRuntimeRepo:
             assignments.append("finished_at = now()")
         params.append(execution_id)
         params.extend(expected_status)
-        if fence is not None:
-            assignments.append("fence = fence + 1")
         sql = (
             f"UPDATE workbuddy_executions SET {', '.join(assignments)} "
             f"WHERE id = ? AND status IN ({placeholders})"
         )
-        if fence is not None:
+        if expected_fence is not None:
+            # The attempt's fencing token: a worker that lost its lease cannot
+            # commit this write, even if it reached the statement late.
             sql += " AND fence = ?"
-            params.append(fence)
+            params.append(int(expected_fence))
         with runtime_transaction(self._db, ctx, conn) as c:
             cursor = c.execute(sql, tuple(params))
             return bool(getattr(cursor, "rowcount", 0))
@@ -816,16 +863,77 @@ class WorkBuddyRuntimeRepo:
     def request_cancel(
         self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
     ) -> bool:
+        """Cancel an execution that is not running; report False when it is.
+
+        A queued or parked execution has no call in flight, so it can be canceled
+        outright. A *running* one may be in the middle of an external call, and
+        the contract forbids claiming to undo a write that may already have
+        happened: the request is recorded instead (``request_cancel_running``)
+        and the run converges to ``canceled`` once its current call lands.
+        """
         with runtime_transaction(self._db, ctx, conn) as c:
             cursor = c.execute(
                 """
                 UPDATE workbuddy_executions
                 SET status = 'canceled', cancel_requested_at = now(), finished_at = now()
-                WHERE id = ? AND status IN ('queued', 'running', 'waiting_approval')
+                WHERE id = ? AND status IN ('queued', 'waiting_approval')
                 """,
                 (execution_id,),
             )
             return bool(getattr(cursor, "rowcount", 0))
+
+    def request_cancel_running(
+        self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
+    ) -> bool:
+        """Ask a running execution to stop before its next step.
+
+        The runner notices between nodes and settles the attempt as ``canceled``;
+        until then the execution keeps the status and the slot it holds, which is
+        what makes the cancel honest about the call already in flight.
+        """
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_executions
+                SET cancel_requested_at = COALESCE(cancel_requested_at, now())
+                WHERE id = ? AND status = 'running'
+                """,
+                (execution_id,),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def cancel_requested(
+        self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
+    ) -> bool:
+        """True once a cancel has been requested for this execution."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            row = c.execute(
+                "SELECT cancel_requested_at FROM workbuddy_executions WHERE id = ?",
+                (execution_id,),
+            ).fetchone()
+        return row is not None and row["cancel_requested_at"] is not None
+
+    def cancel_pending_steps(
+        self,
+        ctx: WorkBuddyDbContext,
+        execution_id: str,
+        *,
+        attempt: int,
+        fence: int,
+        conn: Any | None = None,
+    ) -> int:
+        """Cancel the steps this attempt queued but never decided."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_step_runs
+                SET status = 'canceled', finished_at = now()
+                WHERE execution_id = ? AND attempt = ? AND fence = ?
+                  AND status IN ('queued', 'running')
+                """,
+                (execution_id, int(attempt), int(fence)),
+            )
+            return int(getattr(cursor, "rowcount", 0) or 0)
 
     def latest_succeeded_execution(
         self, ctx: WorkBuddyDbContext, workflow_id: str, *, conn: Any | None = None
@@ -1026,6 +1134,162 @@ class WorkBuddyRuntimeRepo:
                 ),
             )
         return rid
+
+    def queue_step_runs(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        nodes: Sequence[tuple[str, str]],
+        attempt: int,
+        fence: int,
+        conn: Any | None = None,
+    ) -> int:
+        """Record the attempt's pending steps: one ``queued`` row per node.
+
+        A node an earlier attempt already settled keeps that row -- it is a
+        replay or a permanent failure -- so the newest attempt can never mask a
+        fact the engine still has to honour. What is left is exactly the work
+        this attempt has not decided yet, which is what ``queued`` means.
+        """
+        inserted = 0
+        with runtime_transaction(self._db, ctx, conn) as c:
+            for node_id, node_type in nodes:
+                cursor = c.execute(
+                    """
+                    INSERT INTO workbuddy_step_runs(
+                        id, tenant_id, execution_id, node_id, node_type, attempt, status, fence
+                    )
+                    SELECT ?, ?, ?, ?, ?, ?, 'queued', ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM workbuddy_step_runs settled
+                        WHERE settled.tenant_id = ? AND settled.execution_id = ?
+                          AND settled.node_id = ?
+                          AND settled.status IN ('success', 'failed', 'skipped', 'canceled')
+                    )
+                    ON CONFLICT (tenant_id, execution_id, node_id, attempt) DO NOTHING
+                    """,
+                    (
+                        new_runtime_id(),
+                        tenant_id,
+                        execution_id,
+                        node_id,
+                        node_type,
+                        int(attempt),
+                        int(fence),
+                        tenant_id,
+                        execution_id,
+                        node_id,
+                    ),
+                )
+                inserted += int(getattr(cursor, "rowcount", 0) or 0)
+        return inserted
+
+    def mark_step_running(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        execution_id: str,
+        node_id: str,
+        attempt: int,
+        fence: int,
+        conn: Any | None = None,
+    ) -> bool:
+        """Move one pending step to ``running``; only its own fence may."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_step_runs
+                SET status = 'running'
+                WHERE execution_id = ? AND node_id = ? AND attempt = ? AND fence = ?
+                  AND status = 'queued'
+                """,
+                (execution_id, node_id, int(attempt), int(fence)),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def settle_attempt_step(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        execution_id: str,
+        node_id: str,
+        attempt: int,
+        fence: int,
+        status: str,
+        save_as: str | None = None,
+        output_sha256: str | None = None,
+        output: Any = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        duration_ms: int | None = None,
+        skip_reason: str | None = None,
+        started_at: float | None = None,
+        conn: Any | None = None,
+    ) -> bool:
+        """Settle the row this attempt queued, in place.
+
+        False means the step was not pending under this fence: either the attempt
+        is not the one that queued it, or another worker owns the execution now.
+        """
+        finished_at = "now()" if status in {"success", "failed", "skipped"} else "NULL"
+        started = ", started_at = to_timestamp(?)" if started_at is not None else ""
+        params: list[Any] = [
+            status,
+            save_as,
+            output_sha256,
+            _jsonb(output),
+            error_code,
+            error_message,
+            duration_ms,
+            skip_reason,
+        ]
+        if started_at is not None:
+            params.append(float(started_at))
+        params.extend([execution_id, node_id, int(attempt), int(fence)])
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                f"""
+                UPDATE workbuddy_step_runs
+                SET status = ?, save_as = ?, output_sha256 = ?, output = ?, error_code = ?,
+                    error_message = ?, duration_ms = ?, skip_reason = ?, finished_at = {finished_at}
+                    {started}
+                WHERE execution_id = ? AND node_id = ? AND attempt = ? AND fence = ?
+                  AND status IN ('queued', 'running')
+                """,
+                tuple(params),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def mark_step_dispatch_intent(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        execution_id: str,
+        node_id: str,
+        attempt: int,
+        fence: int,
+        tool_id: str | None,
+        tool_call_key: str,
+        conn: Any | None = None,
+    ) -> bool:
+        """Record what this attempt is about to call, before it calls it.
+
+        Written once per attempt: the first decision to dispatch is the intent,
+        and a second write would only move the moment the call left the process.
+        """
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_step_runs
+                SET tool_id = ?, tool_call_key = ?, dispatch_intent_at = now()
+                WHERE execution_id = ? AND node_id = ? AND attempt = ? AND fence = ?
+                  AND status = 'running' AND dispatch_intent_at IS NULL
+                """,
+                (tool_id, tool_call_key, execution_id, node_id, int(attempt), int(fence)),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
 
     def list_step_runs(
         self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
@@ -1698,7 +1962,162 @@ class WorkBuddyRuntimeRepo:
             )
             return bool(getattr(cursor, "rowcount", 0))
 
+    # -- worker claims ------------------------------------------------------
+
+    def claim_execution(
+        self,
+        *,
+        worker_id: str,
+        lease_ttl_seconds: int,
+        reservation_ttl_seconds: int,
+        scan_limit: int = 50,
+    ) -> ExecutionClaim | None:
+        """Claim the oldest admissible execution for ``worker_id``.
+
+        Everything the contract asks of admission happens in this one
+        transaction: the tenant's row is locked so two workers can never count
+        the same free slot, a suspended tenant starts nothing new (work already
+        in flight still finishes), the slot a crashed worker left behind is
+        reused instead of doubled, the lease is taken with a monotonic fence, and
+        the execution moves to ``running`` under that fence.
+
+        ``running`` executions whose lease expired are claimable, which is how a
+        crashed worker's attempt is taken over. Returns None when nothing can be
+        admitted right now.
+        """
+        ctx = WorkBuddyDbContext.platform()
+        with runtime_transaction(self._db, ctx) as c:
+            candidates = c.execute(_CLAIMABLE_EXECUTIONS_SQL, (max(1, int(scan_limit)),)).fetchall()
+            for row in candidates:
+                execution_id = str(row["id"])
+                tenant_id = str(row["tenant_id"])
+                started = row["started_at"] is not None
+                tenant = c.execute(
+                    "SELECT status FROM workbuddy_tenants WHERE tenant_id = ? FOR UPDATE",
+                    (tenant_id,),
+                ).fetchone()
+                if tenant is None:
+                    continue
+                if str(_row_value(tenant, "status", "")) != "active" and not started:
+                    continue
+                if not self._holds_slot(c, tenant_id=tenant_id, execution_id=execution_id):
+                    limit = self._concurrency_limit(c, tenant_id)
+                    if limit is not None and self._live_slot_count(c, tenant_id) + 1 > limit:
+                        continue
+                    self._reserve_slot(
+                        c,
+                        tenant_id=tenant_id,
+                        execution_id=execution_id,
+                        ttl_seconds=reservation_ttl_seconds,
+                    )
+                lease_name = execution_lease_name(execution_id)
+                fence = self.acquire_lease(
+                    ctx,
+                    tenant_id=tenant_id,
+                    lease_name=lease_name,
+                    holder=worker_id,
+                    ttl_seconds=lease_ttl_seconds,
+                    conn=c,
+                )
+                if fence is None:
+                    continue
+                cursor = c.execute(
+                    """
+                    UPDATE workbuddy_executions
+                    SET status = 'running', started_at = COALESCE(started_at, now()), fence = ?
+                    WHERE id = ? AND status IN ('queued', 'running')
+                    """,
+                    (int(fence), execution_id),
+                )
+                if not getattr(cursor, "rowcount", 0):
+                    # Cancelled between the scan and the claim: hand the lease back.
+                    self.release_lease(
+                        ctx,
+                        tenant_id=tenant_id,
+                        lease_name=lease_name,
+                        holder=worker_id,
+                        fence=int(fence),
+                        conn=c,
+                    )
+                    continue
+                return ExecutionClaim(
+                    tenant_id=tenant_id,
+                    execution_id=execution_id,
+                    fence=int(fence),
+                    worker_id=worker_id,
+                )
+        return None
+
+    def requeue_execution(
+        self,
+        ctx: WorkBuddyDbContext,
+        execution_id: str,
+        *,
+        expected_status: Sequence[str],
+        conn: Any | None = None,
+    ) -> bool:
+        """Send a decided execution back to the admission queue.
+
+        A parked execution released its running slot when it parked, so resuming
+        it re-applies for one through the worker instead of running inside the
+        approver's request.
+        """
+        placeholders = ", ".join("?" for _ in expected_status)
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                f"UPDATE workbuddy_executions SET status = 'queued' "
+                f"WHERE id = ? AND status IN ({placeholders})",
+                (execution_id, *expected_status),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def _holds_slot(self, c: Any, *, tenant_id: str, execution_id: str) -> bool:
+        row = c.execute(
+            "SELECT id FROM workbuddy_quota_reservations "
+            "WHERE tenant_id = ? AND quota_key = 'concurrency' AND execution_id = ? "
+            "AND status = 'reserved' AND expires_at > now() LIMIT 1",
+            (tenant_id, execution_id),
+        ).fetchone()
+        return row is not None
+
+    def _concurrency_limit(self, c: Any, tenant_id: str) -> int | None:
+        row = c.execute(
+            """
+            SELECT coalesce(q.limit_value, m.default_limit) AS limit_value
+            FROM workbuddy_quota_metrics m
+            LEFT JOIN workbuddy_tenant_quotas q
+              ON q.metric = m.metric AND q.tenant_id = ?
+            WHERE m.metric = 'concurrency'
+            """,
+            (tenant_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        value = _row_value(row, "limit_value", None)
+        return int(value) if value is not None else None
+
+    def _live_slot_count(self, c: Any, tenant_id: str) -> int:
+        row = c.execute(
+            "SELECT coalesce(sum(amount), 0) AS total FROM workbuddy_quota_reservations "
+            "WHERE tenant_id = ? AND quota_key = 'concurrency' AND status = 'reserved' "
+            "AND expires_at > now()",
+            (tenant_id,),
+        ).fetchone()
+        return int(_row_value(row, "total", 0) or 0)
+
+    def _reserve_slot(self, c: Any, *, tenant_id: str, execution_id: str, ttl_seconds: int) -> None:
+        c.execute(
+            """
+            INSERT INTO workbuddy_quota_reservations(
+                id, tenant_id, quota_key, amount, status, scope, execution_id, expires_at
+            ) VALUES (?, ?, 'concurrency', 1, 'reserved', 'execution', ?,
+                      now() + make_interval(secs => ?))
+            """,
+            (new_runtime_id(), tenant_id, execution_id, int(ttl_seconds)),
+        )
+
     # -- quota --------------------------------------------------------------
+
     def lock_tenant_quota(
         self,
         ctx: WorkBuddyDbContext,

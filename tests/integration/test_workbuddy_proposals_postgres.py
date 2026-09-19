@@ -225,6 +225,17 @@ async def _create(
     )
 
 
+def _drain(pool: Any, *, limit: int = 200) -> int:
+    """Run the execution worker until nothing is admissible.
+
+    Acceptance only queues an execution, so a test that needs a settled run --
+    the shadow phase replays one -- drives the worker the deployment runs.
+    """
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    return WorkBuddyExecutionWorker(pool).drain(limit=limit)
+
+
 def _service(pool: Any, tenant: dict[str, Any]) -> Any:
     """The domain service on the live repository, for evidence the API does not take."""
     from octop.infra.db.repos.workbuddy_proposals import WorkBuddyProposalsRepo
@@ -385,7 +396,10 @@ async def test_promotion_walks_shadow_canary_and_apply(
             f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {"who": "source"}}
         )
         assert ran.status_code == 202, ran.text
-        assert ran.json()["data"]["status"] == "success", ran.text
+        _drain(pool)
+        assert (await client.get(f"/executions/{ran.json()['data']['id']}")).json()["data"][
+            "status"
+        ] == "success", ran.text
         created = await _create(client, workflow, _rename_patch("Promoted"))
         proposal_id = created.json()["data"]["proposal_id"]
 
@@ -531,7 +545,10 @@ async def _walk_to_canary(
             f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {"who": "source"}}
         )
         assert ran.status_code == 202, ran.text
-        assert ran.json()["data"]["status"] == "success", ran.text
+        _drain(pool)
+        assert (await client.get(f"/executions/{ran.json()['data']['id']}")).json()["data"][
+            "status"
+        ] == "success", ran.text
         created = await _create(client, workflow, _rename_patch("Canary"))
         proposal_id = created.json()["data"]["proposal_id"]
 
@@ -664,6 +681,8 @@ async def test_apply_is_judged_on_recorded_canary_executions(
                 f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {}}
             )
             assert accepted.status_code == 202, accepted.text
+    # The phase metrics are computed from settled cohort executions.
+    _drain(pool)
 
     async with _client(app, _principal(tenant)) as client:
         refused = await client.post(
@@ -734,7 +753,10 @@ async def test_shadow_phase_needs_recordings_and_never_goes_live(
             f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {"who": "shadow"}}
         )
         assert ran.status_code == 202, ran.text
-        assert ran.json()["data"]["status"] == "success", ran.text
+        _drain(pool)
+        assert (await client.get(f"/executions/{ran.json()['data']['id']}")).json()["data"][
+            "status"
+        ] == "success", ran.text
         created = await _create(client, workflow, _rename_patch("Replayed"))
         proposal_id = created.json()["data"]["proposal_id"]
 

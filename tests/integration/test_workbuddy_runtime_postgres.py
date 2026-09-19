@@ -275,6 +275,22 @@ def _publish(pool: Any, tenant: dict[str, Any], definition: dict[str, Any], name
     return bundle.workflow.workflow_id
 
 
+def _drain(pool: Any, service: Any | None = None, *, limit: int = 100) -> int:
+    """Run the execution worker until nothing is admissible.
+
+    Acceptance only queues an execution, so a test that wants it to run drives
+    the worker the deployment runs -- the same service the router builds unless
+    the test wired its own side-effect adapter.
+    """
+    from octop.infra.workbuddy.runtime import WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    worker = WorkBuddyExecutionWorker(
+        pool, service=service or WorkBuddyRuntimeService.for_control_plane(pool)
+    )
+    return worker.drain(limit=limit)
+
+
 async def test_hello_execution_runs_to_completion(
     app: FastAPI, pool: Any, tenant: dict[str, Any]
 ) -> None:
@@ -287,7 +303,10 @@ async def test_hello_execution_runs_to_completion(
         )
         assert accepted.status_code == 202, accepted.text
         execution_id = accepted.json()["data"]["id"]
+        # Acceptance does not run anything: the execution waits for the worker.
+        assert accepted.json()["data"]["status"] == "queued", accepted.text
 
+        _drain(pool)
         fetched = await client.get(f"/executions/{execution_id}")
         assert fetched.status_code == 200, fetched.text
         data = fetched.json()["data"]
@@ -310,6 +329,7 @@ async def test_condition_branches_and_joins_once(
             )
             assert accepted.status_code == 202, accepted.text
             execution_id = accepted.json()["data"]["id"]
+            _drain(pool)
             fetched = await client.get(f"/executions/{execution_id}")
             assert fetched.status_code == 200, fetched.text
             data = fetched.json()["data"]
@@ -370,6 +390,7 @@ async def test_terminal_execution_cannot_be_cancelled(
     async with _client(app, principal) as client:
         accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
         execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
         cancelled = await client.post(
             f"/executions/{execution_id}/cancel", json={"reason": "no longer needed"}
         )
@@ -412,6 +433,7 @@ async def test_approval_round_trip_and_single_consumption(
         accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
         assert accepted.status_code == 202, accepted.text
         execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
 
         waiting = await client.get(f"/executions/{execution_id}")
         assert waiting.json()["data"]["status"] == "waiting_approval", waiting.text
@@ -431,9 +453,13 @@ async def test_approval_round_trip_and_single_consumption(
             json={"approval_request_id": approval_id, "decision": "approved", "token": token},
         )
         assert approved.status_code == 200, approved.text
+        # The decision re-queues the execution: it holds no running slot while
+        # it waits, so the worker admits it again.
+        assert approved.json()["data"]["status"] == "queued", approved.text
+        _drain(pool)
 
         settled = await client.get(f"/executions/{execution_id}")
-        assert settled.json()["data"]["status"] in {"success", "running"}, settled.text
+        assert settled.json()["data"]["status"] == "success", settled.text
         step = settled.json()["data"]["steps"][0]
         assert step["duration_ms"] is not None, step
         assert step["started_at"] and step["finished_at"], step
@@ -470,6 +496,7 @@ async def test_zero_valid_approvers_fails_the_node(
         accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
         assert accepted.status_code == 202, accepted.text
         execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
         fetched = await client.get(f"/executions/{execution_id}")
         data = fetched.json()["data"]
         pending = await client.get("/approval-requests")
@@ -599,13 +626,16 @@ def _evidence_payload(
 
 @pytest.fixture
 def lost_response(pool: Any, monkeypatch: Any) -> Any:
-    """Route the runtime router at a service whose tool adapter loses responses."""
+    """Route the runtime router (and the worker) at a service that loses responses."""
     from octop.api.routers import workbuddy_runtime as router_module
     from octop.infra.workbuddy.runtime import WorkBuddyRuntimeService
 
     port = _LostResponsePort()
     service = WorkBuddyRuntimeService(pool, effects=port)
     monkeypatch.setattr(router_module, "_service", lambda server: service)
+    # The worker runs the same service, so the adapter under test is the one that
+    # dispatches the external write.
+    port.service = service
     return port
 
 
@@ -630,7 +660,7 @@ async def _approve_then_park(
     assert approved.status_code == 200, approved.text
 
 
-async def _park_execution(app: FastAPI, pool: Any, tenant: dict[str, Any]) -> str:
+async def _park_execution(app: FastAPI, pool: Any, tenant: dict[str, Any], service: Any) -> str:
     """One execution whose external write may or may not have happened."""
     definition = external_write_definition([tenant["owner_member_id"]])
     workflow_id = _publish(pool, tenant, definition, "Lost response runtime")
@@ -638,7 +668,9 @@ async def _park_execution(app: FastAPI, pool: Any, tenant: dict[str, Any]) -> st
         accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
         assert accepted.status_code == 202, accepted.text
         execution_id = accepted.json()["data"]["id"]
+        _drain(pool, service)
         await _approve_then_park(client, workflow_id, execution_id)
+        _drain(pool, service)
         parked = await client.get(f"/executions/{execution_id}")
         assert parked.json()["data"]["status"] == "waiting_reconciliation", parked.text
     return execution_id
@@ -648,7 +680,7 @@ async def test_unknown_external_write_parks_and_reconciles(
     app: FastAPI, pool: Any, tenant: dict[str, Any], lost_response: Any
 ) -> None:
     """T13: the write is never retried, and only evidence moves the execution."""
-    execution_id = await _park_execution(app, pool, tenant)
+    execution_id = await _park_execution(app, pool, tenant, lost_response.service)
     async with _client(app, _principal(tenant)) as client:
         detail = (await client.get(f"/executions/{execution_id}")).json()["data"]
         steps = {step["node_id"]: step for step in detail["steps"]}
@@ -685,6 +717,10 @@ async def test_unknown_external_write_parks_and_reconciles(
             },
         )
         assert recorded.status_code == 200, recorded.text
+        # The decision re-queues the execution instead of continuing inside the
+        # operator's request.
+        assert recorded.json()["data"]["execution"]["status"] == "queued", recorded.text
+        _drain(pool, lost_response.service)
         settled = (await client.get(f"/executions/{execution_id}")).json()["data"]
 
     # The recorded result advanced the DAG; the tool was never called again.
@@ -700,7 +736,7 @@ async def test_reconciliation_requires_admin_and_evidence(
     app: FastAPI, pool: Any, tenant: dict[str, Any], lost_response: Any
 ) -> None:
     """Only a tenant admin may decide, and a decision needs valid evidence."""
-    execution_id = await _park_execution(app, pool, tenant)
+    execution_id = await _park_execution(app, pool, tenant, lost_response.service)
     body = {
         "step_id": "submit",
         "decision": "confirmed_failed",
@@ -742,7 +778,7 @@ async def test_confirmed_failure_terminates_without_retrying(
     app: FastAPI, pool: Any, tenant: dict[str, Any], lost_response: Any
 ) -> None:
     """A confirmed failure ends the branch; nothing is dispatched again."""
-    execution_id = await _park_execution(app, pool, tenant)
+    execution_id = await _park_execution(app, pool, tenant, lost_response.service)
     evidence_ref = _evidence_payload(
         pool, tenant, execution_id, {"query": "provider lookup", "result": None}
     )
@@ -757,6 +793,7 @@ async def test_confirmed_failure_terminates_without_retrying(
             },
         )
         assert recorded.status_code == 200, recorded.text
+        _drain(pool, lost_response.service)
         settled = (await client.get(f"/executions/{execution_id}")).json()["data"]
 
     assert settled["status"] == "failed", settled
@@ -771,7 +808,7 @@ async def test_cancel_during_unknown_write_waits_for_evidence(
     app: FastAPI, pool: Any, tenant: dict[str, Any], lost_response: Any
 ) -> None:
     """Cancelling cannot undo a maybe-write: it converges after reconciliation."""
-    execution_id = await _park_execution(app, pool, tenant)
+    execution_id = await _park_execution(app, pool, tenant, lost_response.service)
     async with _client(app, _principal(tenant)) as client:
         canceled = await client.post(f"/executions/{execution_id}/cancel")
         assert canceled.status_code == 202, canceled.text
@@ -868,7 +905,9 @@ async def test_model_tokens_are_recorded_for_the_metrics(
             f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "tokens"}}
         )
         assert accepted.status_code == 202, accepted.text
-        execution = accepted.json()["data"]
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool, service)
+        execution = (await client.get(f"/executions/{execution_id}")).json()["data"]
 
     assert port.calls == 1, port.calls
     assert execution["status"] == "success", execution
@@ -948,6 +987,7 @@ async def test_a_token_does_not_make_you_an_approver(
         accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
         assert accepted.status_code == 202, accepted.text
         execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
         listed = await client.get("/approval-requests")
         request_item = listed.json()["data"]["items"][0]
         # The candidate (the owner) issues the token; a second member tries to use it.
@@ -1087,6 +1127,7 @@ async def test_model_text_cannot_widen_privileges(
         )
         assert accepted.status_code == 202, accepted.text
         execution_id = accepted.json()["data"]["id"]
+        _drain(pool, service)
         execution = (await client.get(f"/executions/{execution_id}")).json()["data"]
         pending = (await client.get("/approval-requests")).json()["data"]["items"]
 
@@ -1195,6 +1236,7 @@ async def test_concurrent_approval_decisions_have_one_winner(
         accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
         assert accepted.status_code == 202, accepted.text
         execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
         listed = await client.get("/approval-requests")
         approval_id = next(
             item["id"]
@@ -1268,6 +1310,9 @@ async def test_in_flight_execution_finishes_under_suspension(
             accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
             assert accepted.status_code == 202, accepted.text
             execution_id = accepted.json()["data"]["id"]
+            # The run starts and parks at its approval before the tenant is
+            # suspended, which is what makes it work already in flight.
+            _drain(pool)
 
             identity.suspend_tenant(tenant["tenant_id"], reason="in-flight probe")
 
@@ -1292,6 +1337,8 @@ async def test_in_flight_execution_finishes_under_suspension(
                 },
             )
             assert resumed.status_code == 200, resumed.text
+            # Admission lets a started execution finish even under suspension.
+            _drain(pool)
             settled = await client.get(f"/executions/{execution_id}")
     finally:
         identity.restore_tenant(tenant["tenant_id"], reason="test cleanup")
@@ -1302,7 +1349,7 @@ async def test_in_flight_execution_finishes_under_suspension(
 async def test_approval_wait_releases_and_resume_reacquires_the_running_slot(
     app: FastAPI, pool: Any, tenant: dict[str, Any]
 ) -> None:
-    """T14: approval wait frees concurrency; final approval reacquires it atomically."""
+    """T14: a waiting run holds no slot, and a resumed one re-applies for admission."""
     from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
     from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
     from octop.infra.db.workbuddy_context import WorkBuddyDbContext
@@ -1335,11 +1382,17 @@ async def test_approval_wait_releases_and_resume_reacquires_the_running_slot(
             first_id = first.json()["data"]["id"]
             second_id = second.json()["data"]["id"]
 
+            # Both runs start, park at their approval and give their slot back.
+            _drain(pool)
+            parked = await client.get(f"/executions/{first_id}")
+            assert parked.json()["data"]["status"] == "waiting_approval", parked.text
             live_after_wait = repo.list_live_quota_reservations(
                 ctx, tenant_id=tenant["tenant_id"], quota_key="concurrency"
             )
             assert sum(item.amount for item in live_after_wait) == baseline
 
+            # Occupy the only free slot: a resumed execution is re-queued, not
+            # run inside the approver's request, and admission must refuse it.
             blocker_id = repo.reserve_quota(
                 ctx,
                 tenant_id=tenant["tenant_id"],
@@ -1357,21 +1410,6 @@ async def test_approval_wait_releases_and_resume_reacquires_the_running_slot(
             challenge = await client.post(f"/approval-requests/{approval_id}/challenge")
             token = challenge.json()["token"]
 
-            blocked = await client.post(
-                f"/executions/{first_id}/resume",
-                json={
-                    "approval_request_id": approval_id,
-                    "decision": "approved",
-                    "token": token,
-                },
-            )
-            assert blocked.status_code == 429, blocked.text
-            assert blocked.json()["error"]["code"] == ErrorCode.QUOTA_EXCEEDED.value
-            pending = await client.get(f"/approval-requests/{approval_id}")
-            assert pending.json()["data"]["status"] == "pending", pending.text
-
-            assert repo.settle_quota_reservation(ctx, blocker_id, status="released")
-            blocker_id = None
             resumed = await client.post(
                 f"/executions/{first_id}/resume",
                 json={
@@ -1381,7 +1419,19 @@ async def test_approval_wait_releases_and_resume_reacquires_the_running_slot(
                 },
             )
             assert resumed.status_code == 200, resumed.text
-            assert resumed.json()["data"]["status"] == "success", resumed.text
+            assert resumed.json()["data"]["status"] == "queued", resumed.text
+            assert _drain(pool) == 0, "a full tenant must not admit another run"
+            waiting_for_admission = await client.get(f"/executions/{first_id}")
+            assert waiting_for_admission.json()["data"]["status"] == "queued", (
+                waiting_for_admission.text
+            )
+
+            # Releasing the slot lets the worker admit the re-queued run.
+            assert repo.settle_quota_reservation(ctx, blocker_id, status="released")
+            blocker_id = None
+            _drain(pool)
+            completed = await client.get(f"/executions/{first_id}")
+            assert completed.json()["data"]["status"] == "success", completed.text
     finally:
         if blocker_id is not None:
             repo.settle_quota_reservation(ctx, blocker_id, status="released")
@@ -1398,7 +1448,7 @@ async def test_approval_wait_releases_and_resume_reacquires_the_running_slot(
 def test_overlapping_runs_cannot_oversubscribe_the_tenant_slot(
     pool: Any, tenant: dict[str, Any]
 ) -> None:
-    """T14: an actually running tool call owns the only available tenant slot."""
+    """T14: an admitted run owns the only slot; the next one waits for admission."""
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1406,6 +1456,7 @@ def test_overlapping_runs_cannot_oversubscribe_the_tenant_slot(
     from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
     from octop.infra.db.workbuddy_context import WorkBuddyDbContext
     from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
 
     class BlockingToolPort:
         def __init__(self) -> None:
@@ -1466,25 +1517,26 @@ def test_overlapping_runs_cannot_oversubscribe_the_tenant_slot(
         role="owner",
         tenant_status="active",
     )
+    first_worker = WorkBuddyExecutionWorker(pool, service=service, worker_id="quota-worker-a")
+    second_worker = WorkBuddyExecutionWorker(pool, service=service, worker_id="quota-worker-b")
     try:
+        # Clear what earlier tests left queued, so the claims under test are mine.
+        WorkBuddyExecutionWorker(pool, worker_id="quota-pre-drain").drain()
+        first_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+        second_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+        assert first_id != second_id
         with ThreadPoolExecutor(max_workers=1) as executor:
-            first = executor.submit(
-                service.start_execution,
-                actor,
-                workflow_id=workflow_id,
-                inputs={},
-            )
-            assert port.entered.wait(timeout=10), "first run never entered its tool"
-            with pytest.raises(OctopError) as refused:
-                service.start_execution(actor, workflow_id=workflow_id, inputs={})
-            assert refused.value.code == ErrorCode.QUOTA_EXCEEDED
-            assert port.calls == 1
+            running = executor.submit(first_worker.run_once)
+            assert port.entered.wait(timeout=10), "the admitted run never entered its tool"
+            # The tenant is at its ceiling, so the second worker admits nothing:
+            # acceptance queued it, and it stays queued until a slot frees.
+            assert second_worker.run_once() is None
+            assert port.calls == 1, port.calls
             port.release.set()
-            assert first.result(timeout=10).status == "success"
+            assert running.result(timeout=10) is not None
 
-        third = service.start_execution(actor, workflow_id=workflow_id, inputs={})
-        assert third.status == "success"
-        assert port.calls == 2
+        assert second_worker.run_once() == second_id
+        assert port.calls == 2, port.calls
     finally:
         port.release.set()
         identity.set_quotas(
@@ -1509,6 +1561,7 @@ async def test_a_decision_cannot_rewrite_what_was_approved(
         accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
         assert accepted.status_code == 202, accepted.text
         execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
 
         listed = await client.get("/approval-requests")
         request_item = next(
@@ -1546,3 +1599,397 @@ async def test_a_decision_cannot_rewrite_what_was_approved(
             },
         )
         assert resumed.status_code == 200, resumed.text
+        _drain(pool)
+        settled = (await client.get(f"/executions/{execution_id}")).json()["data"]
+
+    assert settled["status"] == "success", settled
+
+
+async def test_a_queued_execution_never_starts_after_cancellation(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """Acceptance queues work, so a cancel before admission must stop it entirely."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Queued cancel runtime")
+    async with _client(app, _principal(tenant)) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        assert accepted.json()["data"]["status"] == "queued", accepted.text
+
+        canceled = await client.post(f"/executions/{execution_id}/cancel")
+        assert canceled.status_code == 202, canceled.text
+        assert canceled.json()["data"]["status"] == "canceled", canceled.text
+
+        # Other tests may share this tenant, so the claim of interest is that the
+        # cancelled execution is never picked up.
+        _drain(pool)
+        settled = (await client.get(f"/executions/{execution_id}")).json()["data"]
+
+    assert settled["status"] == "canceled", settled
+    assert settled["started_at"] is None, settled
+
+
+def test_a_dead_worker_lease_is_taken_over_with_a_new_fence(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T13: the next claimant takes over an expired lease and the fence moves on."""
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    workflow_id = _publish(pool, tenant, hello_definition(), "Lease takeover runtime")
+    service = WorkBuddyRuntimeService.for_control_plane(pool)
+    actor = RuntimeActor(
+        tenant_id=tenant["tenant_id"],
+        user_id=tenant["owner_user_id"],
+        role="owner",
+        tenant_status="active",
+    )
+    # Clear what earlier tests left queued, so the claim under test is this run.
+    WorkBuddyExecutionWorker(pool, service=service, worker_id="pre-drain").drain()
+    execution_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+
+    # A worker that dies while holding the lease: its claim expires untended.
+    dying = WorkBuddyExecutionWorker(
+        pool,
+        service=service,
+        worker_id="dead-worker",
+        lease_ttl_seconds=1,
+        reservation_ttl_seconds=60,
+    )
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    repo = WorkBuddyRuntimeRepo(pool)
+    first = repo.claim_execution(
+        worker_id="dead-worker", lease_ttl_seconds=1, reservation_ttl_seconds=60
+    )
+    assert first is not None and first.execution_id == execution_id, first
+
+    time.sleep(1.2)
+    taken = repo.claim_execution(
+        worker_id="survivor", lease_ttl_seconds=60, reservation_ttl_seconds=60
+    )
+    assert taken is not None and taken.execution_id == execution_id, taken
+    assert taken.fence > first.fence, (first.fence, taken.fence)
+
+    # The dead worker can neither heartbeat nor commit any more; the survivor can.
+    assert (
+        repo.verify_fence(
+            ctx,
+            tenant_id=tenant["tenant_id"],
+            lease_name=f"execution:{execution_id}",
+            holder="dead-worker",
+            fence=first.fence,
+        )
+        is False
+    )
+    service.run_claimed_execution(taken)
+    settled = service.get_execution(actor, execution_id)
+    assert settled.status == "success", settled
+    assert dying.worker_id == "dead-worker"
+
+
+async def test_the_dispatch_intent_is_durable_before_an_external_call(
+    app: FastAPI, pool: Any, tenant: dict[str, Any], monkeypatch: Any
+) -> None:
+    """T13: the operation key is written before the call can leave the process."""
+    from octop.api.routers import workbuddy_runtime as router_module
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    repo = WorkBuddyRuntimeRepo(pool)
+
+    class InspectingToolPort:
+        """Reads the step row from inside the call: what a crash would leave."""
+
+        def __init__(self) -> None:
+            self.seen: dict[str, Any] = {}
+
+        def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
+            steps = repo.list_step_runs(ctx, self.execution_id)
+            current = next(step for step in steps if step.node_id == node.id)
+            self.seen = {
+                "status": current.status,
+                "tool_id": current.tool_id,
+                "tool_call_key": current.tool_call_key,
+                "dispatch_intent_at": current.dispatch_intent_at,
+            }
+            return {"ok": True}
+
+        def execute_llm(self, *, node: Any, activation: Any) -> Any:
+            raise AssertionError("this workflow has no llm node")
+
+        def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:
+            raise AssertionError("chat is not part of this workflow")
+
+    definition = {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {},
+        "nodes": [
+            {
+                "id": "submit",
+                "type": "tool",
+                "name": "Submit",
+                "config": {"tool_name": "bidding.submit", "parameters": {}},
+            }
+        ],
+        "edges": [],
+    }
+    workflow_id = _publish(pool, tenant, definition, "Dispatch intent runtime")
+    port = InspectingToolPort()
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    monkeypatch.setattr(router_module, "_service", lambda server: service)
+    actor = RuntimeActor(
+        tenant_id=tenant["tenant_id"],
+        user_id=tenant["owner_user_id"],
+        role="owner",
+        tenant_status="active",
+    )
+    worker = WorkBuddyExecutionWorker(pool, service=service, worker_id="intent-worker")
+    worker.drain()
+    execution_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+    port.execution_id = execution_id
+    worker.run_once()
+
+    # Inside the call the row already carried the intent, under our fence.
+    assert port.seen["status"] == "running", port.seen
+    assert port.seen["tool_id"] == "bidding.submit", port.seen
+    assert port.seen["tool_call_key"] == f"{execution_id}:submit", port.seen
+    assert port.seen["dispatch_intent_at"] is not None, port.seen
+
+    async with _client(app, _principal(tenant)) as client:
+        detail = (await client.get(f"/executions/{execution_id}")).json()["data"]
+    step = next(item for item in detail["steps"] if item["node_id"] == "submit")
+    assert step["tool_call_key"] == f"{execution_id}:submit", step
+    assert step["tool_id"] == "bidding.submit", step
+    assert step["dispatch_intent_at"] is not None, step
+    assert detail["status"] == "success", detail
+
+
+async def test_cancelling_a_running_execution_stops_before_the_next_call(
+    app: FastAPI, pool: Any, tenant: dict[str, Any], monkeypatch: Any
+) -> None:
+    """A cancel lands between nodes: the call in flight finishes, nothing new starts."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from octop.api.routers import workbuddy_runtime as router_module
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    class BlockingToolPort:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.calls: list[str] = []
+
+        def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
+            self.calls.append(node.id)
+            self.entered.set()
+            if not self.release.wait(timeout=10):
+                raise AssertionError("test did not release the blocked tool")
+            return {"ok": True}
+
+        def execute_llm(self, *, node: Any, activation: Any) -> Any:
+            raise AssertionError("this workflow has no llm node")
+
+        def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:
+            raise AssertionError("chat is not part of this workflow")
+
+    definition = {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {},
+        "nodes": [
+            {
+                "id": "first",
+                "type": "tool",
+                "name": "Call in flight",
+                "config": {"tool_name": "test.first", "parameters": {}},
+            },
+            {
+                "id": "second",
+                "type": "tool",
+                "name": "Must never start",
+                "config": {"tool_name": "test.second", "parameters": {}},
+            },
+        ],
+        "edges": [{"from": "first", "to": "second"}],
+    }
+    workflow_id = _publish(pool, tenant, definition, "Running cancel runtime")
+    port = BlockingToolPort()
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    monkeypatch.setattr(router_module, "_service", lambda server: service)
+    actor = RuntimeActor(
+        tenant_id=tenant["tenant_id"],
+        user_id=tenant["owner_user_id"],
+        role="owner",
+        tenant_status="active",
+    )
+    worker = WorkBuddyExecutionWorker(pool, service=service, worker_id="cancel-worker")
+    worker.drain()
+    execution_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            running = executor.submit(worker.run_once)
+            assert port.entered.wait(timeout=10), "the admitted run never entered its tool"
+            async with _client(app, _principal(tenant)) as client:
+                canceled = await client.post(f"/executions/{execution_id}/cancel")
+                assert canceled.status_code == 202, canceled.text
+                # The call in flight is not claimed undone: the execution is still
+                # running and the request is what is recorded.
+                assert canceled.json()["data"]["status"] == "running", canceled.text
+                assert canceled.json()["data"]["cancel_requested"] is True, canceled.text
+            port.release.set()
+            assert running.result(timeout=10) is not None
+        async with _client(app, _principal(tenant)) as client:
+            settled = (await client.get(f"/executions/{execution_id}")).json()["data"]
+    finally:
+        port.release.set()
+
+    assert settled["status"] == "canceled", settled
+    assert port.calls == ["first"], port.calls
+    steps = {
+        step.node_id: step.status
+        for step in WorkBuddyRuntimeRepo(pool).list_step_runs(ctx, execution_id)
+    }
+    assert steps == {"first": "success", "second": "canceled"}, steps
+
+
+def test_a_running_step_is_visible_while_the_node_works(pool: Any, tenant: dict[str, Any]) -> None:
+    """A long node is observable as ``running``, not only once the run commits."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    class BlockingToolPort:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
+            self.entered.set()
+            if not self.release.wait(timeout=10):
+                raise AssertionError("test did not release the blocked tool")
+            return {"ok": True}
+
+        def execute_llm(self, *, node: Any, activation: Any) -> Any:
+            raise AssertionError("this workflow has no llm node")
+
+        def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:
+            raise AssertionError("chat is not part of this workflow")
+
+    definition = {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {},
+        "nodes": [
+            {
+                "id": "slow",
+                "type": "tool",
+                "name": "Slow call",
+                "config": {"tool_name": "test.slow", "parameters": {}},
+            }
+        ],
+        "edges": [],
+    }
+    workflow_id = _publish(pool, tenant, definition, "Step state runtime")
+    port = BlockingToolPort()
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    actor = RuntimeActor(
+        tenant_id=tenant["tenant_id"],
+        user_id=tenant["owner_user_id"],
+        role="owner",
+        tenant_status="active",
+    )
+    worker = WorkBuddyExecutionWorker(pool, service=service, worker_id="step-worker")
+    worker.drain()  # clear what an earlier test left queued
+    execution_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    repo = WorkBuddyRuntimeRepo(pool)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            running = executor.submit(worker.run_once)
+            assert port.entered.wait(timeout=10), "the admitted run never entered its tool"
+            mid_run = repo.list_step_runs(ctx, execution_id)
+            assert [step.status for step in mid_run] == ["running"], mid_run
+            port.release.set()
+            assert running.result(timeout=10) is not None
+    finally:
+        port.release.set()
+
+    settled = repo.list_step_runs(ctx, execution_id)
+    assert [step.status for step in settled] == ["success"], settled
+    assert settled[0].finished_at is not None, settled
+    assert settled[0].duration_ms is not None, settled
+
+
+async def test_a_parked_run_shows_its_pending_steps_as_queued(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """Steps of an attempt that has not decided them yet are ``queued``."""
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+
+    definition = external_write_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Step queue runtime")
+    async with _client(app, _principal(tenant)) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        assert accepted.status_code == 202, accepted.text
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        parked = (await client.get(f"/executions/{execution_id}")).json()["data"]
+
+    assert parked["status"] == "waiting_approval", parked
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    steps = WorkBuddyRuntimeRepo(pool).list_step_runs(ctx, execution_id)
+    by_node = {step.node_id: step.status for step in steps}
+    assert by_node == {
+        "hello": "success",
+        "review": "waiting_approval",
+        # Nothing decided these yet: the attempt is parked before them.
+        "submit": "queued",
+        "after": "queued",
+    }, by_node
+
+
+def test_the_worker_records_which_worker_ran_an_execution(
+    pool: Any, tenant: dict[str, Any]
+) -> None:
+    """The audit trail names the platform actor that ran the execution."""
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    workflow_id = _publish(pool, tenant, hello_definition(), "Worker audit runtime")
+    service = WorkBuddyRuntimeService.for_control_plane(pool)
+    actor = RuntimeActor(
+        tenant_id=tenant["tenant_id"],
+        user_id=tenant["owner_user_id"],
+        role="owner",
+        tenant_status="active",
+    )
+    execution_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+    worker = WorkBuddyExecutionWorker(pool, service=service, worker_id="audited-worker")
+    assert worker.drain() >= 1
+
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    rows = WorkBuddyRuntimeRepo(pool).list_audit_logs(ctx, limit=200)
+    finishes = [
+        row for row in rows if row.action == "execution.finish" and row.resource_id == execution_id
+    ]
+    assert finishes, rows
+    # The worker is the platform actor, and it names the requester it ran for.
+    assert finishes[0].actor_kind == "system", finishes[0]
+    assert finishes[0].actor_user_id == tenant["owner_user_id"], finishes[0]

@@ -216,6 +216,9 @@ class AppRuntime:
     proactive_scheduler: ProactiveCareScheduler
     trajectory_service: TrajectoryService | None = None
     history_archive: Any | None = None
+    # The execution worker when this process hosts it (single-process installs);
+    # a deployment that runs the worker tier separately leaves it None.
+    workbuddy_worker: Any | None = None
 
     def replace_services(self, services: SharedServices, config: OctopConfig) -> None:
         """Retarget all runtime singletons onto a new SharedServices / config.
@@ -470,6 +473,19 @@ class OctopServer:
         await user_mgr.boot()
         await proactive_scheduler.start_all()
 
+        from octop.infra.workbuddy.worker import (  # noqa: PLC0415
+            WorkBuddyExecutionWorker,
+            workbuddy_worker_enabled,
+        )
+
+        workbuddy_worker = (
+            WorkBuddyExecutionWorker(self.services.db)
+            if workbuddy_worker_enabled(self.services.db)
+            else None
+        )
+        if workbuddy_worker is not None:
+            await workbuddy_worker.start()
+
         self.app_runtime = AppRuntime(
             agent_registry=registry,
             gateway=gateway,
@@ -478,6 +494,7 @@ class OctopServer:
             proactive_scheduler=proactive_scheduler,
             trajectory_service=trajectory_service,
             history_archive=history_archive,
+            workbuddy_worker=workbuddy_worker,
         )
         from octop.infra.knowledge.jobs import resume_pending_index_jobs  # noqa: PLC0415
 
@@ -519,6 +536,8 @@ class OctopServer:
         try:
             if self.app_runtime is not None:
                 rt = self.app_runtime
+                if rt.workbuddy_worker is not None:
+                    await rt.workbuddy_worker.stop()
                 await rt.proactive_scheduler.shutdown()
                 await rt.cron_manager.shutdown()
                 await rt.gateway.shutdown()

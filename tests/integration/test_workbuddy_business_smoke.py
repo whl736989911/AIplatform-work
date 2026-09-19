@@ -201,7 +201,18 @@ def app(pool: Any, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
         services=SimpleNamespace(db=pool, rate_limit_store=None)
     )
     application.state.smoke_port = port
+    # The worker the deployment runs uses this same service, so a test can drive
+    # acceptance + admission exactly as a deployment does.
+    application.state.smoke_service = service
     return application
+
+
+def _drain(app: FastAPI, pool: Any) -> int:
+    """Run the execution worker until nothing is admissible."""
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    worker = WorkBuddyExecutionWorker(pool, service=app.state.smoke_service)
+    return worker.drain()
 
 
 def _client(app: FastAPI, principal: WorkBuddyPrincipal) -> httpx.AsyncClient:
@@ -331,6 +342,7 @@ async def test_the_spine_carries_one_business_scenario(
         )
         assert accepted.status_code == 202, accepted.text
         execution_id = accepted.json()["data"]["id"]
+        _drain(app, pool)
         parked = (await client.get(f"/executions/{execution_id}")).json()["data"]
         assert parked["status"] == "waiting_approval", parked
         assert parked["wait_reasons"] == ["approval"], parked
@@ -353,6 +365,7 @@ async def test_the_spine_carries_one_business_scenario(
             },
         )
         assert approved.status_code == 200, approved.text
+        _drain(app, pool)
 
         # 4. The provider never answered, so the execution waits for evidence.
         waiting = (await client.get(f"/executions/{execution_id}")).json()["data"]
@@ -387,6 +400,7 @@ async def test_the_spine_carries_one_business_scenario(
             },
         )
         assert reconciled.status_code == 200, reconciled.text
+        _drain(app, pool)
         settled = (await client.get(f"/executions/{execution_id}")).json()["data"]
         assert settled["status"] == "success", settled
         assert settled["outputs"]["submission"] == {"bid_id": "BID-42"}, settled
@@ -479,6 +493,8 @@ async def test_the_spine_carries_one_business_scenario(
                 break
 
     assert set(routed) == {"canary", "baseline"}, routed
+    # Every routed run was admitted and parked at its own authorization.
+    _drain(app, pool)
 
     # 9. The proposal carries the replay proof the gate judged, and the routed
     #    runs are parked at their own authorization rather than having written.
@@ -633,6 +649,7 @@ async def test_installed_template_version_runs_on_the_spine(
         )
         assert accepted.status_code == 202, accepted.text
         execution_id = accepted.json()["data"]["id"]
+        _drain(app, pool)
         execution = (await client.get(f"/executions/{execution_id}")).json()["data"]
         assert execution["status"] == "success", execution
         assert execution["workflow_version_id"] == workflow_version_id, execution
