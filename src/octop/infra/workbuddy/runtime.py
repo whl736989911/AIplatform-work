@@ -70,6 +70,7 @@ EXECUTION_STATUSES = frozenset(
 )
 CANCELLABLE_EXECUTION_STATUSES = ("queued", "running", "waiting_approval")
 APPROVAL_TOKEN_TTL_SECONDS = 120
+EXECUTION_RESERVATION_TTL_SECONDS = 32 * 24 * 60 * 60
 DEFAULT_MAX_STEPS = 50
 MAX_STEPS_CAP = 200
 DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
@@ -1808,11 +1809,15 @@ class WorkBuddyRuntimeService:
             raise _not_found()
         return row
 
-    def _load_approval(self, actor: RuntimeActor, approval_request_id: str) -> ApprovalRequestRow:
-        row = self._repo.get_approval_request(self._ctx(actor), approval_request_id)
+    def _load_approval(
+        self, actor: RuntimeActor, approval_request_id: str, *, conn: Any = None
+    ) -> ApprovalRequestRow:
+        row = self._repo.get_approval_request(self._ctx(actor), approval_request_id, conn=conn)
         if row is None:
             raise _not_found()
-        candidates = self._repo.list_approval_candidates(self._ctx(actor), approval_request_id)
+        candidates = self._repo.list_approval_candidates(
+            self._ctx(actor), approval_request_id, conn=conn
+        )
         if not actor.is_admin and all(
             candidate.user_id != actor.user_id for candidate in candidates
         ):
@@ -1901,7 +1906,11 @@ class WorkBuddyRuntimeService:
         ctx = self._ctx(actor)
         used = (
             self._repo.quota_usage_total(
-                ctx, tenant_id=actor.tenant_id, quota_key=counted, since=since
+                ctx,
+                tenant_id=actor.tenant_id,
+                quota_key=counted,
+                since=since,
+                conn=conn,
             )
             if include_usage
             else 0
@@ -1929,6 +1938,78 @@ class WorkBuddyRuntimeService:
             if metric and isinstance(limit, int):
                 limits[metric] = int(limit)
         return limits
+
+    def _reserve_concurrency_slot(
+        self,
+        actor: RuntimeActor,
+        *,
+        execution_id: str,
+        limits: Mapping[str, int],
+        conn: Any,
+    ) -> str:
+        self._repo.lock_tenant_quota(self._ctx(actor), tenant_id=actor.tenant_id, conn=conn)
+        self._enforce_quota(
+            actor,
+            quota_key="concurrency",
+            amount=1,
+            limits=limits,
+            conn=conn,
+            include_usage=False,
+        )
+        return self._repo.reserve_quota(
+            self._ctx(actor),
+            tenant_id=actor.tenant_id,
+            quota_key="concurrency",
+            amount=1,
+            scope="execution",
+            execution_id=execution_id,
+            conn=conn,
+        )
+
+    def _settle_execution_quota(
+        self,
+        actor: RuntimeActor,
+        execution_id: str,
+        *,
+        conn: Any,
+        consume: bool,
+    ) -> None:
+        ctx = self._ctx(actor)
+        for reservation in self._repo.list_live_quota_reservations(
+            ctx, tenant_id=actor.tenant_id, execution_id=execution_id, conn=conn
+        ):
+            self._repo.settle_quota_reservation(
+                ctx,
+                reservation.id,
+                status="committed"
+                if consume and reservation.quota_key == "executions"
+                else "released",
+                conn=conn,
+            )
+        if consume:
+            self._repo.record_quota_usage(
+                ctx,
+                tenant_id=actor.tenant_id,
+                quota_key="executions",
+                amount=1,
+                direction="consume",
+                scope="execution",
+                execution_id=execution_id,
+                conn=conn,
+            )
+
+    def _release_concurrency_slot(
+        self, actor: RuntimeActor, execution_id: str, *, conn: Any
+    ) -> None:
+        ctx = self._ctx(actor)
+        for reservation in self._repo.list_live_quota_reservations(
+            ctx,
+            tenant_id=actor.tenant_id,
+            quota_key="concurrency",
+            execution_id=execution_id,
+            conn=conn,
+        ):
+            self._repo.settle_quota_reservation(ctx, reservation.id, status="released", conn=conn)
 
     def _persist_run(
         self,
@@ -2073,6 +2154,7 @@ class WorkBuddyRuntimeService:
         )
         execution_id = new_runtime_id()
         with runtime_transaction(self._db, ctx) as conn:
+            self._repo.lock_tenant_quota(ctx, tenant_id=actor.tenant_id, conn=conn)
             existing = self._existing_for_key(
                 actor,
                 scope=idempotency_scope,
@@ -2090,23 +2172,20 @@ class WorkBuddyRuntimeService:
                 conn=conn,
                 since=_period_start(),
             )
-            self._enforce_quota(
-                actor,
-                quota_key="concurrency",
-                amount=1,
-                limits=quota_limits,
-                conn=conn,
-                include_usage=False,
-                # The run's own reservation is what holds the slot.
-                count_key="executions",
-            )
-            reservation_id = self._repo.reserve_quota(
+            self._repo.reserve_quota(
                 ctx,
                 tenant_id=actor.tenant_id,
                 quota_key="executions",
                 amount=1,
                 scope="execution",
+                ttl_seconds=EXECUTION_RESERVATION_TTL_SECONDS,
                 execution_id=execution_id,
+                conn=conn,
+            )
+            self._reserve_concurrency_slot(
+                actor,
+                execution_id=execution_id,
+                limits=quota_limits,
                 conn=conn,
             )
             if not self._repo.insert_execution_if_absent(
@@ -2168,9 +2247,7 @@ class WorkBuddyRuntimeService:
                 details={"workflow_id": workflow_id, "trigger_type": trigger_type},
                 conn=conn,
             )
-        return self._run_execution(
-            actor, execution_id, graph=graph, decisions={}, reservation_id=reservation_id
-        )
+        return self._run_execution(actor, execution_id, graph=graph, decisions={})
 
     def _replay_state(self, ctx: WorkBuddyDbContext, execution_id: str) -> ReplayState:
         steps = self._repo.list_step_runs(ctx, execution_id)
@@ -2196,7 +2273,6 @@ class WorkBuddyRuntimeService:
         *,
         graph: WorkflowGraph,
         decisions: Mapping[str, str],
-        reservation_id: str | None = None,
     ) -> ExecutionView:
         ctx = self._ctx(actor)
         lease_name = f"execution:{execution_id}"
@@ -2239,7 +2315,6 @@ class WorkBuddyRuntimeService:
             graph,
             fence=fence,
             lease_name=lease_name,
-            reservation_id=reservation_id,
         )
         updated = self._repo.get_execution(ctx, execution_id)
         if updated is None:
@@ -2255,7 +2330,6 @@ class WorkBuddyRuntimeService:
         *,
         fence: int,
         lease_name: str,
-        reservation_id: str | None,
     ) -> None:
         """Commit the attempt inside one fenced transaction, or commit nothing."""
         ctx = self._ctx(actor)
@@ -2331,6 +2405,15 @@ class WorkBuddyRuntimeService:
                     expected_status=("running", "queued"),
                     conn=conn,
                 )
+                self._release_concurrency_slot(actor, execution.id, conn=conn)
+                self._repo.release_lease(
+                    ctx,
+                    tenant_id=actor.tenant_id,
+                    lease_name=lease_name,
+                    holder=str(actor.user_id),
+                    fence=fence,
+                    conn=conn,
+                )
                 return
             self._repo.update_execution_status(
                 ctx,
@@ -2347,30 +2430,7 @@ class WorkBuddyRuntimeService:
                 mark_finished=True,
                 conn=conn,
             )
-            if reservation_id is None:
-                # A run that was resumed after parking does not carry the id, so
-                # the slot it still holds is found by its own execution.
-                live = self._repo.list_live_quota_reservations(
-                    ctx, tenant_id=actor.tenant_id, execution_id=execution.id, conn=conn
-                )
-                reservation_id = live[0].id if live else None
-            if reservation_id is not None:
-                self._repo.settle_quota_reservation(
-                    ctx,
-                    reservation_id,
-                    status="committed" if run.status == "success" else "released",
-                    conn=conn,
-                )
-            self._repo.record_quota_usage(
-                ctx,
-                tenant_id=actor.tenant_id,
-                quota_key="executions",
-                amount=1,
-                direction="consume",
-                scope="execution",
-                execution_id=execution.id,
-                conn=conn,
-            )
+            self._settle_execution_quota(actor, execution.id, conn=conn, consume=True)
             self._repo.enqueue_outbox(
                 ctx,
                 tenant_id=actor.tenant_id,
@@ -2575,25 +2635,29 @@ class WorkBuddyRuntimeService:
             if updated is None:  # pragma: no cover - defensive
                 raise _not_found()
             return _execution_view(updated)
-        if not self._repo.request_cancel(ctx, execution_id):
-            raise OctopError(
-                ErrorCode.STATE_CONFLICT,
-                "execution is already finished",
+        with runtime_transaction(self._db, ctx) as conn:
+            if not self._repo.request_cancel(ctx, execution_id, conn=conn):
+                raise OctopError(
+                    ErrorCode.STATE_CONFLICT,
+                    "execution is already finished",
+                )
+            self._repo.invalidate_pending_approvals(ctx, execution_id, conn=conn)
+            self._settle_execution_quota(actor, execution_id, conn=conn, consume=True)
+            self._audit(
+                actor,
+                action="execution.cancel",
+                resource_type="execution",
+                resource_id=execution_id,
+                conn=conn,
             )
-        self._repo.invalidate_pending_approvals(ctx, execution_id)
-        self._audit(
-            actor,
-            action="execution.cancel",
-            resource_type="execution",
-            resource_id=execution_id,
-        )
-        self._repo.enqueue_outbox(
-            ctx,
-            tenant_id=actor.tenant_id,
-            topic="workbuddy.execution.finished",
-            dedupe_key=f"{execution_id}:cancelled",
-            payload={"execution_id": execution_id, "status": "canceled"},
-        )
+            self._repo.enqueue_outbox(
+                ctx,
+                tenant_id=actor.tenant_id,
+                topic="workbuddy.execution.finished",
+                dedupe_key=f"{execution_id}:cancelled",
+                payload={"execution_id": execution_id, "status": "canceled"},
+                conn=conn,
+            )
         updated = self._repo.get_execution(ctx, execution_id)
         if updated is None:
             raise _not_found()
@@ -2641,86 +2705,104 @@ class WorkBuddyRuntimeService:
         self._require_postgres()
         if decision not in APPROVAL_DECISIONS:
             raise _invalid("decision must be 'approved' or 'rejected'")
-        execution = self._load_execution(actor, execution_id)
-        if execution.status == "waiting_reconciliation":
-            raise OctopError(
-                ErrorCode.RECONCILIATION_REQUIRED,
-                "an unknown external write must be reconciled before resuming",
-            )
-        if execution.status != "waiting_approval":
-            raise OctopError(
-                ErrorCode.STATE_CONFLICT,
-                "execution is not waiting for an approval decision",
-            )
-        approval = self._load_approval(actor, approval_request_id)
-        if approval.execution_id != execution_id:
-            raise _not_found("approval request does not belong to this execution")
-        # The decision must belong to the very version the execution locked.
-        if approval.locked_workflow_version_id != execution.workflow_version_id:
-            raise OctopError(
-                ErrorCode.APPROVAL_VERSION_MISMATCH,
-                "approval request was bound to a different workflow version",
-            )
-        if approval.status != "pending":
-            raise OctopError(
-                ErrorCode.APPROVAL_ALREADY_DECIDED,
-                "approval request has already been decided",
-            )
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         ctx = self._ctx(actor)
-        if not self._repo.consume_approval_token(ctx, approval_request_id, token_hash=token_hash):
-            raise OctopError(
-                ErrorCode.APPROVAL_TOKEN_INVALID,
-                "approval token is invalid, expired, or already used",
-            )
-        if not self._repo.decide_candidate(
-            ctx,
-            approval_request_id,
-            user_id=actor.user_id,
-            decision=decision,
-        ):
-            raise OctopError(
-                ErrorCode.FORBIDDEN_NOT_APPROVER,
-                "this user is not a pending candidate for the approval",
-            )
-        decided = self._repo.count_decided_approvals(ctx, approval_request_id)
-        if decision == "rejected":
-            self._repo.settle_approval_request(
+        limits = self._tenant_quota_limits(actor.tenant_id)
+        with runtime_transaction(self._db, ctx) as conn:
+            execution = self._load_execution(actor, execution_id, conn=conn)
+            if execution.status == "waiting_reconciliation":
+                raise OctopError(
+                    ErrorCode.RECONCILIATION_REQUIRED,
+                    "an unknown external write must be reconciled before resuming",
+                )
+            if execution.status != "waiting_approval":
+                raise OctopError(
+                    ErrorCode.STATE_CONFLICT,
+                    "execution is not waiting for an approval decision",
+                )
+            approval = self._load_approval(actor, approval_request_id, conn=conn)
+            if approval.execution_id != execution_id:
+                raise _not_found("approval request does not belong to this execution")
+            if approval.locked_workflow_version_id != execution.workflow_version_id:
+                raise OctopError(
+                    ErrorCode.APPROVAL_VERSION_MISMATCH,
+                    "approval request was bound to a different workflow version",
+                )
+            if approval.status != "pending":
+                raise OctopError(
+                    ErrorCode.APPROVAL_ALREADY_DECIDED,
+                    "approval request has already been decided",
+                )
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            if not self._repo.consume_approval_token(
                 ctx,
                 approval_request_id,
-                status="rejected",
-                decision="rejected",
-                decided_by_user_id=actor.user_id,
-                decided_approvals=decided,
-            )
-        elif decided >= approval.required_approvals:
-            self._repo.settle_approval_request(
+                token_hash=token_hash,
+                conn=conn,
+            ):
+                raise OctopError(
+                    ErrorCode.APPROVAL_TOKEN_INVALID,
+                    "approval token is invalid, expired, or already used",
+                )
+            if not self._repo.decide_candidate(
                 ctx,
                 approval_request_id,
-                status="approved",
-                decision="approved",
-                decided_by_user_id=actor.user_id,
-                decided_approvals=decided,
+                user_id=actor.user_id,
+                decision=decision,
+                conn=conn,
+            ):
+                raise OctopError(
+                    ErrorCode.FORBIDDEN_NOT_APPROVER,
+                    "this user is not a pending candidate for the approval",
+                )
+            decided = self._repo.count_decided_approvals(ctx, approval_request_id, conn=conn)
+            if decision == "rejected":
+                self._repo.settle_approval_request(
+                    ctx,
+                    approval_request_id,
+                    status="rejected",
+                    decision="rejected",
+                    decided_by_user_id=actor.user_id,
+                    decided_approvals=decided,
+                    conn=conn,
+                )
+            elif decided >= approval.required_approvals:
+                self._repo.settle_approval_request(
+                    ctx,
+                    approval_request_id,
+                    status="approved",
+                    decision="approved",
+                    decided_by_user_id=actor.user_id,
+                    decided_approvals=decided,
+                    conn=conn,
+                )
+            else:
+                self._audit(
+                    actor,
+                    action="approval.decision",
+                    resource_type="approval_request",
+                    resource_id=approval_request_id,
+                    details={"decision": decision, "decided": decided},
+                    conn=conn,
+                )
+                return _execution_view(execution)
+
+            self._reserve_concurrency_slot(
+                actor,
+                execution_id=execution_id,
+                limits=limits,
+                conn=conn,
             )
-        else:
             self._audit(
                 actor,
                 action="approval.decision",
                 resource_type="approval_request",
                 resource_id=approval_request_id,
                 details={"decision": decision, "decided": decided},
+                conn=conn,
             )
-            return _execution_view(execution)
 
         decisions = self._recorded_decisions(actor, execution)
         graph = self._graph_from_snapshot(execution)
-        self._audit(
-            actor,
-            action="approval.decision",
-            resource_type="approval_request",
-            resource_id=approval_request_id,
-            details={"decision": decision, "decided": decided},
-        )
         return self._run_execution(actor, execution_id, graph=graph, decisions=decisions)
 
     def _recorded_decisions(self, actor: RuntimeActor, execution: ExecutionRow) -> dict[str, str]:
