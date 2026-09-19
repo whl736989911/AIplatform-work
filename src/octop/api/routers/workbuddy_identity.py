@@ -7,7 +7,7 @@ compared with that derived tenant and can never select one.
 
 Persistence comes from the PostgreSQL-only identity slice
 (``octop.infra.db.repos.workbuddy_identity``); a SQLite control plane fails
-closed with ``WORKBUDDY_POSTGRES_REQUIRED``. That slice raises
+closed with ``DEPENDENCY_UNAVAILABLE``. That slice raises
 :class:`ValueError` subclasses carrying a stable ``.code``; ``_store_errors``
 maps those onto the API error envelope so handlers never leak a 500 for a
 domain rejection.
@@ -38,6 +38,7 @@ from octop.infra.users.identity import Role, User
 from octop.infra.users.password import validate_password_policy
 from octop.infra.users.permissions import effective_permissions
 from octop.infra.utils.locale import normalize_locale, resolve_request_locale
+from octop.infra.workbuddy.roles import TENANT_ADMIN_ROLES
 
 router = APIRouter()
 
@@ -53,7 +54,7 @@ _PLAN_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _DATA_REGION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
 _REQUEST_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 
-TENANT_ADMIN_ROLES = frozenset({"owner", "admin"})
+
 MEMBER_ROLES = ("owner", "admin", "member")
 USER_STATUSES = ("active", "suspended")
 DEPARTMENT_STATUSES = ("active", "archived")
@@ -84,7 +85,7 @@ def _identity_repo(server: Any) -> Any:
     db = getattr(services, "db", None)
     if getattr(db, "dialect", "") != "postgresql":
         raise OctopError(
-            ErrorCode.WORKBUDDY_POSTGRES_REQUIRED,
+            ErrorCode.DEPENDENCY_UNAVAILABLE,
             "WorkBuddy tenant identity requires the PostgreSQL control plane",
         )
     from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
@@ -332,7 +333,7 @@ def _decode_platform_claims(server: Any, token: str) -> dict[str, Any]:
     granted = [audience] if isinstance(audience, str) else list(audience or [])
     if WORKBUDDY_PLATFORM_AUDIENCE not in granted:
         raise OctopError(
-            ErrorCode.WORKBUDDY_PLATFORM_AUDIENCE_REQUIRED,
+            ErrorCode.FORBIDDEN_ROLE,
             "a workbuddy-platform audience token is required",
         )
     return claims
@@ -348,7 +349,7 @@ async def workbuddy_principal(
     member = repo.membership_for_user(user.id, active_only=False)
     if member is None:
         raise OctopError(
-            ErrorCode.WORKBUDDY_MEMBERSHIP_REQUIRED,
+            ErrorCode.FORBIDDEN_ROLE,
             "no WorkBuddy tenant membership for this account",
         )
     tenant_slug = str(_attr(member, "tenant_slug") or "")
@@ -356,12 +357,12 @@ async def workbuddy_principal(
     if sent_slug and sent_slug != tenant_slug:
         # The header may only confirm the derived tenant; it never selects one.
         raise OctopError(
-            ErrorCode.WORKBUDDY_TENANT_MISMATCH,
+            ErrorCode.FORBIDDEN_RESOURCE_ACTION,
             "tenant header does not match the authenticated membership",
         )
     tenant_status = str(_attr(member, "tenant_status") or STR_ACTIVE)
     if tenant_status != STR_ACTIVE:
-        raise OctopError(ErrorCode.WORKBUDDY_TENANT_SUSPENDED, "tenant is suspended")
+        raise OctopError(ErrorCode.TENANT_SUSPENDED, "tenant is suspended")
     member_status = str(_attr(member, "status") or STR_ACTIVE)
     if member_status != STR_ACTIVE:
         raise OctopError(
@@ -639,7 +640,7 @@ async def register(
     repo = _identity_repo(server)
     tenant = repo.get_tenant_by_slug(slug)
     if tenant is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     tenant_id = str(_attr(tenant, "tenant_id"))
     invitation = repo.lookup_invitation(body.invite_token, require_pending=False)
     if invitation is None or str(_attr(invitation, "tenant_id")) != tenant_id:
@@ -664,7 +665,7 @@ async def register(
     )
     member = repo.add_membership(tenant_id, user.id, invitation_token=body.invite_token)
     if member is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     response.headers["Cache-Control"] = "no-store"
     return workbuddy_envelope(request, _issue_session(server, user, tenant, member))
 
@@ -685,7 +686,7 @@ async def tenant_context(
     repo = _identity_repo(server)
     tenant = repo.get_tenant(principal.tenant_id)
     if tenant is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     return workbuddy_envelope(
         request,
         {
@@ -738,7 +739,7 @@ async def create_tenant(
     owner_email = _require_email(body.owner_email)
     owner_row = server.services.user_repo.get_by_email(owner_email)
     if owner_row is not None and bool(_attr(owner_row, "disabled", False)):
-        raise OctopError(ErrorCode.NOT_FOUND, "owner account is disabled")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "owner account is disabled")
     repo = _identity_repo(server)
     tenant = repo.create_tenant(
         body.slug,
@@ -762,7 +763,7 @@ async def create_tenant(
             invited_by=actor.user_id,
         )
         if invitation is None:
-            raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+            raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
         payload["admin_invitation"] = {
             **_invitation_json(invitation),
             "invite_token": raw,
@@ -783,11 +784,11 @@ async def get_tenant(
     _require_uuid(tenant_id, "tenant_id")
     if tenant_id != principal.tenant_id:
         # Another tenant is invisible, not forbidden.
-        raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     repo = _identity_repo(server)
     row = repo.get_tenant(tenant_id)
     if row is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     data: dict[str, Any] = {"tenant": _tenant_json(row), "membership": _membership_json(principal)}
     if principal.is_admin:
         users = list(repo.list_members(principal.tenant_id, limit=1000))
@@ -816,7 +817,7 @@ async def suspend_tenant(
         actor_user_id=actor.user_id,
     )
     if row is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     return workbuddy_envelope(request, {"tenant": _tenant_json(row)})
 
 
@@ -838,7 +839,7 @@ async def restore_tenant(
         actor_user_id=actor.user_id,
     )
     if row is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     return workbuddy_envelope(request, {"tenant": _tenant_json(row)})
 
 
@@ -878,7 +879,7 @@ async def patch_user(
     repo = _identity_repo(server)
     row = repo.get_member(principal.tenant_id, member_id)
     if row is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "user not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "user not found")
     provided = body.model_fields_set
     updates: dict[str, Any] = {}
     if "role" in provided and body.role is not None:
@@ -890,7 +891,7 @@ async def patch_user(
             _require_uuid(body.department_id, "department_id")
             departments = list(repo.list_departments(principal.tenant_id, limit=1000))
             if not any(str(_attr(d, "department_id")) == body.department_id for d in departments):
-                raise OctopError(ErrorCode.NOT_FOUND, "department not found")
+                raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "department not found")
         updates["department_id"] = body.department_id
     if "display_name" in provided:
         updates["display_name"] = body.display_name
@@ -903,7 +904,7 @@ async def patch_user(
         principal.tenant_id, member_id, actor_user_id=principal.user_id, **updates
     )
     if updated is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "user not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "user not found")
     return workbuddy_envelope(request, _tenant_user_json(updated))
 
 
@@ -944,7 +945,7 @@ async def create_department(
         _require_uuid(body.parent_id, "parent_id")
         parents = list(repo.list_departments(principal.tenant_id, limit=1000))
         if not any(str(_attr(d, "department_id")) == body.parent_id for d in parents):
-            raise OctopError(ErrorCode.NOT_FOUND, "parent department not found")
+            raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "parent department not found")
     row = repo.create_department(
         principal.tenant_id,
         name=body.name,
@@ -953,7 +954,7 @@ async def create_department(
         actor_user_id=principal.user_id,
     )
     if row is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     return workbuddy_envelope(request, _department_json(row, 0))
 
 
@@ -984,7 +985,7 @@ async def patch_department(
             _require_uuid(body.parent_id, "parent_id")
             departments = list(repo.list_departments(principal.tenant_id, limit=1000))
             if not any(str(_attr(d, "department_id")) == body.parent_id for d in departments):
-                raise OctopError(ErrorCode.NOT_FOUND, "parent department not found")
+                raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "parent department not found")
         updates["parent_id"] = body.parent_id
     if "status" in provided and body.status is not None:
         updates["status"] = _require_choice(body.status, DEPARTMENT_STATUSES, "status")
@@ -994,7 +995,7 @@ async def patch_department(
         principal.tenant_id, department_id, actor_user_id=principal.user_id, **updates
     )
     if row is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "department not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "department not found")
     counts = Counter(
         str(_attr(user, "department_id") or "")
         for user in repo.list_members(principal.tenant_id, limit=1000)
@@ -1043,7 +1044,7 @@ async def create_invitation(
         _require_uuid(body.department_id, "department_id")
         departments = list(repo.list_departments(principal.tenant_id, limit=1000))
         if not any(str(_attr(d, "department_id")) == body.department_id for d in departments):
-            raise OctopError(ErrorCode.NOT_FOUND, "department not found")
+            raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "department not found")
     token, digest = _invitation_token()
     row = repo.create_invitation(
         principal.tenant_id,
@@ -1055,7 +1056,7 @@ async def create_invitation(
         invited_by=principal.user_id,
     )
     if row is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     response.headers["Cache-Control"] = "no-store"
     return workbuddy_envelope(request, {**_invitation_json(row), "invite_token": token})
 
@@ -1073,7 +1074,7 @@ async def revoke_invitation(
     repo = _identity_repo(server)
     row = repo.revoke_invitation(principal.tenant_id, invitation_id, revoked_by=principal.user_id)
     if row is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "invitation not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "invitation not found")
     return workbuddy_envelope(request, _invitation_json(row))
 
 
@@ -1126,13 +1127,13 @@ async def put_tenant_quotas(
         hard_cap = hard_caps.get(metric)
         if hard_cap is not None and limit > int(hard_cap):
             raise OctopError(
-                ErrorCode.WORKBUDDY_QUOTA_EXCEEDED,
+                ErrorCode.QUOTA_EXCEEDED,
                 "quota exceeds the platform hard cap",
                 details={"metric": metric, "hard_cap": int(hard_cap)},
             )
     rows = repo.set_quotas(principal.tenant_id, body.quotas, actor_user_id=principal.user_id)
     if rows is None:
-        raise OctopError(ErrorCode.NOT_FOUND, "tenant not found")
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     return workbuddy_envelope(request, _quota_payload(list(rows)))
 
 

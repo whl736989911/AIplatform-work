@@ -84,7 +84,7 @@ _MODEL_NOT_FOUND = "platform model revision not found"
 
 
 def _not_found(detail: str) -> OctopError:
-    return OctopError(ErrorCode.NOT_FOUND, detail)
+    return OctopError(ErrorCode.RESOURCE_NOT_FOUND, detail)
 
 
 def _public_id(value: str, detail: str) -> str:
@@ -111,7 +111,7 @@ def _repo(server: Any) -> Any:
     db = getattr(services, "db", None)
     if getattr(db, "dialect", "") != "postgresql":
         raise OctopError(
-            ErrorCode.WORKBUDDY_POSTGRES_REQUIRED,
+            ErrorCode.DEPENDENCY_UNAVAILABLE,
             "WorkBuddy connector governance requires the PostgreSQL control plane",
         )
     from octop.infra.db.repos.workbuddy_catalog import WorkBuddyCatalogRepo
@@ -134,12 +134,10 @@ def _require_secret_backend(server: Any) -> Any:
         # expects an external secret manager this deployment cannot serve.
         declared = "vault" if (os.environ.get(_VAULT_ADDR_ENV) or "").strip() else "octop"
     if declared not in _SUPPORTED_SECRET_BACKENDS:
-        raise OctopError(
-            ErrorCode.WORKBUDDY_SECRET_BACKEND_UNAVAILABLE, _SECRET_BACKEND_UNSUPPORTED
-        )
+        raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _SECRET_BACKEND_UNSUPPORTED)
     secret_repo = getattr(getattr(server, "services", None), "secret_repo", None)
     if secret_repo is None:
-        raise OctopError(ErrorCode.WORKBUDDY_SECRET_BACKEND_UNAVAILABLE, _SECRET_STORE_UNAVAILABLE)
+        raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _SECRET_STORE_UNAVAILABLE)
     return secret_repo
 
 
@@ -164,16 +162,14 @@ def _store_credential_secret(secret_repo: Any, key: str, secret: dict[str, Any] 
         blob = encrypt_credentials(secret_repo, payload)
         secret_repo.get_or_create(key, lambda: blob)
     except Exception as exc:  # noqa: BLE001 - any key/store failure must fail closed
-        raise OctopError(
-            ErrorCode.WORKBUDDY_SECRET_BACKEND_UNAVAILABLE, _SECRET_STORE_UNAVAILABLE
-        ) from exc
+        raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _SECRET_STORE_UNAVAILABLE) from exc
 
 
 # Class-level fallbacks for refusals raised without an operation-specific code.
 _CATALOG_FALLBACK_CODES: dict[type[Exception], ErrorCode] = {
-    WorkBuddyCapabilityNotApproved: ErrorCode.WORKBUDDY_CAPABILITY_NOT_APPROVED,
+    WorkBuddyCapabilityNotApproved: ErrorCode.FORBIDDEN_ROLE,
     WorkBuddyCredentialNameTaken: ErrorCode.WORKBUDDY_CREDENTIAL_NAME_TAKEN,
-    WorkBuddyMembershipRequired: ErrorCode.WORKBUDDY_MEMBERSHIP_REQUIRED,
+    WorkBuddyMembershipRequired: ErrorCode.FORBIDDEN_ROLE,
     WorkBuddyPlatformRevisionConflict: ErrorCode.WORKBUDDY_PLATFORM_REVISION_CONFLICT,
 }
 
@@ -219,7 +215,7 @@ def _capability_refusal(exc: Exception) -> OctopError:
     return _catalog_refusal(
         exc,
         conflict=ErrorCode.WORKBUDDY_CAPABILITY_REVISION_CONFLICT,
-        revoked=ErrorCode.WORKBUDDY_CAPABILITY_NOT_APPROVED,
+        revoked=ErrorCode.FORBIDDEN_ROLE,
     )
 
 
@@ -721,7 +717,7 @@ async def update_tenant_capabilities(
     )
     if default_model_id is not None and default_model_id not in model_ids:
         raise OctopError(
-            ErrorCode.WORKBUDDY_CAPABILITY_NOT_APPROVED,
+            ErrorCode.FORBIDDEN_ROLE,
             "default model must be one of the approved model revisions",
         )
     try:

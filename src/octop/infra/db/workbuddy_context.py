@@ -15,7 +15,7 @@ the transaction commits or rolls back.
 
 SQLite installs keep the no-op schema marker ``015_workbuddy_identity.sql`` and this
 module fails closed with :class:`WorkBuddyPostgresRequiredError` (stable code
-``WORKBUDDY_POSTGRES_REQUIRED``) instead of serving tenant data without isolation.
+``DEPENDENCY_UNAVAILABLE``) instead of serving tenant data without isolation.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ SYSTEM_OFF = "off"
 class WorkBuddyPostgresRequiredError(RuntimeError):
     """WorkBuddy was asked to run on a non-PostgreSQL database (fail closed)."""
 
-    code = "WORKBUDDY_POSTGRES_REQUIRED"
+    code = "DEPENDENCY_UNAVAILABLE"
     message = "WorkBuddy requires a PostgreSQL database"
 
     def __init__(self, message: str | None = None) -> None:
