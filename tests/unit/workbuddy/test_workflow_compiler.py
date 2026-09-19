@@ -15,6 +15,7 @@ from octop.infra.workbuddy.workflow_compiler import (
     WORKFLOW_EDGE_SELF_LOOP,
     WORKFLOW_EDGE_UNKNOWN_NODE,
     WORKFLOW_ENTRY_COUNT,
+    WORKFLOW_KNOWLEDGE_BASE_UNKNOWN,
     WORKFLOW_MODEL_NOT_CONFIGURED,
     WORKFLOW_NODE_DUPLICATE_ID,
     WORKFLOW_REFERENCE_NOT_UPSTREAM,
@@ -470,6 +471,76 @@ def test_semantic_resolution_fails_closed_and_surfaces_codes() -> None:
     with pytest.raises(WorkflowCompileError) as caught:
         compile_workflow_definition(llm, resolver=Resolver(), require_semantic_resolution=True)
     assert caught.value.code == WORKFLOW_MODEL_NOT_CONFIGURED
+
+
+def test_llm_node_knowledge_bases_follow_the_resolver_decision() -> None:
+    """A refused base blocks the publish; an unresolvable answer does not."""
+
+    visible = "00000000-0000-0000-0000-0000000000aa"
+    hidden = "00000000-0000-0000-0000-0000000000bb"
+
+    class Resolver:
+        def check_tool(self, tool_name, parameters):
+            return SemanticDecision.allowed()
+
+        def check_model(self, model):
+            return SemanticDecision.allowed()
+
+        def check_knowledge_base(self, knowledge_base_id):
+            if knowledge_base_id == hidden:
+                return SemanticDecision.refused(
+                    WORKFLOW_KNOWLEDGE_BASE_UNKNOWN, "base is not visible in this tenant"
+                )
+            return SemanticDecision.allowed()
+
+        def check_approver(self, user_id):
+            return SemanticDecision.allowed()
+
+    definition = {
+        "schema_version": 1,
+        "trigger": manual_trigger(),
+        "nodes": [
+            {
+                "id": "ask",
+                "type": "llm",
+                "name": "Ask",
+                "config": {
+                    "prompt": "hi",
+                    "model": "tenant-model",
+                    "knowledge_base_ids": [visible, hidden],
+                },
+            }
+        ],
+        "edges": [],
+    }
+
+    with pytest.raises(WorkflowCompileError) as caught:
+        compile_workflow_definition(
+            definition, resolver=Resolver(), require_semantic_resolution=True
+        )
+    assert caught.value.code == WORKFLOW_KNOWLEDGE_BASE_UNKNOWN
+    assert caught.value.path == "nodes.ask.config.knowledge_base_ids[1]"
+
+    definition["nodes"][0]["config"]["knowledge_base_ids"] = [visible]
+    assert (
+        compile_workflow_definition(
+            definition, resolver=Resolver(), require_semantic_resolution=True
+        ).semantic_checks
+        == "passed"
+    )
+
+    class Unresolvable(Resolver):
+        # None is the resolver's "cannot answer here" answer, and the contract
+        # tolerates it: only an explicit refusal blocks a publish.
+        def check_knowledge_base(self, knowledge_base_id):
+            return None
+
+    assert (
+        compile_workflow_definition(
+            definition, resolver=Unresolvable(), require_semantic_resolution=True
+        ).semantic_checks
+        == "passed"
+    )
 
 
 def test_publish_requires_at_least_one_valid_approver() -> None:
