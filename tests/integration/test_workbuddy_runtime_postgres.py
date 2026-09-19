@@ -1688,6 +1688,99 @@ def test_a_dead_worker_lease_is_taken_over_with_a_new_fence(
     assert dying.worker_id == "dead-worker"
 
 
+async def test_cancelling_a_running_execution_stops_before_the_next_call(
+    app: FastAPI, pool: Any, tenant: dict[str, Any], monkeypatch: Any
+) -> None:
+    """A cancel lands between nodes: the call in flight finishes, nothing new starts."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from octop.api.routers import workbuddy_runtime as router_module
+    from octop.infra.db.repos.workbuddy_runtime import WorkBuddyRuntimeRepo
+    from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+    from octop.infra.workbuddy.runtime import RuntimeActor, WorkBuddyRuntimeService
+    from octop.infra.workbuddy.worker import WorkBuddyExecutionWorker
+
+    class BlockingToolPort:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.calls: list[str] = []
+
+        def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
+            self.calls.append(node.id)
+            self.entered.set()
+            if not self.release.wait(timeout=10):
+                raise AssertionError("test did not release the blocked tool")
+            return {"ok": True}
+
+        def execute_llm(self, *, node: Any, activation: Any) -> Any:
+            raise AssertionError("this workflow has no llm node")
+
+        def respond_chat(self, *, session_id: str, message: str, history: Any) -> Any:
+            raise AssertionError("chat is not part of this workflow")
+
+    definition = {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {},
+        "nodes": [
+            {
+                "id": "first",
+                "type": "tool",
+                "name": "Call in flight",
+                "config": {"tool_name": "test.first", "parameters": {}},
+            },
+            {
+                "id": "second",
+                "type": "tool",
+                "name": "Must never start",
+                "config": {"tool_name": "test.second", "parameters": {}},
+            },
+        ],
+        "edges": [{"from": "first", "to": "second"}],
+    }
+    workflow_id = _publish(pool, tenant, definition, "Running cancel runtime")
+    port = BlockingToolPort()
+    service = WorkBuddyRuntimeService(pool, effects=port)
+    monkeypatch.setattr(router_module, "_service", lambda server: service)
+    actor = RuntimeActor(
+        tenant_id=tenant["tenant_id"],
+        user_id=tenant["owner_user_id"],
+        role="owner",
+        tenant_status="active",
+    )
+    worker = WorkBuddyExecutionWorker(pool, service=service, worker_id="cancel-worker")
+    worker.drain()
+    execution_id = service.start_execution(actor, workflow_id=workflow_id, inputs={}).id
+    ctx = WorkBuddyDbContext.for_tenant(tenant["tenant_id"], user_id=tenant["owner_user_id"])
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            running = executor.submit(worker.run_once)
+            assert port.entered.wait(timeout=10), "the admitted run never entered its tool"
+            async with _client(app, _principal(tenant)) as client:
+                canceled = await client.post(f"/executions/{execution_id}/cancel")
+                assert canceled.status_code == 202, canceled.text
+                # The call in flight is not claimed undone: the execution is still
+                # running and the request is what is recorded.
+                assert canceled.json()["data"]["status"] == "running", canceled.text
+                assert canceled.json()["data"]["cancel_requested"] is True, canceled.text
+            port.release.set()
+            assert running.result(timeout=10) is not None
+        async with _client(app, _principal(tenant)) as client:
+            settled = (await client.get(f"/executions/{execution_id}")).json()["data"]
+    finally:
+        port.release.set()
+
+    assert settled["status"] == "canceled", settled
+    assert port.calls == ["first"], port.calls
+    steps = {
+        step.node_id: step.status
+        for step in WorkBuddyRuntimeRepo(pool).list_step_runs(ctx, execution_id)
+    }
+    assert steps == {"first": "success", "second": "canceled"}, steps
+
+
 def test_a_running_step_is_visible_while_the_node_works(pool: Any, tenant: dict[str, Any]) -> None:
     """A long node is observable as ``running``, not only once the run commits."""
     import threading

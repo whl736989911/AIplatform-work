@@ -753,6 +753,7 @@ def run_graph(
     execution_id: str = "",
     on_step_start: Callable[[GraphNode], None] | None = None,
     on_step_settled: Callable[[StepOutcome], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> GraphRun:
     """Execute the graph once, deterministically, and aggregate the outcome.
 
@@ -790,6 +791,7 @@ def run_graph(
     approval_candidates: dict[str, tuple[tuple[int, str | None], ...]] = {}
     waiting_node: str | None = None
     reconciliation_node: str | None = None
+    canceled = False
     executed = 0
 
     def resolve_edge(edge: GraphEdge, taken: bool, *, failed: bool = False) -> None:
@@ -896,6 +898,11 @@ def run_graph(
         return None
 
     while failure is None and waiting_node is None:
+        if should_stop is not None and should_stop():
+            # A cancel landed while this attempt was working: stop before
+            # creating another call and let the attempt settle as canceled.
+            canceled = True
+            break
         action = next_actionable()
         if action is None:
             break
@@ -1112,6 +1119,17 @@ def run_graph(
         )
         propagate_taken(node)
 
+    if canceled:
+        # The user's cancel outranks the ordinary settlement: the attempt stops
+        # where it was told to and reports canceled, whatever the branches so far
+        # would otherwise have added up to.
+        return GraphRun(
+            status="canceled",
+            steps=tuple(steps),
+            edges=tuple(edge_outcomes),
+            outputs=dict(results),
+            tokens=sum(step.tokens for step in steps),
+        )
     if reconciliation_node is not None:
         return GraphRun(
             status="waiting_reconciliation",
@@ -2325,7 +2343,17 @@ class WorkBuddyRuntimeService:
             resolve_approvers=lambda node: self._resolved_candidates(actor, node),
             on_step_start=lambda node: self._mark_step_running(actor, claim, node, attempt),
             on_step_settled=lambda step: self._persist_step(actor, claim, step, attempt),
+            # A cancel is noticed between nodes, so the call already in flight
+            # lands and nothing new is dispatched.
+            should_stop=lambda: self._repo.cancel_requested(ctx, claim.execution_id),
         )
+        if run.status == "canceled":
+            self._repo.cancel_pending_steps(
+                ctx,
+                claim.execution_id,
+                attempt=attempt,
+                fence=claim.fence,
+            )
         self._finalize(actor, execution, run, graph, claim=claim, lease_name=lease_name)
 
     def _mark_step_running(
@@ -2803,26 +2831,33 @@ class WorkBuddyRuntimeService:
                 raise _not_found()
             return _execution_view(updated)
         with runtime_transaction(self._db, ctx) as conn:
-            if not self._repo.request_cancel(ctx, execution_id, conn=conn):
+            if execution.status == "running":
+                if not self._repo.request_cancel_running(ctx, execution_id, conn=conn):
+                    raise OctopError(
+                        ErrorCode.STATE_CONFLICT,
+                        "execution is already finished",
+                    )
+            elif not self._repo.request_cancel(ctx, execution_id, conn=conn):
                 raise OctopError(
                     ErrorCode.STATE_CONFLICT,
                     "execution is already finished",
                 )
-            self._repo.invalidate_pending_approvals(ctx, execution_id, conn=conn)
-            self._settle_execution_quota(actor, execution_id, conn=conn, consume=True)
+            else:
+                self._repo.invalidate_pending_approvals(ctx, execution_id, conn=conn)
+                self._settle_execution_quota(actor, execution_id, conn=conn, consume=True)
+                self._repo.enqueue_outbox(
+                    ctx,
+                    tenant_id=actor.tenant_id,
+                    topic="workbuddy.execution.finished",
+                    dedupe_key=f"{execution_id}:cancelled",
+                    payload={"execution_id": execution_id, "status": "canceled"},
+                    conn=conn,
+                )
             self._audit(
                 actor,
                 action="execution.cancel",
                 resource_type="execution",
                 resource_id=execution_id,
-                conn=conn,
-            )
-            self._repo.enqueue_outbox(
-                ctx,
-                tenant_id=actor.tenant_id,
-                topic="workbuddy.execution.finished",
-                dedupe_key=f"{execution_id}:cancelled",
-                payload={"execution_id": execution_id, "status": "canceled"},
                 conn=conn,
             )
         updated = self._repo.get_execution(ctx, execution_id)

@@ -857,16 +857,77 @@ class WorkBuddyRuntimeRepo:
     def request_cancel(
         self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
     ) -> bool:
+        """Cancel an execution that is not running; report False when it is.
+
+        A queued or parked execution has no call in flight, so it can be canceled
+        outright. A *running* one may be in the middle of an external call, and
+        the contract forbids claiming to undo a write that may already have
+        happened: the request is recorded instead (``request_cancel_running``)
+        and the run converges to ``canceled`` once its current call lands.
+        """
         with runtime_transaction(self._db, ctx, conn) as c:
             cursor = c.execute(
                 """
                 UPDATE workbuddy_executions
                 SET status = 'canceled', cancel_requested_at = now(), finished_at = now()
-                WHERE id = ? AND status IN ('queued', 'running', 'waiting_approval')
+                WHERE id = ? AND status IN ('queued', 'waiting_approval')
                 """,
                 (execution_id,),
             )
             return bool(getattr(cursor, "rowcount", 0))
+
+    def request_cancel_running(
+        self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
+    ) -> bool:
+        """Ask a running execution to stop before its next step.
+
+        The runner notices between nodes and settles the attempt as ``canceled``;
+        until then the execution keeps the status and the slot it holds, which is
+        what makes the cancel honest about the call already in flight.
+        """
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_executions
+                SET cancel_requested_at = COALESCE(cancel_requested_at, now())
+                WHERE id = ? AND status = 'running'
+                """,
+                (execution_id,),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def cancel_requested(
+        self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
+    ) -> bool:
+        """True once a cancel has been requested for this execution."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            row = c.execute(
+                "SELECT cancel_requested_at FROM workbuddy_executions WHERE id = ?",
+                (execution_id,),
+            ).fetchone()
+        return row is not None and row["cancel_requested_at"] is not None
+
+    def cancel_pending_steps(
+        self,
+        ctx: WorkBuddyDbContext,
+        execution_id: str,
+        *,
+        attempt: int,
+        fence: int,
+        conn: Any | None = None,
+    ) -> int:
+        """Cancel the steps this attempt queued but never decided."""
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_step_runs
+                SET status = 'canceled', finished_at = now()
+                WHERE execution_id = ? AND attempt = ? AND fence = ?
+                  AND status IN ('queued', 'running')
+                """,
+                (execution_id, int(attempt), int(fence)),
+            )
+            return int(getattr(cursor, "rowcount", 0) or 0)
 
     def latest_succeeded_execution(
         self, ctx: WorkBuddyDbContext, workflow_id: str, *, conn: Any | None = None
