@@ -772,6 +772,19 @@ RETRYABLE_ERROR_CODES = frozenset(
 )
 
 
+def _schema_violation(schema: Mapping[str, Any], value: Any) -> str | None:
+    """Why ``value`` does not satisfy ``schema``, or None when it does."""
+    import jsonschema
+
+    try:
+        jsonschema.validate(value, dict(schema))
+    except jsonschema.ValidationError as exc:
+        return str(exc.message)
+    except jsonschema.SchemaError as exc:  # pragma: no cover - the registry checks this
+        return f"registered schema is invalid: {exc.message}"
+    return None
+
+
 def _retry_budget(node: GraphNode) -> tuple[int, int]:
     """Clamped ``(max_attempts, backoff_sec)`` for one node; 1 means no retry."""
     raw = node.retry if isinstance(node.retry, Mapping) else {}
@@ -811,6 +824,7 @@ def run_graph(
     on_step_settled: Callable[[StepOutcome], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     on_step_dispatch: Callable[[GraphNode], None] | None = None,
+    resolve_tool_declaration: Callable[[GraphNode], ToolDeclaration | None] | None = None,
 ) -> GraphRun:
     """Execute the graph once, deterministically, and aggregate the outcome.
 
@@ -1142,6 +1156,14 @@ def run_graph(
             propagate_skip(node, failed=True)
             continue
         max_attempts, backoff_sec = _retry_budget(node)
+        # What the registry says about this tool decides whether a *confirmed*
+        # failure may be repeated; without a declaration only a failure that
+        # provably dispatched nothing is retryable.
+        declaration = (
+            resolve_tool_declaration(node)
+            if resolve_tool_declaration is not None and node.type == "tool"
+            else None
+        )
         dispatched = 0
         call_value: Any = None
         call_error: OctopError | None = None
@@ -1171,7 +1193,12 @@ def run_graph(
                 break
             except OctopError as exc:
                 call_error = exc
-                retryable = exc.code in RETRYABLE_ERROR_CODES
+                # ``RETRYABLE_ERROR_CODES`` means the call never left the process;
+                # a *confirmed* failure of a read-only or idempotent tool is also
+                # safe to repeat, and nothing else is.
+                retryable = exc.code in RETRYABLE_ERROR_CODES or (
+                    declaration is not None and declaration.repeatable
+                )
                 if not retryable or dispatched >= max_attempts:
                     break
                 if not _sleep_backoff(backoff_sec, should_stop):
@@ -1197,6 +1224,26 @@ def run_graph(
             )
             propagate_skip(node, failed=True)
             continue
+        if declaration is not None and declaration.output_schema is not None:
+            # A result that does not satisfy the registered schema is a contract
+            # failure, not a success this run may build on.
+            invalid = _schema_violation(declaration.output_schema, call_value)
+            if invalid is not None:
+                node_failures.append(
+                    record(
+                        node,
+                        "failed",
+                        error_code=ErrorCode.WORKBUDDY_VALIDATION_FAILED.value,
+                        error_message=(
+                            f"tool '{node.id}' returned a result that does not match its "
+                            f"registered output schema: {invalid}"
+                        ),
+                        timing=elapsed(),
+                        retries=dispatched - 1,
+                    )
+                )
+                propagate_skip(node, failed=True)
+                continue
         store(node, call_value)
         record(
             node,
@@ -1930,6 +1977,64 @@ class RuntimeJobRecorder:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ToolDeclaration:
+    """What the platform registry says about the tool a node calls.
+
+    The engine reads it before dispatching: a read-only tool may be repeated, an
+    external write only when its idempotency semantics are confirmed (contract
+    line 891), and a declared result schema must hold for a success to count.
+    """
+
+    effect_class: str
+    supports_idempotency: bool
+    output_schema: Mapping[str, Any] | None = None
+
+    @property
+    def repeatable(self) -> bool:
+        """Whether a *confirmed* failure may be followed by another call."""
+        return self.effect_class == "read_only" or self.supports_idempotency
+
+
+class CatalogToolDeclarations:
+    """Resolve a node's declared tool to the tenant's granted platform revision.
+
+    Resolution is per tenant on purpose: a tool the tenant has no grant for is
+    undeclared, which is the conservative answer (no retry beyond a failure that
+    provably dispatched nothing, and no registered result schema).
+    """
+
+    def __init__(self, db: DatabasePool) -> None:
+        self._db = db
+
+    def __call__(self, tenant_id: str, node: GraphNode) -> ToolDeclaration | None:
+        tool_key = node.config.get("tool_name") if isinstance(node.config, Mapping) else None
+        if not isinstance(tool_key, str) or not tool_key:
+            return None
+        ctx = WorkBuddyDbContext.for_tenant(tenant_id)
+        with runtime_transaction(self._db, ctx) as conn:
+            row = conn.execute(
+                """
+                SELECT r.effect_class, r.supports_idempotency, r.output_schema
+                FROM workbuddy_tenant_tool_grants g
+                JOIN workbuddy_platform_tool_revisions r
+                  ON r.tool_revision_id = g.tool_revision_id
+                WHERE r.tool_key = ? AND r.status = 'published'
+                ORDER BY r.revision DESC
+                LIMIT 1
+                """,
+                (tool_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        schema = row["output_schema"]
+        return ToolDeclaration(
+            effect_class=str(row["effect_class"]),
+            supports_idempotency=bool(row["supports_idempotency"]),
+            output_schema=dict(schema) if isinstance(schema, Mapping) else None,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
@@ -1947,6 +2052,7 @@ class WorkBuddyRuntimeService:
         effects: SideEffectPort | None = None,
         approver_resolver: Any | None = None,
         canary: CanaryDirectory | None = None,
+        tool_declarations: Any | None = None,
     ) -> None:
         self._db = db
         self._repo = repo or WorkBuddyRuntimeRepo(db)
@@ -1956,6 +2062,9 @@ class WorkBuddyRuntimeService:
             approver_resolver if approver_resolver is not None else MembershipApproverResolver(db)
         )
         self._canary = canary or NO_CANARY_EVALUATION
+        self._tool_declarations = (
+            tool_declarations if tool_declarations is not None else CatalogToolDeclarations(db)
+        )
 
     @classmethod
     def for_control_plane(cls, db: DatabasePool) -> WorkBuddyRuntimeService:
@@ -2493,6 +2602,7 @@ class WorkBuddyRuntimeService:
             # lands and nothing new is dispatched.
             should_stop=lambda: self._repo.cancel_requested(ctx, claim.execution_id),
             on_step_dispatch=lambda node: self._mark_step_dispatch(actor, claim, node, attempt),
+            resolve_tool_declaration=lambda node: self._tool_declarations(claim.tenant_id, node),
         )
         if run.status == "canceled":
             self._repo.cancel_pending_steps(

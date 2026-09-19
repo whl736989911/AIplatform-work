@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeGuard, TypeVar
 
@@ -72,6 +72,12 @@ __all__ = [
 STATUS_ACTIVE = "active"
 STATUS_REVOKED = "revoked"
 STATUS_PUBLISHED = "published"
+
+# Contract §4.6.1: a tool either only reads (safe to repeat) or writes outside
+# the platform (repeating it needs confirmed idempotency).
+EFFECT_READ_ONLY = "read_only"
+EFFECT_EXTERNAL_WRITE = "external_write"
+EFFECT_CLASSES = frozenset({EFFECT_READ_ONLY, EFFECT_EXTERNAL_WRITE})
 
 ACTION_CREATED = "created"
 ACTION_ROTATED = "rotated"
@@ -278,10 +284,22 @@ class WorkBuddyToolRevision:
     published_at: int
     revoked_by_user_id: int | None
     revoked_at: int | None
+    # What the tool *is*: the engine's retry rule (contract line 891) and result
+    # validation both read these.
+    effect_class: str = EFFECT_EXTERNAL_WRITE
+    supports_idempotency: bool = False
+    supports_result_lookup: bool = False
+    sandbox_verified: bool = False
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
 
     @property
     def revoked(self) -> bool:
         return self.status == STATUS_REVOKED
+
+    @property
+    def read_only(self) -> bool:
+        return self.effect_class == EFFECT_READ_ONLY
 
     @classmethod
     def from_row(cls, row: DbRow) -> WorkBuddyToolRevision:
@@ -297,6 +315,12 @@ class WorkBuddyToolRevision:
             published_at=int(row["published_at"]),
             revoked_by_user_id=_optional_int(row["revoked_by_user_id"]),
             revoked_at=_optional_int(row["revoked_at"]),
+            effect_class=str(row["effect_class"]),
+            supports_idempotency=bool(row["supports_idempotency"]),
+            supports_result_lookup=bool(row["supports_result_lookup"]),
+            sandbox_verified=bool(row["sandbox_verified"]),
+            input_schema=_optional_json_map(row["input_schema"]),
+            output_schema=_optional_json_map(row["output_schema"]),
         )
 
 
@@ -621,8 +645,29 @@ class WorkBuddyCatalogRepo:
         display_name: str,
         actor_user_id: int,
         description: str = "",
+        effect_class: str = EFFECT_EXTERNAL_WRITE,
+        supports_idempotency: bool = False,
+        supports_result_lookup: bool = False,
+        sandbox_verified: bool = False,
+        input_schema: Mapping[str, Any] | None = None,
+        output_schema: Mapping[str, Any] | None = None,
     ) -> WorkBuddyToolRevision:
-        """Freeze a new platform tool revision for ``(adapter_key, tool_key)``."""
+        """Freeze a new platform tool revision for ``(adapter_key, tool_key)``.
+
+        The declaration is what the engine consults before it dispatches: whether
+        the tool only reads, whether re-sending it is safe because its
+        idempotency-key semantics are confirmed, and which schema its result has
+        to satisfy. Every default is the conservative one, so an under-declared
+        tool is treated as a non-idempotent external write.
+        """
+        if effect_class not in EFFECT_CLASSES:
+            raise WorkBuddyInvalidInput(f"effect_class must be one of {sorted(EFFECT_CLASSES)}")
+        clean_input = _validated_schema(input_schema, field="input_schema")
+        clean_output = _validated_schema(output_schema, field="output_schema")
+        if supports_result_lookup and clean_output is None:
+            raise WorkBuddyInvalidInput(
+                "supports_result_lookup requires an output_schema to check the result against"
+            )
         return self._publish_revision(
             table=_TABLE_TOOL_REVISIONS,
             key_column="tool_key",
@@ -632,6 +677,14 @@ class WorkBuddyCatalogRepo:
             description=description,
             actor_user_id=actor_user_id,
             record=WorkBuddyToolRevision,
+            extra={
+                "effect_class": effect_class,
+                "supports_idempotency": bool(supports_idempotency),
+                "supports_result_lookup": bool(supports_result_lookup),
+                "sandbox_verified": bool(sandbox_verified),
+                "input_schema": _jsonb(clean_input) if clean_input is not None else None,
+                "output_schema": _jsonb(clean_output) if clean_output is not None else None,
+            },
         )
 
     def get_tool_revision(self, tool_revision_id: str) -> WorkBuddyToolRevision | None:
@@ -859,12 +912,34 @@ class WorkBuddyCatalogRepo:
         description: str,
         actor_user_id: int,
         record: type[_PlatformRevision],
+        extra: Mapping[str, Any] | None = None,
     ) -> _PlatformRevision:
         clean_adapter = _validated_text(adapter_key, field="adapter_key", max_length=120)
         clean_key = _validated_text(key_value, field=key_column, max_length=200)
         clean_display = _validated_text(display_name, field="display_name", max_length=200)
         clean_description = _validated_description(description)
         ts = now_ts()
+        # Tool revisions carry a declaration the model revisions do not have, so
+        # the insert is built from the caller's extra columns instead of a fixed
+        # list shared by both.
+        extra_columns = dict(extra or {})
+        columns = (
+            f"adapter_key, {key_column}, revision, display_name, description, status, "
+            "published_by_user_id, published_at"
+        )
+        placeholders = "?, ?, ?, ?, ?, 'published', ?, ?"
+        values: list[Any] = [
+            clean_adapter,
+            clean_key,
+            clean_display,
+            clean_description,
+            int(actor_user_id),
+            ts,
+        ]
+        for name, value in extra_columns.items():
+            columns += f", {name}"
+            placeholders += ", ?"
+            values.append(value)
         with workbuddy_transaction(self._db, _platform_context()) as conn:
             latest = conn.execute(
                 f"SELECT revision, status FROM {table}"
@@ -877,19 +952,8 @@ class WorkBuddyCatalogRepo:
                 )
             revision = int(latest["revision"]) + 1 if latest is not None else 1
             row = conn.execute(
-                f"INSERT INTO {table}("
-                f" adapter_key, {key_column}, revision, display_name, description, status,"
-                " published_by_user_id, published_at"
-                ") VALUES (?, ?, ?, ?, ?, 'published', ?, ?) RETURNING *",
-                (
-                    clean_adapter,
-                    clean_key,
-                    revision,
-                    clean_display,
-                    clean_description,
-                    int(actor_user_id),
-                    ts,
-                ),
+                f"INSERT INTO {table}({columns}) VALUES ({placeholders}) RETURNING *",
+                (*values[:2], revision, *values[2:]),
             ).fetchone()
         if row is None:
             raise WorkBuddyCatalogError("platform revision insert returned no row")
@@ -1097,3 +1161,40 @@ def _optional_str(value: Any) -> str | None:
 
 def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def _optional_json_map(value: Any) -> dict[str, Any] | None:
+    """A jsonb column read back as a mapping (``None`` when the column is null)."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    parsed = json.loads(str(value))
+    return dict(parsed) if isinstance(parsed, dict) else None
+
+
+def _jsonb(value: Any) -> Any:
+    """Bind a value destined for a jsonb column (psycopg cannot adapt dicts)."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def _validated_schema(schema: Any, *, field: str) -> dict[str, Any] | None:
+    """A registered input/output schema must be a valid Draft 7 schema object.
+
+    Checked against the metaschema only: the registry stores what a tool
+    declares, and validating an actual result against it happens at dispatch.
+    """
+    if schema is None:
+        return None
+    if not isinstance(schema, dict) or not schema:
+        raise WorkBuddyInvalidInput(f"{field} must be a schema object")
+    from jsonschema import Draft7Validator
+    from jsonschema.exceptions import SchemaError
+
+    try:
+        Draft7Validator.check_schema(schema)
+    except SchemaError as exc:
+        raise WorkBuddyInvalidInput(
+            f"{field} is not a valid Draft 7 schema: {exc.message}"
+        ) from exc
+    return dict(schema)
