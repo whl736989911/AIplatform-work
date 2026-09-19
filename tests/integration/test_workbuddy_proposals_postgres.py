@@ -291,6 +291,16 @@ async def test_proposal_creation_fixes_an_immutable_candidate(
         data = detail.json()["data"]
         assert data["candidate_version_id"], data
 
+        # The 202 carries the id of the job that did the generation, and that job
+        # is a real fact a client that lost the response can look up.
+        assert body["job_id"] != body["proposal_id"], body
+        job = await client.get(f"/jobs/{body['job_id']}")
+        assert job.status_code == 200, job.text
+        job_data = job.json()["data"]
+        assert job_data["kind"] == "improvement_proposal", job_data
+        assert job_data["status"] == "succeeded", job_data
+        assert job_data["result"]["proposal_id"] == body["proposal_id"], job_data
+
     # The candidate is a stored version of this workflow, and the shadow pointer
     # stays empty until a promotion asks for it.
     from octop.infra.db.repos.workbuddy_proposals import WorkBuddyProposalsRepo

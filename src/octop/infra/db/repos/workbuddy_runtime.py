@@ -1815,7 +1815,17 @@ class WorkBuddyRuntimeRepo:
                     finished_at = now()
                 WHERE id = ? AND status IN ('queued', 'running')
                 """,
-                (status, int(progress), result, error_code, error_message, job_id),
+                (
+                    status,
+                    int(progress),
+                    # ``result`` is jsonb: psycopg cannot adapt a mapping, so the
+                    # caller's value is sent as JSON text like every other jsonb
+                    # write in this module.
+                    _jsonb(result) if result is not None else None,
+                    error_code,
+                    error_message,
+                    job_id,
+                ),
             )
             return bool(getattr(cursor, "rowcount", 0))
 
