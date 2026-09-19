@@ -38,7 +38,7 @@ needs the PostgreSQL control plane, and accepted executions are run by an
 execution worker rather than inside the request. A single-node install hosts that
 worker in this process (`OCTOP_WORKBUDDY_WORKER`, default `on`); the published
 production topology runs it as its own tier
-(`octop workbuddy-worker`, see `deploy/compose.production.yml`). Either way the
+(`octop workbuddy worker`, see `deploy/compose.production.yml`). Either way the
 database holds the queue, the lease, the fencing token and the running-slot
 ceiling, so replicas need no coordination and a crashed worker is recovered when
 its lease expires.
