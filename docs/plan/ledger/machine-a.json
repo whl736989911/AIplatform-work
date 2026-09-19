@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-19T22:58:19Z",
+  "updated": "2026-09-19T23:53:35Z",
   "batches": {
     "1": {
       "state": "done",
@@ -29,8 +29,8 @@
       ],
       "pr": null,
       "commits": [],
-      "evidence": "",
-      "notes": "批次 1 的 PR #29 等待 CI 合并；本批次从 main 拉新分支实施。A-04 节点元数据契约（fields/types/required/引用语法）、A-05 编译器诊断聚合（收集式多错 + 错误码→修复提示）、A-02 运行详情增强（逐节点输入输出/耗时/token + 重跑到此/重试/取消/对账）、A-03 版本定义级 diff。"
+      "evidence": "静态门禁全绿（ruff check / format / mypy 539 文件）；前端 lint 0 error + build 通过 + vitest 934 通过（1 条为并发超时伪影，单独重跑 4 passed，并已给该交互测试加显式 20s 预算）",
+      "notes": "五个切片已全部实现：A-05 编译器诊断聚合（46 个 raise 点改收集器；诊断稳定穿过 HTTP；24 个错误码的中英修复提示）、A-04 节点元数据契约（GET /workflow-definitions/metadata，从 JSON Schema 同源导出）、A-02 逐节点排障（迁移 032：复用 018 早已声明的 step_input payload 类型与 input_sha256）+ 重新运行、A-03 版本比较（semantic_diff 抽为唯一实现）。并行切片另发现并修复两个真实缺陷：对账对话框必 422、步骤/对账状态词表前后端不一致。集成收口已完成：本地化 211 键中英一致、CHANGELOG、契约 counts 110 自检。待完成：后端整套 -m \"not live\" 与 PG/redis 套件在本机跑完、迁移 032 三态、批次 1 合并后 rebase 到 main、提 PR。"
     },
     "3": {
       "state": "pending",

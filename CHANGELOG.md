@@ -14,6 +14,11 @@
 - WorkBuddy 通用权限骨架（迁移 050 + `octop.infra.rbac`）：把知识库已有的四层权限模型（公司/部门/个人/单独授权）抽成与对象类型无关的一套表与解析——`workbuddy_object_scopes` 记隐式范围（`personal` 仅所有者、`department` 仅当前成员、`enterprise` 全员，形状与知识库同款 CHECK），`workbuddy_object_acl` 记可增可撤的显式授权（`read`/`write`/`admin`，主体为一人或一部门）。解析取「隐式等级与命中授权等级的最大值」，授权只能加不能夺；不可见对象对外与不存在一致（404 而非 403）。两张表强制 RLS（ENABLE + FORCE）与租户内复合外键，SQLite 侧只推进水位并在事务入口 fail closed。列表查询与单对象判定共用同一套可见性谓词，并有测试比对二者，防止两边漂移。
 - WorkBuddy 知识库文本-only 迁移通道（迁移 051）：文档新增 `source` 判别列（`upload`/`text`/`migration`），`file_ref_id` 放宽为可空并配 `source` 形状约束与部分唯一索引——这样「个人版只留分块文本与向量、不保留原文件」的库也能导入，同一知识库可有多篇无原文件的文档，而「一个已存文件只对应一篇文档」的约束仍然成立。服务新增 `index_text_document`（对传入文本分块、嵌入、原子发布，全程不触碰对象存储），路由 `POST /knowledge-bases/{id}/documents` 接受 `source` 与 `text`；上传类文档走原路径不变，走错入口会被明确拒绝而不是静默降级。
 - 知识库迁移对账脚本 `scripts/migrate_kb.py`：读取个人版控制库（`~/.octop/octop.db`）与各库的 `index.sqlite`（分块文本 + `<Nf` little-endian float32 向量），逐库给出导入路径与理由——A 原样搬（模型修订已发布且已授权、维度一致）、B 重新嵌入（模型可用但维度不符）、C 挂起（模型未发布或未授权，需管理员先授权），未给目标库时如实报 `unknown` 而不猜测。报告含每库文档数、分块数、向量维度、目标范围（`shared=1 → enterprise`）与总计；只读、可重复运行，本批次不写入任何一侧。
+- WorkBuddy 编译器**一次报出多条诊断**（A-05）：`WorkflowCompileError` 新增 `diagnostics`（每条含 code/message/path/node_id/hint_key），五个检查阶段从"首错即停"改为**收集器**（阶段之间仍按依赖顺序推进，前阶段有错不进入后阶段），诊断按 `(path, code)` 稳定排序、上限 20 条并在 `details.diagnostics_truncated` 标出总数；HTTP 错误响应不再丢弃 path/details（`details.compiler_code` + `details.diagnostics`）；定义编辑器逐条列出问题并给出 `workflowDiagnostics.<CODE>` 的中英修复提示（覆盖 24 个编译器错误码）。
+- 节点元数据契约 `GET /workflow-definitions/metadata`（A-04）：五类节点的必填/可选与 config 字段（类型、枚举、范围、默认值）、输入类型、模板可写字段、引用语法、CEL 可引用命名空间——**全部从 `workflow-v1.schema.json` 与编译器常量同源导出**（不手写副本，并有"元数据 ↔ Schema 必填集合一致"的断言）。前端新增 `getDefinitionMetadata()`，不再硬编码节点类型。
+- 运行详情支持**逐节点排障**（A-02）：执行详情返回 `inputs`/`outputs`/`active_duration_ms`/`token_usage`（整数总量）；每个步骤返回 `input`（该节点派发时实际使用的输入）、`output`（此前入库却从未返回）、`duration_ms`/时间窗/`attempt`/`skip_reason`，以及该节点的 `token_usage`（对象；非 LLM 节点为 null）。迁移 032 复用 018 早已声明却一直没有写入者的 `step_input` payload 类型与 `input_sha256`，把输入放进既有 append-only payload 账本而不是复制到热点步骤表。**只增加记录与返回，不改执行/重试/对账语义。**
+- 运行列表新增「**重新运行**」（复用既有执行接口，不新增路由）：行内缺少工作流/版本/输入时按钮禁用并给出原因，不猜测参数。
+- 版本**定义级比较** `GET /workflows/{id}/versions/diff?from=&to=`（A-03）：复用从提案抽出的**唯一** keyed `semantic_diff`（按 id 键控列表，节点重排不算变更，输出 path/kind/old/new）；版本页勾选两个版本即可查看按 JSON pointer 分组的差异（新增/删除/替换着色，旧值/新值可展开且闭合时不挂载）。
 - WorkBuddy 控制台改为**员工优先的信息架构**：侧边栏分成「日常工作」（工作台 / 收件箱 / 工作流 / 运行）与「治理与设置」（知识库 / 提案 / 审批 / 市场 / 合规 / 生命周期）两组，日常四类入口排在最前。
 - WorkBuddy **工作台**（`/workbuddy`）：一屏给出待我处理的审批、我的工作流与最近运行，每个区块独立降级——某个接口未合并只影响那一块，其余照常显示真实数据。
 - WorkBuddy **收件箱**（`/workbuddy/inbox`）：待我审批与待我审阅的提案集中在一处，审批页签复用既有可操作的审批面板。
@@ -39,6 +44,8 @@
 - WorkBuddy 作业结果写入：`finish_job` 未按 jsonb 绑定 `result`，任何以对象作为结果的作业都会在写入时失败。
 - WorkBuddy 租户并发配额按实际运行槽计数：审批等待释放槽位，恢复时原子重取，重叠执行不再越过上限。
 - 延迟取消（对账中取消）不再遗留每月执行预留与运行槽。
+- 运行详情抽屉的「记录外部写证据（对账）」对话框此前发的请求体与后端契约不符（后端 `extra="forbid"` 且 admin-only，要求 `step_id`/`decision`/`evidence_ref`/`reason`/`external_reference`），**每次提交必然 422**，对账功能整体不可用。现按后端真实形状重建请求与响应类型（`step_id` 语义即被挂起步骤的 node id），表单要求填写理由、决策限定 `confirmed_success`/`confirmed_failed`，并在缺理由时不提交。
+- 运行与步骤的状态词表此前与后端不一致（前端写 `running/succeeded/failed/skipped/waiting_approval`，后端按迁移 023 是 `queued/running/waiting_approval/waiting_reconciliation/success/failed/skipped/canceled`）：`succeeded` 这类取值永远匹配不上，界面会显示异常状态；现改为以后端词表为准，并把不存在的 `RECONCILIATION_STATUSES` 换成 `RECONCILIATION_DECISIONS`（`confirmed_success`/`confirmed_failed`）。
 - 提案详情页的「分配审核人」按钮此前调用一个后端从未实现的路由（恒 404）：现按冻结合同补上 `POST /improvement-proposals/{id}/reviewers`，并在前端去掉「该路由尚未实现」的提示。
 - 生命周期页的「重新认证 / 签发下载挑战」两步此前对着两个不存在的 stage-D 路由（恒 404）：现补齐 `POST /auth/reauthenticate` 与 `POST /exports/{id}/download-challenge`，凭据一次性且五分钟有效，签发挑战不延长导出 72 小时窗口。
 - 市场「安装台账」页签此前无列表可调（合同只发布按 id 查询），页面只能提示无法展示：现发布 `GET /marketplace/installations`（租户主体从登录上下文解析、分页），并把台账接上列表。
