@@ -25,6 +25,9 @@ from octop.api.routers import workbuddy_proposals
 from octop.api.routers.workbuddy_identity import WorkBuddyPrincipal
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.users.identity import Role, User
+from tests.support.postgresql import requires_postgresql
+
+pytestmark = [requires_postgresql, pytest.mark.postgresql]
 
 
 @pytest.fixture(scope="module")
