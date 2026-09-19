@@ -30,11 +30,13 @@ from octop.api.deps import get_server
 from octop.api.routers import (
     workbuddy_catalog,
     workbuddy_identity,
+    workbuddy_marketplace,
     workbuddy_proposals,
     workbuddy_runtime,
     workbuddy_workflows,
 )
 from octop.api.routers.workbuddy_identity import (
+    WorkBuddyPlatformPrincipal,
     WorkBuddyPrincipal,
     workbuddy_principal,
 )
@@ -55,6 +57,14 @@ def pool() -> Iterator[Any]:
         with database.connect() as conn:
             conn.execute("DROP SCHEMA public CASCADE")
             conn.execute("CREATE SCHEMA public")
+            # The upstream migrations declare a pgvector column, so the schema
+            # reset above has to be followed by the deployment prerequisite.
+            available = conn.execute(
+                "SELECT 1 AS present FROM pg_available_extensions WHERE name = 'vector'"
+            ).fetchone()
+            if available is None:
+                pytest.skip("pgvector is required by the upstream migrations")
+            conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
         run_migrations(database)
         yield database
     finally:
@@ -175,6 +185,7 @@ def app(pool: Any, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
         workbuddy_workflows.router,
         workbuddy_runtime.router,
         workbuddy_proposals.router,
+        workbuddy_marketplace.router,
     ):
         application.include_router(router)
 
@@ -482,3 +493,152 @@ async def test_the_spine_carries_one_business_scenario(
             assert routed_run["status"] == "waiting_approval", routed_run
     # The provider was asked exactly once: only the authorized run dispatched.
     assert app.state.smoke_port.calls == ["submit"], app.state.smoke_port.calls
+
+
+# ── the marketplace is only useful if what it installs actually runs ─────────
+#
+# The marketplace slice proves a submission is sanitized, reviewed and published,
+# and that an install lands a workflow version. What no other file proves is the
+# join: the version an install creates is one this spine can activate and execute.
+# The template below is deliberately transform-only, so the run needs no provider.
+
+PLATFORM_DEP = workbuddy_marketplace._Platform.__metadata__[0].dependency  # type: ignore[attr-defined]
+
+_TEMPLATE_DEFINITION: dict[str, Any] = {
+    "schema_version": 1,
+    "trigger": {"type": "manual", "config": {}},
+    "inputs": {"who": {"type": "string", "required": True, "default": "world"}},
+    "nodes": [
+        {
+            "id": "hello",
+            "type": "transform",
+            "name": "Build greeting",
+            "config": {"input": {"greeting": "hello {{ inputs.who }}"}, "expression": "inputs"},
+            "save_as": "greeting",
+        }
+    ],
+    "edges": [],
+}
+
+
+def _submission_body(definition: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": f"Smoke template {uuid.uuid4().hex[:6]}",
+        "summary": "Greets the caller.",
+        "industry": "general",
+        "definition": definition,
+        "license_id": "octop-community",
+        "license_text": "Publish terms: sanitized templates only.",
+        "capabilities": [],
+    }
+
+
+async def _publish_template(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> dict[str, str]:
+    """Submit, freeze and platform-approve one template version."""
+    async with _client(app, _principal(tenant)) as client:
+        created = await client.post(
+            "/marketplace/submissions", json=_submission_body(_TEMPLATE_DEFINITION)
+        )
+        assert created.status_code == 201, created.text
+        submission = created.json()["data"]
+        frozen = await client.post(
+            f"/marketplace/submissions/{submission['id']}/submit",
+            json={"expected_revision": submission["revision"]},
+        )
+        assert frozen.status_code == 200, frozen.text
+        revision = frozen.json()["data"]["revision"]
+
+    reviewer_id = _seed_user(pool, f"sm-platform-{uuid.uuid4().hex[:8]}")
+    app.dependency_overrides[PLATFORM_DEP] = lambda: WorkBuddyPlatformPrincipal(
+        user=User(id=reviewer_id, username="sm-platform", role=Role.USER, display_name=None),
+        audience="workbuddy-platform",
+        claims={},
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://workbuddy.test"
+    ) as platform:
+        decided = await platform.post(
+            f"/platform/submissions/{tenant['tenant_id']}/{submission['id']}/decisions",
+            json={
+                "decision": "approved",
+                "platform_review_ref": "smoke-review-1",
+                "expected_revision": revision,
+                "publication": {"version": "1.0.0", "publisher_display": "Octop Labs"},
+            },
+        )
+        assert decided.status_code == 200, decided.text
+        published = decided.json()["data"]["published_version"]
+    return {
+        "template_id": published["template_id"],
+        "version_id": published["template_version_id"],
+    }
+
+
+async def test_installed_template_version_runs_on_the_spine(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T24 × the spine: activate what the install created and run it to completion."""
+    from octop.infra.db.repos.workbuddy_workflows import WorkBuddyWorkflowRepo
+    from octop.infra.workbuddy import marketplace as marketplace_service
+
+    published = await _publish_template(app, pool, tenant)
+
+    async with _client(app, _principal(tenant)) as client:
+        version = (
+            await client.get(
+                f"/marketplace/templates/{published['template_id']}"
+                f"/versions/{published['version_id']}"
+            )
+        ).json()["data"]
+        installed = await client.post(
+            f"/marketplace/templates/{published['template_id']}/install",
+            json={
+                "template_version_id": published["version_id"],
+                "consent": {
+                    "accepted": True,
+                    "template_version_id": published["version_id"],
+                    "license_text_hash": version["license_text_hash"],
+                    # The consent hashes are recomputed the way the platform does:
+                    # canonical JSON over the capabilities the version declares.
+                    "capabilities_hash": marketplace_service.sha256_hex(
+                        marketplace_service.canonical_json(
+                            list(version["required_capabilities"])
+                        )
+                    ),
+                },
+                "bindings": {},
+                "credential_bindings": {},
+                "workflow_name": f"Installed greeting {uuid.uuid4().hex[:6]}",
+            },
+        )
+        assert installed.status_code == 202, installed.text
+        installation_id = installed.json()["data"]["installation"]["id"]
+        state = (
+            await client.get(f"/marketplace/installations/{installation_id}")
+        ).json()["data"]
+        assert state["status"] == "installed", state
+        workflow_id = state["workflow_id"]
+        workflow_version_id = state["installed_version_id"]
+
+        # The install created the version but did not activate it: the tenant
+        # decides when an installed workflow starts serving traffic.
+        repo = WorkBuddyWorkflowRepo(pool)
+        workflow = repo.get_workflow(tenant["tenant_id"], workflow_id)
+        assert workflow is not None
+        repo.activate_version(
+            tenant["tenant_id"],
+            workflow_id,
+            workflow_version_id,
+            expected_revision=workflow.revision,
+        )
+
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "smoke"}}
+        )
+        assert accepted.status_code == 202, accepted.text
+        execution_id = accepted.json()["data"]["id"]
+        execution = (await client.get(f"/executions/{execution_id}")).json()["data"]
+        assert execution["status"] == "success", execution
+        assert execution["workflow_version_id"] == workflow_version_id, execution
