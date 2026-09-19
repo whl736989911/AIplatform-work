@@ -1,0 +1,21 @@
+{
+  "machine": "machine-A",
+  "line": "A",
+  "owner": "本机（工作流与编排）",
+  "updated": "2026-09-20T00:00:00Z",
+  "batches": {
+    "1": {
+      "state": "in_progress",
+      "tasks": ["A-01", "A-19", "A-20", "A-21"],
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": "开始：IA 重组 + 三个小缺陷（/reviewers、生命周期重新认证、市场安装列表）"
+    },
+    "2": { "state": "pending", "tasks": ["A-04", "A-05", "A-02", "A-03"], "pr": null, "commits": [], "evidence": "", "notes": "" },
+    "3": { "state": "pending", "tasks": ["A-06", "A-07"], "pr": null, "commits": [], "evidence": "", "notes": "" },
+    "4": { "state": "pending", "tasks": ["A-08", "A-09", "A-11"], "pr": null, "commits": [], "evidence": "", "notes": "" },
+    "5": { "state": "pending", "tasks": ["A-12", "A-13", "A-14", "A-15"], "pr": null, "commits": [], "evidence": "", "notes": "" },
+    "6": { "state": "pending", "tasks": ["A-16", "A-17", "A-22", "A-23", "A-24"], "pr": null, "commits": [], "evidence": "", "notes": "" }
+  }
+}

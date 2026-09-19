@@ -1,0 +1,25 @@
+{
+  "integrator": "machine-A",
+  "next_batch": 1,
+  "verified": {},
+  "blocked": [
+    {
+      "id": "policy-compliance",
+      "task": "B-16 合规后端",
+      "question": "生产注销/合规清单的合规政策未签署：在签署前，合规相关能力保持框架态（不开放生产入口）。",
+      "impact": "仅影响 B-16；其余任务不受阻。",
+      "status": "open",
+      "raised_by": "machine-A",
+      "raised_at": "2026-09-20T00:00:00Z"
+    },
+    {
+      "id": "knowledge-onnx",
+      "task": "B-11 本地 ONNX 模型是否纳入平台模型目录",
+      "question": "本地 ONNX embedding 模型是否保留为可选能力（需纳入平台模型目录并由管理员授权）？",
+      "impact": "影响 B-11 与 B-10 的 OCR/embedding 设置；不阻塞 B-08/B-09 迁移脚本。",
+      "status": "open",
+      "raised_by": "machine-A",
+      "raised_at": "2026-09-20T00:00:00Z"
+    }
+  ]
+}
