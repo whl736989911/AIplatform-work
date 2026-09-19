@@ -43,6 +43,7 @@ from typing import Any
 
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.workbuddy.log_redaction import register_secret
 
 __all__ = [
     "ARCHIVE_RETENTION_SECONDS",
@@ -325,6 +326,7 @@ class RedeemToken:
 
 def issue_redeem_token() -> RedeemToken:
     raw = secrets.token_urlsafe(_REDEEM_TOKEN_BYTES)
+    register_secret(raw)
     return RedeemToken(raw=raw, token_sha256=hash_redeem_token(raw))
 
 

@@ -607,3 +607,31 @@ def test_stored_definition_hash_round_trip() -> None:
 
     with pytest.raises(WorkflowCompileError):
         verify_definition_hash(stored, "0" * 64)
+
+
+def test_only_the_published_schema_version_can_be_saved() -> None:
+    """T19: a runtime loads what was stored, so an unknown schema never is.
+
+    The platform currently interprets exactly one schema version. Publishing a
+    definition the runtime cannot interpret is the unsafe half of the row, and
+    it is refused here rather than at run time.
+    """
+    definition: dict[str, object] = {
+        "schema_version": 2,
+        "trigger": manual_trigger(),
+        "nodes": [
+            {
+                "id": "hello",
+                "type": "transform",
+                "name": "Build greeting",
+                "config": {"input": "hi", "expression": "input"},
+            }
+        ],
+        "edges": [],
+    }
+
+    with pytest.raises(WorkflowCompileError) as caught:
+        compile_workflow_definition(definition)
+
+    assert caught.value.code == WORKFLOW_SCHEMA_INVALID
+    assert caught.value.path == "schema_version"

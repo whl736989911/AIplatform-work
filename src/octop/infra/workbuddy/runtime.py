@@ -45,6 +45,7 @@ from octop.infra.db.repos.workbuddy_runtime import (
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.cel_sandbox import CELSandboxError, evaluate_cel
+from octop.infra.workbuddy.log_redaction import register_secret
 from octop.infra.workbuddy.roles import TENANT_ADMIN_ROLES
 from octop.infra.workbuddy.workflow_compiler import (
     CompiledWorkflow,
@@ -528,6 +529,68 @@ def _limits_of(definition: Mapping[str, Any]) -> tuple[int, int]:
         int(max_output_bytes) if isinstance(max_output_bytes, int) else DEFAULT_MAX_OUTPUT_BYTES
     )
     return max(1, min(steps, MAX_STEPS_CAP)), max(1, output_bytes)
+
+
+_INPUT_TYPE_CHECKS: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "object": (Mapping,),
+    "array": (Sequence,),
+    # A file reference travels as its opaque string handle.
+    "file_ref": (str,),
+}
+
+
+def _period_start() -> datetime:
+    """The first instant of the current UTC month, for monthly allowances."""
+    now = datetime.now(UTC)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _validate_execution_inputs(
+    definition: Mapping[str, Any], payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Check the payload against the definition's declared inputs.
+
+    The contract's T06 observation is that missing-required, surplus and
+    wrongly-typed inputs are refused *before* the execution starts, so this runs
+    before the idempotency lookup, the quota reservation and the run row: a
+    refused request must leave no trace and consume no external call.
+    """
+    declarations = definition.get("inputs") or {}
+    if not isinstance(declarations, Mapping):
+        declarations = {}
+    accepted: dict[str, Any] = {}
+    for name in payload:
+        if name not in declarations:
+            raise _invalid(f"input {name!r} is not declared by this workflow")
+    for name, declaration in declarations.items():
+        declared_type = (
+            str((declaration or {}).get("type")) if isinstance(declaration, Mapping) else ""
+        )
+        if name not in payload:
+            if isinstance(declaration, Mapping) and "default" in declaration:
+                accepted[name] = declaration["default"]
+                continue
+            if isinstance(declaration, Mapping) and declaration.get("required"):
+                raise _invalid(f"required input {name!r} is missing")
+            continue
+        value = payload[name]
+        expected = _INPUT_TYPE_CHECKS.get(declared_type)
+        if expected is None:
+            accepted[name] = value
+            continue
+        # ``bool`` is a subclass of ``int``; a boolean is not an integer input.
+        if isinstance(value, bool) and declared_type in {"integer", "number"}:
+            raise _invalid(f"input {name!r} must be a {declared_type}")
+        if declared_type == "array" and isinstance(value, (str, bytes)):
+            raise _invalid(f"input {name!r} must be a {declared_type}")
+        if not isinstance(value, expected):
+            raise _invalid(f"input {name!r} must be a {declared_type}")
+        accepted[name] = value
+    return accepted
 
 
 def graph_from_compiled(compiled: CompiledWorkflow, *, version_id: str) -> WorkflowGraph:
@@ -1816,18 +1879,37 @@ class WorkBuddyRuntimeService:
         amount: int,
         limits: Mapping[str, int] | None,
         conn: Any,
+        include_usage: bool = True,
+        since: Any = None,
+        count_key: str | None = None,
     ) -> None:
+        """Refuse the request when it would take the tenant past a limit.
+
+        ``include_usage`` distinguishes the two shapes the contract names: a
+        monthly allowance counts what has been consumed plus what is in flight,
+        while a concurrency ceiling counts only the reservations that are still
+        live, which is what a parked run holds until it settles. ``count_key``
+        lets the ceiling read the reservations a run already made under another
+        metric, so one reservation serves both limits.
+        """
         if not limits:
             return
         limit = limits.get(quota_key)
         if not isinstance(limit, int):
             return
+        counted = count_key or quota_key
         ctx = self._ctx(actor)
-        used = self._repo.quota_usage_total(ctx, tenant_id=actor.tenant_id, quota_key=quota_key)
+        used = (
+            self._repo.quota_usage_total(
+                ctx, tenant_id=actor.tenant_id, quota_key=counted, since=since
+            )
+            if include_usage
+            else 0
+        )
         reserved = sum(
             item.amount
             for item in self._repo.list_live_quota_reservations(
-                ctx, tenant_id=actor.tenant_id, quota_key=quota_key, conn=conn
+                ctx, tenant_id=actor.tenant_id, quota_key=counted, conn=conn
             )
         )
         if used + reserved + amount > limit:
@@ -1835,6 +1917,18 @@ class WorkBuddyRuntimeService:
                 ErrorCode.QUOTA_EXCEEDED,
                 f"tenant quota '{quota_key}' would be exceeded",
             )
+
+    def _tenant_quota_limits(self, tenant_id: str) -> dict[str, int]:
+        """The tenant's own quota rows, so a caller cannot opt out by omission."""
+        from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
+
+        limits: dict[str, int] = {}
+        for row in WorkBuddyIdentityRepo(self._db).get_quotas(tenant_id):
+            metric = str(row.get("metric") or "")
+            limit = row.get("limit")
+            if metric and isinstance(limit, int):
+                limits[metric] = int(limit)
+        return limits
 
     def _persist_run(
         self,
@@ -1941,6 +2035,8 @@ class WorkBuddyRuntimeService:
         """Accept one execution: suspension gate, idempotency, quota, run."""
         self._require_postgres()
         self._assert_tenant_active(actor)
+        if quota_limits is None:
+            quota_limits = self._tenant_quota_limits(actor.tenant_id)
         payload = dict(inputs or {})
         payload_sha, payload_size = _hash_json(payload)
         if payload_size > MAX_WORKFLOW_INPUT_BYTES:
@@ -1962,6 +2058,8 @@ class WorkBuddyRuntimeService:
         graph = compile_locked_definition(
             locked.definition, locked.definition_sha256, version_id=locked.version_id
         )
+        payload = _validate_execution_inputs(locked.definition, payload)
+        payload_sha, payload_size = _hash_json(payload)
         idempotency_hash = (
             _hash_json(
                 {
@@ -1985,7 +2083,22 @@ class WorkBuddyRuntimeService:
             if existing is not None:
                 return _execution_view(existing)
             self._enforce_quota(
-                actor, quota_key="executions", amount=1, limits=quota_limits, conn=conn
+                actor,
+                quota_key="executions",
+                amount=1,
+                limits=quota_limits,
+                conn=conn,
+                since=_period_start(),
+            )
+            self._enforce_quota(
+                actor,
+                quota_key="concurrency",
+                amount=1,
+                limits=quota_limits,
+                conn=conn,
+                include_usage=False,
+                # The run's own reservation is what holds the slot.
+                count_key="executions",
             )
             reservation_id = self._repo.reserve_quota(
                 ctx,
@@ -2234,6 +2347,13 @@ class WorkBuddyRuntimeService:
                 mark_finished=True,
                 conn=conn,
             )
+            if reservation_id is None:
+                # A run that was resumed after parking does not carry the id, so
+                # the slot it still holds is found by its own execution.
+                live = self._repo.list_live_quota_reservations(
+                    ctx, tenant_id=actor.tenant_id, execution_id=execution.id, conn=conn
+                )
+                reservation_id = live[0].id if live else None
             if reservation_id is not None:
                 self._repo.settle_quota_reservation(
                     ctx,
@@ -2489,6 +2609,7 @@ class WorkBuddyRuntimeService:
                 "approval request is no longer pending",
             )
         token = secrets.token_urlsafe(32)
+        register_secret(token)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         expires_at = datetime.now(UTC) + timedelta(seconds=APPROVAL_TOKEN_TTL_SECONDS)
         ctx = self._ctx(actor)

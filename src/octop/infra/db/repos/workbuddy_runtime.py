@@ -1749,16 +1749,24 @@ class WorkBuddyRuntimeRepo:
         ctx: WorkBuddyDbContext,
         *,
         tenant_id: str,
-        quota_key: str,
+        quota_key: str | None = None,
+        execution_id: str | None = None,
         conn: Any | None = None,
     ) -> list[QuotaReservationRow]:
+        clauses = ["tenant_id = ?", "status = 'reserved'"]
+        params: list[Any] = [tenant_id]
+        if quota_key is not None:
+            clauses.append("quota_key = ?")
+            params.append(quota_key)
+        if execution_id is not None:
+            clauses.append("execution_id = ?")
+            params.append(execution_id)
         with runtime_transaction(self._db, ctx, conn) as c:
             rows = c.execute(
-                "SELECT * FROM workbuddy_quota_reservations "
-                "WHERE tenant_id = ? AND quota_key = ? AND status = 'reserved'",
-                (tenant_id, quota_key),
+                f"SELECT * FROM workbuddy_quota_reservations WHERE {' AND '.join(clauses)}",
+                tuple(params),
             ).fetchall()
-        return [QuotaReservationRow.from_row(r) for r in rows]
+        return [QuotaReservationRow.from_row(row) for row in rows]
 
     def record_quota_usage(
         self,
