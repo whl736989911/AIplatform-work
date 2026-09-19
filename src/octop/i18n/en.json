@@ -374,6 +374,8 @@
     "PUBLISHED_EXPERT_SLUG_TAKEN": "Published expert slug {slug} already exists.",
     "PUBLISHED_EXPERT_ALREADY_EXISTS": "This agent is already published as “{name}”. Refresh the published template instead.",
     "OIDC_BAD_REQUEST": "Invalid OIDC request: {detail}",
+    "SSO_IDENTITY_TAKEN": "This login is already linked to another Octop account.",
+    "SSO_UNBIND_REQUIRES_PASSWORD": "Set a password before unlinking single sign-on.",
     "EXPERT_MARKET_FAILED": "Expert market is temporarily unavailable. Please try again later.",
     "SKILLHUB_SSL_FAILED": "SkillHub request failed: Python SSL error detected — on macOS try `brew reinstall openssl@3`, or check your system CA certificates.",
     "DESKTOP_SESSION_LIMIT": "Too many concurrent remote desktop streams (max {limit}). Close other connections and try again.",
@@ -509,7 +511,11 @@
     "DELETION_REQUEST_CONFLICT": "The deletion request is not in a state that allows this action.",
     "DELETION_CANCEL_WINDOW_CLOSED": "The cooling-off window is closed.",
     "LEGAL_HOLD_ACTIVE": "A legal hold blocks this deletion.",
-    "DOWNLOAD_GRANT_EXPIRED": "The download grant expired or was already redeemed."
+    "DOWNLOAD_GRANT_EXPIRED": "The download grant expired or was already redeemed.",
+    "WORKSPACE_ROOT_CONTAINER_UNSUPPORTED": "Allowed storage root cannot be set while Octop is running in a container.",
+    "CAPTCHA_REQUIRED": "This server requires a captcha token to sign in.",
+    "CAPTCHA_FAILED": "Captcha verification failed. Try again.",
+    "CONFIG_FILE_CORRUPT": "Cannot update {path}: the file is not valid JSON ({detail}). Fix the syntax and retry — no settings were changed."
   },
   "desktop": {
     "install_log_deps": "Installing Python dependencies…",
@@ -640,7 +646,8 @@
     "stock-info": "Stock Info",
     "cvm-ai-doctor": "CVM AI Doctor",
     "tencentcloud-infra": "Tencent Cloud Infra",
-    "publisher-multi-platform": "Multi-platform Publisher"
+    "publisher-multi-platform": "Multi-platform Publisher",
+    "docker-management": "Docker Management"
   },
   "channel": {
     "tool_hint_start": "🔧 Calling tool: {tool_name}",

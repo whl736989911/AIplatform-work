@@ -222,11 +222,11 @@ def probe_dependencies(environ: dict[str, str] | None = None) -> dict[str, Any]:
 
     values = dict(os.environ if environ is None else environ)
     checks = [
-        _package_check("octop", "1.0.0"),
-        _package_check("orcakit-harness-agent", "1.0.9"),
+        _package_check("octop", "1.0.1"),
+        _package_check("orcakit-harness-agent", "1.0.11"),
         _package_check("harness-memory", "0.9.10"),
-        _package_check("harness-gateway", "0.9.7"),
-        _package_check("harness-browser", "0.7.8"),
+        _package_check("harness-gateway", "0.9.8"),
+        _package_check("harness-browser", "0.7.9"),
         _cel_check(),
         _postgres_check(values),
         _redis_check(values),

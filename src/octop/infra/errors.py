@@ -78,6 +78,8 @@ class ErrorCode(StrEnum):
     PUBLISHED_EXPERT_SLUG_TAKEN = "PUBLISHED_EXPERT_SLUG_TAKEN"
     PUBLISHED_EXPERT_ALREADY_EXISTS = "PUBLISHED_EXPERT_ALREADY_EXISTS"
     OIDC_BAD_REQUEST = "OIDC_BAD_REQUEST"
+    SSO_IDENTITY_TAKEN = "SSO_IDENTITY_TAKEN"
+    SSO_UNBIND_REQUIRES_PASSWORD = "SSO_UNBIND_REQUIRES_PASSWORD"
     EXPERT_MARKET_FAILED = "EXPERT_MARKET_FAILED"
     SKILLHUB_SSL_FAILED = "SKILLHUB_SSL_FAILED"
     DESKTOP_SESSION_LIMIT = "DESKTOP_SESSION_LIMIT"
@@ -103,8 +105,9 @@ class ErrorCode(StrEnum):
     INVITE_REVOKED = "INVITE_REVOKED"
     INVITE_RATE_LIMITED = "INVITE_RATE_LIMITED"
     WORKSPACE_ROOT_RESTRICTED = "WORKSPACE_ROOT_RESTRICTED"
+    WORKSPACE_ROOT_CONTAINER_UNSUPPORTED = "WORKSPACE_ROOT_CONTAINER_UNSUPPORTED"
     TOKEN_QUOTA_EXCEEDED = "TOKEN_QUOTA_EXCEEDED"
-    # WorkBuddy tenant identity and governance.
+    # WorkBuddy tenant identity and governance.,
     AUTH_INVALID_CREDENTIALS = "AUTH_INVALID_CREDENTIALS"
     WORKBUDDY_POSTGRES_REQUIRED = "WORKBUDDY_POSTGRES_REQUIRED"
     WORKBUDDY_CONTEXT_INVALID = "WORKBUDDY_CONTEXT_INVALID"
@@ -142,8 +145,8 @@ class ErrorCode(StrEnum):
     WORKBUDDY_PLATFORM_REVISION_CONFLICT = "WORKBUDDY_PLATFORM_REVISION_CONFLICT"
     WORKBUDDY_CAPABILITY_REVISION_CONFLICT = "WORKBUDDY_CAPABILITY_REVISION_CONFLICT"
     DOWNLOAD_GRANT_EXPIRED = "DOWNLOAD_GRANT_EXPIRED"
-    # (export/deletion framework)
-    # WorkBuddy workflow, runtime, knowledge, proposal, marketplace, and lifecycle errors.
+    # (export/deletion framework),
+    # WorkBuddy workflow, runtime, knowledge, proposal, marketplace, and lifecycle errors.,
     APPROVAL_ALREADY_DECIDED = "APPROVAL_ALREADY_DECIDED"
     APPROVAL_BINDING_CHANGED = "APPROVAL_BINDING_CHANGED"
     APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
@@ -217,6 +220,9 @@ class ErrorCode(StrEnum):
     WORKBUDDY_WORKFLOW_REVISION_CONFLICT = "WORKBUDDY_WORKFLOW_REVISION_CONFLICT"
     WORKBUDDY_WORKFLOW_VERSION_NOT_ACTIVATABLE = "WORKBUDDY_WORKFLOW_VERSION_NOT_ACTIVATABLE"
     WORKBUDDY_WORKFLOW_VERSION_NOT_FOUND = "WORKBUDDY_WORKFLOW_VERSION_NOT_FOUND"
+    CAPTCHA_REQUIRED = "CAPTCHA_REQUIRED"
+    CAPTCHA_FAILED = "CAPTCHA_FAILED"
+    CONFIG_FILE_CORRUPT = "CONFIG_FILE_CORRUPT"
 
 
 _DEFAULT_STATUS: dict[ErrorCode, int] = {
@@ -287,6 +293,8 @@ _DEFAULT_STATUS: dict[ErrorCode, int] = {
     ErrorCode.PUBLISHED_EXPERT_SLUG_TAKEN: 409,
     ErrorCode.PUBLISHED_EXPERT_ALREADY_EXISTS: 409,
     ErrorCode.OIDC_BAD_REQUEST: 400,
+    ErrorCode.SSO_IDENTITY_TAKEN: 409,
+    ErrorCode.SSO_UNBIND_REQUIRES_PASSWORD: 400,
     ErrorCode.EXPERT_MARKET_FAILED: 502,
     ErrorCode.SKILLHUB_SSL_FAILED: 502,
     ErrorCode.DESKTOP_SESSION_LIMIT: 429,
@@ -312,6 +320,7 @@ _DEFAULT_STATUS: dict[ErrorCode, int] = {
     ErrorCode.INVITE_REVOKED: 410,
     ErrorCode.INVITE_RATE_LIMITED: 429,
     ErrorCode.WORKSPACE_ROOT_RESTRICTED: 400,
+    ErrorCode.WORKSPACE_ROOT_CONTAINER_UNSUPPORTED: 400,
     ErrorCode.TOKEN_QUOTA_EXCEEDED: 403,
     ErrorCode.AUTH_INVALID_CREDENTIALS: 401,
     ErrorCode.WORKBUDDY_POSTGRES_REQUIRED: 503,
@@ -423,6 +432,9 @@ _DEFAULT_STATUS: dict[ErrorCode, int] = {
     ErrorCode.WORKBUDDY_WORKFLOW_REVISION_CONFLICT: 409,
     ErrorCode.WORKBUDDY_WORKFLOW_VERSION_NOT_ACTIVATABLE: 409,
     ErrorCode.WORKBUDDY_WORKFLOW_VERSION_NOT_FOUND: 404,
+    ErrorCode.CAPTCHA_REQUIRED: 400,
+    ErrorCode.CAPTCHA_FAILED: 400,
+    ErrorCode.CONFIG_FILE_CORRUPT: 400,
 }
 
 
@@ -475,3 +487,17 @@ class OctopError(Exception):
                 "details": self.details,
             }
         }
+
+
+def corrupt_config_error(path: object, detail: str) -> OctopError:
+    """``OctopError`` for a config file that exists but cannot be parsed.
+
+    Raised instead of writing back a merged-into-empty dict, which would destroy
+    every unrelated setting (issue #730). Carries the path and the parser
+    position only — never file contents, which hold database credentials.
+    """
+    return OctopError(
+        ErrorCode.CONFIG_FILE_CORRUPT,
+        f"{path} is not valid JSON ({detail}); fix it and retry — no settings were changed",
+        details={"path": str(path), "detail": detail},
+    )
