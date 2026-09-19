@@ -94,6 +94,10 @@ def test_run_migrations_idempotent(db: SqlitePool):
         connector_indexes = {
             r["name"] for r in conn.execute("PRAGMA index_list(connectors)").fetchall()
         }
+        sso_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sso_providers)").fetchall()}
+        sso_indexes = {
+            r["name"] for r in conn.execute("PRAGMA index_list(sso_providers)").fetchall()
+        }
     assert v == CURRENT_SCHEMA_VERSION
     assert "login_failed_count" in cols
     assert "login_locked_until" in cols
@@ -103,6 +107,8 @@ def test_run_migrations_idempotent(db: SqlitePool):
     assert "token_quota" not in cols
     assert "user_policies" in table_names
     assert {"email", "sso_provider_id", "sso_subject"}.issubset(cols)
+    assert {"kind", "extra"}.issubset(sso_cols)
+    assert "idx_sso_providers_kind" in sso_indexes
     assert "user_invites" in table_names
     assert {"thread_messages", "thread_history_projection", "trajectory_events"}.issubset(
         table_names
@@ -616,3 +622,46 @@ def test_v7_sqlite_sql_upgrades_legacy_text_pks(tmp_path: Path) -> None:
     assert doc["document_id"] == "doc1"
     assert doc["path"] == "a.md"
     assert doc["filename"] == "a.md"
+
+
+def test_v14_to_v15_adds_sso_provider_kind_without_rebuilding(tmp_path: Path) -> None:
+    pool = SqlitePool(tmp_path / "octop.db")
+    run_migrations(pool)
+    with pool.connect() as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_sso_providers_kind")
+        conn.execute("ALTER TABLE sso_providers DROP COLUMN extra")
+        conn.execute("ALTER TABLE sso_providers DROP COLUMN kind")
+        conn.execute("UPDATE _schema_version SET version = 14")
+        conn.execute(
+            """
+            INSERT INTO sso_providers(
+              enabled, display_name, issuer, client_id, scopes, created_at, updated_at
+            ) VALUES (1, 'Company', 'https://issuer.example', 'client', 'openid', 1, 1)
+            """
+        )
+        provider_id = conn.execute("SELECT id FROM sso_providers").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO users(username, password_hash, role, created_at, sso_provider_id, sso_subject)
+            VALUES ('sso-admin', 'x', 'admin', 1, ?, 'sub-1')
+            """,
+            (provider_id,),
+        )
+    run_migrations(pool)
+    run_migrations(pool)
+    with pool.connect() as conn:
+        version = conn.execute("SELECT version FROM _schema_version").fetchone()[0]
+        row = conn.execute("SELECT id, kind, extra FROM sso_providers").fetchone()
+        indexes = {r["name"] for r in conn.execute("PRAGMA index_list(sso_providers)").fetchall()}
+        bound = conn.execute(
+            "SELECT sso_provider_id FROM users WHERE username = 'sso-admin'"
+        ).fetchone()[0]
+    # The fork's migrations run past upstream's 015 (see
+    # ``030_sso_provider_kind``), so the watermark lands on the current maximum
+    # while the SSO schema still arrives through the same ensure helper.
+    assert version == CURRENT_SCHEMA_VERSION
+    assert int(row["id"]) == int(provider_id)
+    assert row["kind"] == "oidc"
+    assert row["extra"] == "{}"
+    assert "idx_sso_providers_kind" in indexes
+    assert int(bound) == int(provider_id)

@@ -2,15 +2,28 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyQqChannelSaveConfig,
-  DEFAULT_CHANNEL_DISPLAY_CONFIG,
   DEFAULT_QQ_GROUP_CONTEXT_CONFIG,
   normalizeQqGroupContextConfig,
+  partitionChannelKeys,
 } from "./constants";
 
-describe("channel display defaults", () => {
-  it("uses stream delivery for new external IM channels", () => {
-    expect(DEFAULT_CHANNEL_DISPLAY_CONFIG.response_mode).toBe("stream");
-    expect("c2c_streaming" in DEFAULT_CHANNEL_DISPLAY_CONFIG).toBe(false);
+describe("partitionChannelKeys", () => {
+  it("hides telegram until expanded unless already configured", () => {
+    expect(
+      partitionChannelKeys(["weixin", "telegram", "mqtt"], new Set()),
+    ).toEqual({
+      featured: ["weixin", "mqtt"],
+      more: ["telegram"],
+    });
+    expect(
+      partitionChannelKeys(
+        ["weixin", "telegram", "mqtt"],
+        new Set(["telegram"]),
+      ),
+    ).toEqual({
+      featured: ["weixin", "telegram", "mqtt"],
+      more: [],
+    });
   });
 });
 
