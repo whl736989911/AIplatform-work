@@ -477,18 +477,23 @@ class WorkBuddyProposalsRepo:
             return {str(row["membership_id"]): _int(row["user_id"]) for row in rows}
 
     def list_reviewers(self, proposal_id: str, *, conn: Any = None) -> list[ReviewerAssignment]:
-        """The roster currently in force: the latest assignment for the proposal."""
+        """The roster currently in force: the proposal row's own column.
+
+        Deliberately not the newest audit event.  ``workbuddy_tenant_audit_events``
+        stores unix seconds plus a random event id, so two assignments inside one
+        second have no defined order and a reassignment could report the roster it
+        just replaced (CI caught exactly that).  The row has nothing to order.
+        """
         tenant_id = self._require_tenant()
         public_id = normalize_uuid(proposal_id, field="proposal_id")
         with self._transaction(conn) as ambient:
             row = self._one(
                 ambient,
-                "SELECT detail FROM workbuddy_tenant_audit_events"
-                " WHERE tenant_id = ? AND action = ? AND reason = ?"
-                " ORDER BY created_at DESC, event_id DESC LIMIT 1",
-                (tenant_id, REVIEWERS_ASSIGNED_ACTION, f"{_REVIEWERS_REASON_PREFIX}{public_id}"),
+                "SELECT reviewers FROM workbuddy_improvement_proposals"
+                " WHERE tenant_id = ? AND proposal_id = ?",
+                (tenant_id, public_id),
             )
-        entries = _as_json(row["detail"]) if row is not None and row["detail"] is not None else []
+        entries = _as_json(row["reviewers"]) if row is not None else None
         return [
             ReviewerAssignment(
                 membership_id=str(entry["membership_id"]), user_id=_int(entry["user_id"])
@@ -506,12 +511,11 @@ class WorkBuddyProposalsRepo:
         assigned_at: int,
         conn: Any = None,
     ) -> list[ReviewerAssignment]:
-        """Append the reviewer roster of one proposal to the governance trail.
+        """Staff the review: the proposal row carries the roster in force.
 
-        Assigning again appends a new entry, and the newest entry is what
-        ``list_reviewers`` reports: the trail stays append-only while the roster
-        is still replaceable.  A proposal that is not visible to this tenant is
-        refused exactly like an unknown one.
+        The governance event is still appended (history is append-only evidence),
+        but the *current* roster is written to the row so a reassignment replaces
+        it deterministically instead of relying on event ordering.
         """
         tenant_id = self._require_tenant()
         public_id = normalize_uuid(proposal_id, field="proposal_id")
@@ -527,6 +531,15 @@ class WorkBuddyProposalsRepo:
             )
             if visible is None:
                 raise ProposalNotFoundError(f"proposal {public_id} is not visible")
+            ambient.execute(
+                "UPDATE workbuddy_improvement_proposals SET reviewers = ?"
+                " WHERE tenant_id = ? AND proposal_id = ?",
+                (
+                    _dump([reviewer.to_dict() for reviewer in roster]),
+                    tenant_id,
+                    public_id,
+                ),
+            )
             ambient.execute(
                 "INSERT INTO workbuddy_tenant_audit_events ("
                 " event_id, tenant_id, action, actor_user_id, reason, detail, created_at"
