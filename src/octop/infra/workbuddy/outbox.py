@@ -24,9 +24,11 @@ This module owns that half and nothing else:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos.workbuddy_runtime import OutboxRow, WorkBuddyRuntimeRepo
@@ -46,6 +48,79 @@ class OutboxPublisher(Protocol):
     """The delivery channel a deployment wires in (contract: Redis, at least once)."""
 
     def publish(self, event: OutboxRow) -> None: ...
+
+
+class OutboxDeliveryFailed(Exception):
+    """A transport refused the event; the dispatcher retries, then dead-letters it."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True, slots=True)
+class RedisOutboxPublisher:
+    """The contracted transport: one Redis list per topic, delivered at least once.
+
+    ``LPUSH`` and not ``PUBLISH``: the promise is at-least-once delivery of
+    committed events, and a list holds each event until a consumer takes it,
+    while pub/sub drops whatever nobody was subscribed for at that instant. The
+    event's own id travels in the body, so a consumer de-duplicates against
+    PostgreSQL -- which stays the source of truth -- rather than trusting the
+    channel.
+
+    The list is deliberately not trimmed: dropping the oldest entries to bound
+    memory would break the promise this class exists to keep. Retention belongs
+    to whoever consumes the queue.
+    """
+
+    client: Any
+    queue_prefix: str = "workbuddy:outbox:"
+
+    def publish(self, event: OutboxRow) -> None:
+        body = json.dumps(
+            {
+                "id": event.id,
+                "topic": event.topic,
+                "dedupe_key": event.dedupe_key,
+                "attempt": event.attempts,
+                "payload": event.payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        try:
+            self.client.lpush(f"{self.queue_prefix}{event.topic}", body)
+        except Exception as exc:  # noqa: BLE001 - any transport failure retries
+            raise OutboxDeliveryFailed(
+                "OUTBOX_TRANSPORT_FAILED", f"redis refused the event: {exc}"[:400]
+            ) from exc
+
+
+def resolve_redis_publisher(
+    environ: Mapping[str, str] | None = None, *, queue_prefix: str = "workbuddy:outbox:"
+) -> RedisOutboxPublisher | None:
+    """The publisher from ``REDIS_URL``, or ``None`` when the deployment is unconfigured.
+
+    Unconfigured is not an error: the dispatcher already refuses to run without a
+    publisher, so an events-only deployment keeps its rows pending (and visible)
+    instead of failing at start-up.
+    """
+    import os
+
+    source = environ if environ is not None else os.environ
+    url = (source.get("REDIS_URL") or "").strip()
+    if not url:
+        return None
+    try:
+        import redis
+    except ImportError as exc:  # pragma: no cover - the dependency is pinned
+        raise OutboxDeliveryFailed(
+            "OUTBOX_TRANSPORT_UNAVAILABLE", "the redis client is not installed"
+        ) from exc
+    client = redis.Redis.from_url(url, socket_connect_timeout=3, socket_timeout=3)
+    return RedisOutboxPublisher(client=client, queue_prefix=queue_prefix)
 
 
 @dataclass(frozen=True, slots=True)

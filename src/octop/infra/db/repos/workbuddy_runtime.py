@@ -594,9 +594,13 @@ class OutboxRow:
     payload: Any
     status: str
     attempts: int
+    #: Why a dead-lettered event stopped being retried. ``None`` while it is live;
+    #: the dispatcher records the last transport error when it gives up.
+    last_error: str | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> OutboxRow:
+        error = row.get("last_error")
         return cls(
             id=str(row["id"]),
             topic=str(row["topic"]),
@@ -604,6 +608,7 @@ class OutboxRow:
             payload=row["payload"],
             status=str(row["status"]),
             attempts=int(row["attempts"]),
+            last_error=str(error) if error is not None else None,
         )
 
 
@@ -2547,6 +2552,30 @@ class WorkBuddyRuntimeRepo:
                 RETURNING *
                 """,
                 (max(1, int(visibility_seconds)), max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [OutboxRow.from_row(r) for r in rows]
+
+    def list_dead_outbox(self, *, tenant_id: str, limit: int = 100) -> list[OutboxRow]:
+        """One tenant's exhausted events, newest first, with the error that killed them.
+
+        The read runs in the platform context (the dispatcher's own), so the tenant
+        filter is explicit rather than delegated to row-level security: a caller
+        that forgot it would otherwise see every tenant's failures.
+
+        Dead letters are read, never replayed automatically: whether a fact is
+        still worth delivering after eight failures is a decision for a person,
+        and re-delivering something the world may already have seen is not one a
+        retry loop gets to make on its own.
+        """
+        with runtime_transaction(self._db, WorkBuddyDbContext.platform()) as c:
+            rows = c.execute(
+                """
+                SELECT * FROM workbuddy_outbox
+                WHERE tenant_id = ? AND status = 'failed'
+                ORDER BY available_at DESC, id DESC
+                LIMIT ?
+                """,
+                (tenant_id, max(1, min(int(limit), 500))),
             ).fetchall()
         return [OutboxRow.from_row(r) for r in rows]
 

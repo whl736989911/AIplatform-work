@@ -1006,11 +1006,19 @@
       "success_status": 202,
       "summary": "用一句描述修改既有工作流：生成 JSON Patch 并走既有提案链，202",
       "authorization": "与创建提案同权；未接线作者模型时 503；改动无法编译时 400 并带回编译器诊断"
+    },
+    {
+      "method": "GET",
+      "path": "/outbox/dead-letters",
+      "stage": "A6",
+      "success_status": 200,
+      "summary": "本租户投递失败（死信）的发件箱事件，含最后一次传输错误，200",
+      "authorization": "仅租户 admin；按租户显式过滤（平台上下文读，故不依赖 RLS）"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 63,
-    "total": 125
+    "supplemental": 64,
+    "total": 126
   }
 }

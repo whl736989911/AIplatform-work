@@ -3682,6 +3682,32 @@ class WorkBuddyRuntimeService:
         )
         return request_id
 
+    def list_outbox_dead_letters(
+        self, actor: RuntimeActor, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Events that gave up, with the error that stopped them (tenant-admin view).
+
+        A window, not a lever: nothing here replays an event. The dispatcher counts
+        attempts and dead-letters on its own, and re-delivering a fact somebody may
+        already have consumed stays a decision a person makes.
+        """
+        self._require_postgres()
+        if not actor.is_admin:
+            raise OctopError(ErrorCode.FORBIDDEN, "the outbox is a tenant-admin view")
+        rows = self._repo.list_dead_outbox(tenant_id=actor.tenant_id, limit=limit)
+        return [
+            {
+                "id": row.id,
+                "topic": row.topic,
+                "dedupe_key": row.dedupe_key,
+                "attempts": row.attempts,
+                "status": row.status,
+                "last_error": row.last_error,
+                "payload": row.payload,
+            }
+            for row in rows
+        ]
+
     def get_execution(self, actor: RuntimeActor, execution_id: str) -> ExecutionView:
         self._require_postgres()
         return _execution_view(self._load_execution(actor, execution_id))

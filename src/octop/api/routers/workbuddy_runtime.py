@@ -429,6 +429,22 @@ async def list_output_reviews(
     return workbuddy_envelope(request, {"items": items})
 
 
+@router.get("/outbox/dead-letters", summary="Events that gave up being delivered")
+async def list_outbox_dead_letters(
+    request: Request,
+    principal: _AdminPrincipal,
+    server: Any = Depends(get_server),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """A tenant admin's dead letters, with the transport error that stopped each.
+
+    Read-only on purpose: an event that failed eight times is a decision for a
+    person, and this endpoint is a window onto it rather than a replay button.
+    """
+    items = _service(server).list_outbox_dead_letters(runtime_actor(principal), limit=limit)
+    return workbuddy_envelope(request, {"items": items})
+
+
 @router.get(
     "/workflows/{workflow_id}/attribution",
     summary="Where a workflow's corrections point, by version",
