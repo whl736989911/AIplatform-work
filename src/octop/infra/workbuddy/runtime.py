@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import secrets
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
@@ -59,6 +60,8 @@ from octop.infra.workbuddy.workflow_compiler import (
     compile_stored_definition,
     parse_reference,
 )
+
+logger = logging.getLogger(__name__)
 
 # ``NODE_TYPES`` is imported, not re-declared: the compiler owns the node-type
 # contract because it validates a definition against the schema.  A second list
@@ -835,6 +838,7 @@ def run_graph(
     replay: ReplayState | None = None,
     decisions: Mapping[str, str] | None = None,
     answers: Mapping[str, Mapping[str, Any]] | None = None,
+    expired_questions: Collection[str] | None = None,
     effects: SideEffectPort | None = None,
     resolve_approvers: Callable[[GraphNode], Sequence[tuple[int, str | None]]] | None = None,
     resolve_assignees: Callable[[GraphNode], Sequence[tuple[int, str | None]]] | None = None,
@@ -865,6 +869,7 @@ def run_graph(
     replay = replay or ReplayState()
     decisions = dict(decisions or {})
     answers = {key: dict(value) for key, value in (answers or {}).items()}
+    expired = frozenset(str(node_id) for node_id in (expired_questions or ()))
     port: SideEffectPort = effects or UNAVAILABLE_SIDE_EFFECTS
 
     incoming: dict[str, list[GraphEdge]] = {node.id: [] for node in graph.nodes}
@@ -1259,6 +1264,22 @@ def run_graph(
             continue
 
         if node.type == "ask":
+            if node.id in expired:
+                # The deadline passed before anybody answered. Parking again would
+                # ask the same question forever, so the node fails where it stands
+                # and the execution settles (the sweep that marked the request has
+                # already escalated it).
+                node_failures.append(
+                    record(
+                        node,
+                        "failed",
+                        error_code=ErrorCode.INPUT_REQUEST_EXPIRED.value,
+                        error_message=f"question '{node.id}' expired before it was answered",
+                        timing=elapsed(),
+                    )
+                )
+                propagate_skip(node, failed=True)
+                continue
             answer = answers.get(node.id)
             if answer is None:
                 assignees = tuple(resolve_assignees(node)) if resolve_assignees else ()
@@ -2967,6 +2988,7 @@ class WorkBuddyRuntimeService:
             replay=self._replay_state(ctx, claim.execution_id),
             decisions=self._recorded_decisions(ctx, execution),
             answers=self._recorded_answers(ctx, execution),
+            expired_questions=self._recorded_expired(ctx, execution),
             effects=self._effects,
             execution_id=claim.execution_id,
             resolve_approvers=lambda node: self._resolved_candidates(actor, node),
@@ -3969,6 +3991,93 @@ class WorkBuddyRuntimeService:
                 details={"count": len(rows)},
             )
         return [input_request_payload(row) for row in rows]
+
+    def expire_overdue_input_requests(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Expire questions past their deadline and hand their runs back to the worker.
+
+        The escalation is the point of the sweep: a question nobody answered in time
+        is recorded as expired, the people who could still act are told, and the run
+        is re-queued so its next engine attempt fails that node
+        (``INPUT_REQUEST_EXPIRED``) instead of parking on the same question again.
+        A deadline that passes silently would leave the run waiting forever, which
+        is exactly what a timeout rule exists to prevent.
+        """
+        self._require_postgres()
+        expired = self._repo.claim_expired_input_requests(limit=limit)
+        escalated: list[dict[str, Any]] = []
+        for request in expired:
+            ctx = WorkBuddyDbContext.for_tenant(request.tenant_id)
+            notified = self._escalate_expired_question(ctx, request)
+            if not self._repo.requeue_execution(
+                ctx, request.execution_id, expected_status=("waiting_input",)
+            ):
+                # The execution is no longer parked on this question (an answer or
+                # a cancel won the race), so there is nothing to hand back to the
+                # worker: the escalation above still stands, and the run settles
+                # through whichever path already took it.
+                logger.info(
+                    "input request %s expired but execution %s is no longer waiting for it",
+                    request.id,
+                    request.execution_id,
+                )
+            self._repo.append_audit(
+                ctx,
+                tenant_id=request.tenant_id,
+                actor_user_id=None,
+                actor_kind="system",
+                action="input.expire",
+                resource_type="input_request",
+                resource_id=request.id,
+                outcome="allowed",
+                details={
+                    "execution_id": request.execution_id,
+                    "node_id": request.node_id,
+                    "notified": notified,
+                },
+            )
+            escalated.append(input_request_payload(request))
+        return escalated
+
+    def _escalate_expired_question(self, ctx: WorkBuddyDbContext, request: InputRequestRow) -> int:
+        """Tell the assignees and the tenant's admins that a question timed out."""
+        from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
+
+        recipients = {
+            assignee.user_id for assignee in self._repo.list_input_assignees(ctx, request.id)
+        }
+        for member in WorkBuddyIdentityRepo(self._db).list_members(request.tenant_id):
+            user_id = member.get("user_id")
+            if user_id is None:
+                continue
+            if str(member.get("role") or "") in TENANT_ADMIN_ROLES:
+                recipients.add(int(user_id))
+        for user_id in sorted(recipients):
+            self._repo.insert_notification(
+                ctx,
+                tenant_id=request.tenant_id,
+                user_id=user_id,
+                kind="input.expired",
+                title=f"Input overdue: {request.node_id}",
+                resource_type="input_request",
+                resource_id=request.id,
+            )
+        self._repo.enqueue_outbox(
+            ctx,
+            tenant_id=request.tenant_id,
+            topic="workbuddy.input_request.expired",
+            dedupe_key=f"{request.id}:expired",
+            payload={"input_request_id": request.id, "execution_id": request.execution_id},
+        )
+        return len(recipients)
+
+    def _recorded_expired(self, ctx: WorkBuddyDbContext, execution: ExecutionRow) -> frozenset[str]:
+        """Nodes of this execution whose question passed its deadline unanswered.
+
+        The worker's sweep has already marked those requests, so the attempt that
+        follows fails the node instead of asking the same question a second time.
+        """
+        rows = self._repo.list_input_requests(ctx, execution_id=execution.id, limit=200)
+        return frozenset(row.node_id for row in rows if row.status == "expired")
 
     def _recorded_decisions(
         self, ctx: WorkBuddyDbContext, execution: ExecutionRow

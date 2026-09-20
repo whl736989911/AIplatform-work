@@ -238,6 +238,21 @@ def test_a_recorded_answer_settles_the_node_and_flows_downstream() -> None:
     assert run.steps[-1].output == {"account": "A", "amount": 1200}
 
 
+def test_an_expired_question_fails_the_node_instead_of_parking() -> None:
+    def never_called(node: Any) -> list[tuple[int, str | None]]:
+        raise AssertionError("an expired question must not be asked again")
+
+    run = run_graph(
+        _graph(_ask()),
+        inputs={},
+        expired_questions=["collect"],
+        resolve_assignees=never_called,
+    )
+    assert run.status == "failed", run
+    failing = [step for step in run.steps if step.status == "failed"]
+    assert failing and failing[0].error_code == "INPUT_REQUEST_EXPIRED"
+
+
 def test_the_answer_validator_keeps_the_declared_values() -> None:
     cleaned = validate_answers({"fields": _ask_form()}, {"account": "B", "amount": 1200})
     # ``note`` is optional and therefore absent, not stored as null.

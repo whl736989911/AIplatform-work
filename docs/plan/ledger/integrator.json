@@ -1,6 +1,6 @@
 {
   "integrator": "machine-A",
-  "next_batch": 2,
+  "next_batch": 3,
   "verified": {
     "1": {
       "by": "machine-A",
@@ -14,6 +14,18 @@
       "unverified": [
         "B-08 的 scripts/migrate_kb.py 只读对账未在真实个人版控制库上实测（本机无该库）；其单测通过且代码只读、不写入任何一侧"
       ]
+    },
+    "2": {
+      "state": "verified",
+      "at": "2026-09-20T03:51:23Z",
+      "basis": "main = 8faa372a（A 线批次 2 #31 + B 线批次 2 #34 均已合入），在 origin/main 的独立 worktree 上串行执行",
+      "results": {
+        "migration_three_state": "PASS — 全新 PG→v51（A 031/033 与 B 050/051 对象齐备、权限两表 RLS enabled+forced）、既有库 v33→v51（哨兵计数一致、既有列集合未变）、全新 SQLite→v51",
+        "static": "PASS — ruff check / ruff format --check / mypy src/octop（544 文件）全干净",
+        "backend_not_live": "PASS — 3616 passed, 228 skipped（22 分钟）",
+        "pg_redis": "113 passed, 1 skipped, 1 ERROR — 错误在 B 线测试清理：tests/unit/workbuddy/test_workbuddy_rbac_postgresql.py::test_grants_are_invisible_across_tenants 的 teardown 无法 DROP ROLE octop_rbac_probe（DependentObjectsStillExist，5 个依赖对象）——测试主体通过，残留角色会影响同库后续运行",
+        "frontend": "未在本地重跑：验收 worktree 没有 node_modules（eslint/tsc 不存在）。该部分由 PR 级 CI 的 Dashboard 作业覆盖（#31/#34 均绿）"
+      }
     }
   },
   "blocked": [
@@ -43,5 +55,24 @@
     "契约文档未列出的新端点登记为 route-manifest 的 supplemental，并保持 counts.source == source.original_route_count；契约扩展（如新执行状态 waiting_input）需在 machine-*.json 的 notes 里留痕。",
     "单元测试全绿不等于功能可用：新增节点类型/状态/表，必须有一条真实 PostgreSQL 端到端用例走过它（本轮即由该用例抓到 node_type CHECK 缺陷）。"
   ],
-  "updated": "2026-09-20T03:49:06Z"
+  "updated": "2026-09-20T03:57:17Z",
+  "issues": [
+    "B 线：test_workbuddy_rbac_postgresql.py::test_grants_are_invisible_across_tenants 的 teardown 残留角色 octop_rbac_probe（需先 REVOKE/DROP OWNED BY 再 DROP ROLE）。测试通过但清理不彻底，重复运行时同库会受影响。"
+  ],
+  "needs_user_decision": [
+    {
+      "task": "A-09 产出审核（修正后确认 / 采纳 / 重跑）",
+      "asked_at": "2026-09-20T03:57:17Z",
+      "why": "计划的措辞（『末节点产出可被人工修正』）没有说明修正对已完成运行意味着什么，而两种读法在数据模型上互斥：读法 A = 审核是**阻断式**的：末节点产出先进入待审，人确认（或修正后确认）才放行，运行在此之前不结算；读法 B = 审核是**事后**的：运行按现有语义结算，审核记录作为**新的**只追加产物（含修正值），下游/消费方读『已审版本』；选择『重跑』则用修正值作为输入重新执行（复用既有 execute 路径）。",
+      "constraint": "本仓库的账本原则是只追加：直接改写已结算运行的 outputs 与既有设计冲突，所以读法 B 更一致；但读法 A 才是『审核』二字的直觉含义，并需要 output 节点声明审核要求（schema 扩展）。",
+      "blocking": [
+        "A-09",
+        "A-11 的『待我审核』面板"
+      ],
+      "not_blocking": [
+        "A-18 会话续期（完全独立，可立即开工）",
+        "批次 4 的其余部分（A-08/A-10 已交付并验证）"
+      ]
+    }
+  ]
 }

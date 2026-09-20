@@ -516,7 +516,8 @@
     "WORKSPACE_ROOT_CONTAINER_UNSUPPORTED": "容器环境下不能设置「允许的存储根目录」。",
     "CAPTCHA_REQUIRED": "此服务器登录需要验证码令牌。",
     "CAPTCHA_FAILED": "验证码校验失败，请重试。",
-    "CONFIG_FILE_CORRUPT": "无法更新 {path}：该文件不是合法 JSON（{detail}）。请修正语法后重试；现有配置未被改动。"
+    "CONFIG_FILE_CORRUPT": "无法更新 {path}：该文件不是合法 JSON（{detail}）。请修正语法后重试；现有配置未被改动。",
+    "INPUT_REQUEST_EXPIRED": "该问题已超过截止时间，运行已按超时规则结束。"
   },
   "desktop": {
     "install_log_deps": "正在安装 Python 依赖…",

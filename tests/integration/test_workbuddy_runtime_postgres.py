@@ -722,6 +722,59 @@ async def test_a_run_parked_on_a_question_can_be_cancelled(
         assert fetched.json()["data"]["status"] == "canceled", fetched.text
 
 
+async def test_an_overdue_question_fails_the_run_and_escalates(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T35: a question past its deadline settles the run and tells the tenant."""
+    definition = question_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Question deadline")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        parked = await client.get(f"/executions/{execution_id}")
+        assert parked.json()["data"]["status"] == "waiting_input", parked.text
+
+        # A deadline is a fact about wall-clock time, so the test makes the
+        # question overdue instead of waiting out its 24 hours.
+        with pool.connect() as conn:
+            conn.execute(
+                "UPDATE workbuddy_input_requests SET expires_at = now() - interval '1 hour'"
+                " WHERE execution_id = ?",
+                (execution_id,),
+            )
+
+        # The worker settles deadlines before each claim, so this run also picks
+        # up the re-queued execution the expiration produced.
+        _drain(pool)
+
+        expired = await client.get(f"/executions/{execution_id}/input-requests")
+        items = expired.json()["data"]["items"]
+        assert [item["status"] for item in items] == ["expired"], items
+
+        settled = await client.get(f"/executions/{execution_id}")
+        data = settled.json()["data"]
+        assert data["status"] == "failed", data
+        assert data["error_code"] == ErrorCode.INPUT_REQUEST_EXPIRED.value, data
+        # The detail keeps every attempt of a node: the first is the park that
+        # waited, the second is the attempt the sweep produced, and that is the one
+        # that failed.
+        asks = [step for step in data["steps"] if step["node_id"] == "ask"]
+        latest = max(asks, key=lambda step: step["attempt"])
+        assert latest["attempt"] == 2, asks
+        assert latest["status"] == "failed", latest
+        assert latest["error_code"] == ErrorCode.INPUT_REQUEST_EXPIRED.value, latest
+
+        # The escalation is auditable and visible to the people who could act.
+        audit = await client.get("/audit-logs", params={"action": "input.expire"})
+        assert audit.status_code == 200, audit.text
+        assert audit.json()["data"]["items"], audit.text
+        notifications = await client.get("/notifications")
+        kinds = {item["kind"] for item in notifications.json()["data"]["items"]}
+        assert "input.expired" in kinds, notifications.text
+
+
 async def test_a_question_nobody_can_answer_fails_the_node(
     app: FastAPI, pool: Any, tenant: dict[str, Any]
 ) -> None:

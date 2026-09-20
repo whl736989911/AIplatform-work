@@ -309,6 +309,7 @@ class EdgeRunRow:
 @dataclass(frozen=True, slots=True)
 class ApprovalRequestRow:
     id: str
+    tenant_id: str
     execution_id: str
     node_id: str
     status: str
@@ -329,6 +330,7 @@ class ApprovalRequestRow:
     def from_row(cls, row: Mapping[str, Any]) -> ApprovalRequestRow:
         return cls(
             id=str(row["id"]),
+            tenant_id=str(row["tenant_id"]),
             execution_id=str(row["execution_id"]),
             node_id=str(row["node_id"]),
             status=str(row["status"]),
@@ -373,6 +375,7 @@ class ApprovalCandidateRow:
 @dataclass(frozen=True, slots=True)
 class InputRequestRow:
     id: str
+    tenant_id: str
     execution_id: str
     node_id: str
     status: str
@@ -392,6 +395,7 @@ class InputRequestRow:
     def from_row(cls, row: Mapping[str, Any]) -> InputRequestRow:
         return cls(
             id=str(row["id"]),
+            tenant_id=str(row["tenant_id"]),
             execution_id=str(row["execution_id"]),
             node_id=str(row["node_id"]),
             status=str(row["status"]),
@@ -1863,6 +1867,37 @@ class WorkBuddyRuntimeRepo:
                 (input_request_id, int(user_id)),
             )
             return int(getattr(cursor, "rowcount", 0) or 0)
+
+    def claim_expired_input_requests(self, *, limit: int = 100) -> list[InputRequestRow]:
+        """Mark overdue open questions expired and return them for escalation.
+
+        A deadline is a fact about wall-clock time, not about how much work the
+        tenant has, so this sweep runs under the platform context: a question whose
+        deadline passed while nobody happened to run anything must still be found,
+        and the tenant that asked it may have no other work to trigger a claim.
+        ``SKIP LOCKED`` keeps two sweepers off the same row, and the UPDATE itself
+        is the compare-and-set that makes the loser's attempt a no-op.
+        """
+        with runtime_transaction(self._db, WorkBuddyDbContext.platform()) as c:
+            rows = c.execute(
+                """
+                UPDATE workbuddy_input_requests
+                SET status = 'expired'
+                WHERE id IN (
+                    SELECT id
+                    FROM workbuddy_input_requests
+                    WHERE status = 'open'
+                      AND expires_at IS NOT NULL
+                      AND expires_at < now()
+                    ORDER BY expires_at, id
+                    LIMIT ?
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING *
+                """,
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+        return [InputRequestRow.from_row(row) for row in rows]
 
     # -- reconciliations ----------------------------------------------------
 
