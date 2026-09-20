@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-20T04:39:17Z",
+  "updated": "2026-09-20T14:30:00Z",
   "batches": {
     "1": {
       "state": "done",
@@ -54,7 +54,7 @@
       "notes": "本批次已 rebase 到含「A 线批次 2 + B 线批次 2」的 main。未包含项：knowledge 检索端口未接线（部署方接线，未接线即 fail-closed）；向导按线性步骤链生成边；试运行不在向导内展示逐节点结果；三类新节点暂无专门图标。"
     },
     "4": {
-      "state": "in_progress",
+      "state": "done",
       "tasks": [
         "A-08",
         "A-09",
@@ -69,7 +69,7 @@
         "6d9f9ae4 A-08/A-11 前端（待我填写面板 + 回答抽屉）"
       ],
       "evidence": "A-08：真实 PG 端到端 5 条（停放→作答→恢复→成功；非法答案 400 且状态不变；非受派人 404；停放可取消；无人可答就地失败）；A-10：端到端 1 条（逾期→expired→升级通知+审计→重排队→第 2 次尝试以 INPUT_REQUEST_EXPIRED 失败并结算）；单元 29 条（编译期 13 + 引擎/校验器 16）；整条运行时 PG 文件 44 条 + 两个节点集单测 30 条全绿；前端 tsc exit 0 / vitest 19+25 例 / eslint 干净；i18n 完整性 69 条。 ｜ A-09：真实 PG 端到端 5 条（采纳后运行保持 success 且产出不变、修正只允许产出键、非受指派者 404、未结算运行不可审、重跑产生被回链的新执行并跑通）+ 单元 4 条；整条运行时 PG 文件 49 条全绿。 ｜ A-18：新增 5 条端到端（签发一对、轮换后旧令牌重放→家族整体失效、未知令牌 401、登出结束会话、两个登录互不牵连）+ 既有 auth 流程 9 条与 JWT 中间件 7 条全绿；仓储经 SQLite 与 PG 双探针；迁移 036 经真实 runner 全链（PG 与 SQLite 均到 v51、重复应用 no-op）；前端 tsc/eslint 干净、新增 4 条续期测试（含「多个请求共用一次刷新」与「刷新被拒不再重试」）。",
-      "notes": "契约偏差（记录以免后续误判）：① 新增执行状态 waiting_input —— 源文档的状态表（约 1482 行）尚未列出，本状态由已批准的批次任务 A-08 引入，属**契约扩展**而非偏离；② 三个输入请求端点（GET /executions/{id}/input-requests、POST …/answer、GET /input-requests）在源文档路由表中不存在，故在 contracts/route-manifest.json 标为 supplemental（计数 62/54/116）；③ 计划的 §4.0.2 提到 octop_app / workbuddy_auth 两个角色，本仓库从不创建它们（018/019/031/050 只 REVOKE FROM PUBLIC），迁移里**不得**对它们 GRANT（会因角色不存在而中止），角色创建属部署方（D 批次）；④ 迁移 034 顺带修复 workbuddy_step_runs.node_type 词表（018 的 5 类 → 编译器当前的 9 类）：新增节点类型必须同时扩该约束，否则含新节点的工作流一运行就整次失败（A-07 曾潜伏此缺陷）；⑤ 顺带修复 request_cancel 漏 waiting_input、insert_execution 绑参缺 5 个路由列。批次 4 的 PR #37 堆叠在批次 3 的 #35 之上；#35 合入后 GitHub 会自动把 #37 的基座改指 main。A-09 语义由用户定调（2026-09-20：「尽量避免阻断式」）：事后只追加，不阻断运行。 A-18 事实澄清：访问令牌的滑动续期早已存在（maybe_sliding_renew_token + 响应头），所以缺口只是「安静超过访问令牌有效期再回来」的客户端；本轮补的是刷新令牌（轮换 + 重放即撤销家族），并让 logout 第一次能真正结束会话。另：前端「待我审核」落地时发现前端状态词表仍残留 succeeded/cancelled，已一并对齐到迁移 023 的词表。",
+      "notes": "契约偏差（记录以免后续误判）：① 新增执行状态 waiting_input —— 源文档的状态表（约 1482 行）尚未列出，本状态由已批准的批次任务 A-08 引入，属**契约扩展**而非偏离；② 三个输入请求端点（GET /executions/{id}/input-requests、POST …/answer、GET /input-requests）在源文档路由表中不存在，故在 contracts/route-manifest.json 标为 supplemental（计数 62/54/116）；③ 计划的 §4.0.2 提到 octop_app / workbuddy_auth 两个角色，本仓库从不创建它们（018/019/031/050 只 REVOKE FROM PUBLIC），迁移里**不得**对它们 GRANT（会因角色不存在而中止），角色创建属部署方（D 批次）；④ 迁移 034 顺带修复 workbuddy_step_runs.node_type 词表（018 的 5 类 → 编译器当前的 9 类）：新增节点类型必须同时扩该约束，否则含新节点的工作流一运行就整次失败（A-07 曾潜伏此缺陷）；⑤ 顺带修复 request_cancel 漏 waiting_input、insert_execution 绑参缺 5 个路由列。批次 4 的 PR #37 堆叠在批次 3 的 #35 之上；#35 合入后 GitHub 会自动把 #37 的基座改指 main。A-09 语义由用户定调（2026-09-20：「尽量避免阻断式」）：事后只追加，不阻断运行。 A-18 事实澄清：访问令牌的滑动续期早已存在（maybe_sliding_renew_token + 响应头），所以缺口只是「安静超过访问令牌有效期再回来」的客户端；本轮补的是刷新令牌（轮换 + 重放即撤销家族），并让 logout 第一次能真正结束会话。另：前端「待我审核」落地时发现前端状态词表仍残留 succeeded/cancelled，已一并对齐到迁移 023 的词表。 ｜ 批次收尾：任务集 tasks_done 齐全（A-08/A-09/A-10/A-11/A-18）、无 pending/partial；本批次代码已被批次 5 的全量门禁覆盖（tests/unit + 业务冒烟 3228 passed，前端 tsc/lint/vitest 全绿，两条套件级超时隔离后通过）；并把 main 的文档更正同步进来（仅 docs/plan/，代码树未变，故原门禁结论继续有效）。",
       "tasks_done": [
         "A-08",
         "A-09",
@@ -81,7 +81,7 @@
       "tasks_pending": []
     },
     "5": {
-      "state": "pending",
+      "state": "done",
       "tasks": [
         "A-12",
         "A-13",
@@ -89,9 +89,17 @@
         "A-15"
       ],
       "pr": null,
-      "commits": [],
-      "evidence": "",
-      "notes": ""
+      "commits": [
+        "171c241c 批次 5 开工前的三处语义（A-12 采集来源 / A-13 影响面 / A-14 分析器 / A-15 受限 DSL）按最保守选择定下",
+        "e664f0b4 A-12 纠正/反馈采集（迁移 037 + 仓库 + 运行时挂钩 + 4 条端到端）",
+        "926a9659 A-13 纠正归因与范围（新模块 attribution + 版本分组 + 只读端点）",
+        "527fe609 A-14 改进分析器（新模块 improvement，经既有提案链，仅提提案）",
+        "8047155a/ae2603b2/53b197db/8dad1317 A-15 受限 DSL + 编译闭环 + 草稿接口 + 前端入口 + 补丁式生成",
+        "4cd2a2a6 两种降级共用同一节点构造",
+        "cb298055 并入批次 4（逐级同步 main 的文档更正）"
+      ],
+      "evidence": "后端：ruff/format（1104 文件）/mypy（549 文件）全绿；全量 tests/unit + 业务冒烟 3228 passed / 101 skipped，另有 1 个 teardown ERROR（RBAC 探针角色因 octop_test_gate 库残留对象无法 drop，清库重建后该文件 8 passed，确认为遗留状态而非本批次回归）。新增单元：attribution 5 + improvement 8 + authoring 17（含索引位移、依赖随步骤替换、产出键保持、两入口被拒）。端到端（真实 PG）：运行时文件 53 passed（含 A-12 的 4 条）、提案文件 16 passed（含 A-14/A-15 的 5 条）、工作流文件含 A-15 的 3 条。前端：tsc -b exit 0、lint 0 error（67 条既有 hooks 告警）、vitest 961 passed / 963（两条套件级超时 ExecutionDetailDrawer、InputInbox 隔离跑分别 4/4、5/5 通过，整个 WorkBuddy/Workflows 目录 6 文件 18 例全过，与批次 1 记录的既有超时条件同款）；本地化 parity 中英键完全一致。清单：125 条，本批次 4 条新路由逐条对齐，且 /workflow-authoring 已纳入 test_router_covers_every_manifest_route 比对。",
+      "notes": "① 结构修正：A-12…A-15 的提交起初落在批次 4 的分支上，已拆到独立分支 feat/orchestration-batch5-corrections-authoring，批次 4 分支收回为只含批次 4（--force-with-lease），维持按批次合入。② 失误记录：解批次 4 账本冲突时解析脚本报错但命令用 ; 串联，导致带冲突标记的账本被提交推送（20456fac），随后 1a60eab2 修正；此后链式命令一律用 &&。③ 集成：main 领先批次 3 的只有一个文档更正提交，已逐级并入（batch3←main、batch4←batch3、batch5←batch4），三次合并只动 docs/plan/，代码树未变，各批次既有门禁结论继续有效。④ 未接线项：作者模型（workbuddy_authoring_source）与分析器模型（workbuddy_improvement_source）都是可注入端口，部署未接线时 fail-closed（503），故描述→草稿的成功路径由注入桩件在端到端覆盖，未做真实模型的人工冒烟。⑤ 归因读取为 admin-only 的保守默认（它是分析器的输入，分析器以管理员身份运行），未发明新的可见性规则。"
     },
     "6": {
       "state": "pending",
