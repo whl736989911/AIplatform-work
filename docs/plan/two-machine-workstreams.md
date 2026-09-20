@@ -165,6 +165,9 @@ git checkout -b feat/<你的线>-<主题>        # A 线: feat/orchestration-*�
    - **归属冲突时以本表为准**：例 A-20（再认证/下载挑战）后端在 A 线的 `workbuddy_lifecycle.py`，而 `pages/WorkBuddy/Lifecycle/**` 仍归 B 线——A 线只改 `dashboard/src/api/modules/workbuddyLifecycle.ts`。
    - **一处按路由的例外**：`/auth/reauthenticate`（A-20，stage D）实现在 `workbuddy_identity.py`（B 线文件）内；该文件其余身份/租户路由仍归 B 线。A 线对该文件只保留这一条路由及其私有辅助函数，B 线改动时不得重排/删除它。
 6. **唯一交叉点**：B 线提供 `Resolver(actor, …)` 新签名（B-04）；A 线只调用、不改实现。
+   - **已定稿（B-04，批次 2）**：`PostgresWorkflowSemanticResolver(conn, tenant_id, *, user_id=None)`；A 线构造时传 `user_id=principal.user_id`（既有三处构造点已如此，未改实现）。
+   - **语义**：`check_tool` / `check_model` / `check_knowledge_base` 一律按**调用者**解析可达性——租户级授权行、调用者所属部门及其父链上的部门授权、调用者本人的成员授权三层取并集；默认模型同样需对该调用者可达，否则以 `MODEL_NOT_CONFIGURED` 拒绝；无 `user_id` 时 fail-closed（抛 `DependencyUnavailable`）。
+   - **依赖**：工具/模型授权行的 `subject` 维度由 B-03 提供（`workbuddy_tenant_{tool,model}_grants.subject_key`：`tenant` / `department:<id>` / `member:<user_id>`）。
 7. **合并顺序**：先合 A 线批次 1–3（A-01…A-07、A-19…A-21）→ 再合 B-01…B-07（权限）→ 然后 A-08+ 与 B-08+。**迁移号段依然分离**：A 线批次 1 的 A-20 已占用 `031`（再认证凭据表，PG 实体 + SQLite 水位），后续 A 线迁移从 `032` 起，B 线仍从 `050` 起。
 8. **合并纪律**：不要 `--delete-branch` 删掉别人 PR 的 base；squash 会重写基线，后合并方需 rebase（只冲突 CHANGELOG 时用并集脚本）；上游同步时迁移冲突落到本地最大号之后。
 9. **推送信息**：commit message 与 PR 说明用**详细简体中文**（背景/根因/改动/可复现证据/验证命令与结果/未包含项）。

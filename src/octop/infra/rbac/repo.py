@@ -12,8 +12,10 @@ Rows are returned as typed views; the resolver's model objects are built by
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, now_ts
@@ -135,12 +137,30 @@ class WorkBuddyRbacRepo:
     def __init__(self, db: DatabasePool) -> None:
         self._db = db
 
+    @contextmanager
+    def _transaction(self, ctx: WorkBuddyDbContext, conn: Any | None = None) -> Iterator[Any]:
+        """Own transaction, or the caller's when one is handed in.
+
+        A caller that must not leave an object without its permission row — creating
+        a workflow, say — passes its own connection so both rows commit together.
+        """
+        if conn is not None:
+            yield conn
+            return
+        with workbuddy_transaction(self._db, ctx) as opened:
+            yield opened
+
     # ── scopes (the implicit layer) ────────────────────────────────────────
 
     def get_scope(
-        self, ctx: WorkBuddyDbContext, object_kind: str, object_id: str
+        self,
+        ctx: WorkBuddyDbContext,
+        object_kind: str,
+        object_id: str,
+        *,
+        conn: Any | None = None,
     ) -> WorkBuddyObjectScopeRow | None:
-        with workbuddy_transaction(self._db, ctx) as conn:
+        with self._transaction(ctx, conn) as conn:
             row = conn.execute(
                 f"SELECT {_SCOPE_COLUMNS} FROM workbuddy_object_scopes "
                 "WHERE tenant_id = ? AND object_kind = ? AND object_id = ?",
@@ -222,6 +242,7 @@ class WorkBuddyRbacRepo:
         owner_user_id: int | None,
         department_id: str | None,
         created_by_user_id: int,
+        conn: Any | None = None,
     ) -> WorkBuddyObjectScopeRow:
         """Register an object, or move its implicit layer; identity never changes."""
         kind = validate_object_kind(object_kind)
@@ -232,8 +253,8 @@ class WorkBuddyRbacRepo:
         owner = None if owner_user_id is None else int(owner_user_id)
         department = None if department_id in (None, "") else str(department_id)
         stamp = now_ts()
-        with workbuddy_transaction(self._db, ctx) as conn:
-            row = conn.execute(
+        with self._transaction(ctx, conn) as active:
+            row = active.execute(
                 f"INSERT INTO workbuddy_object_scopes ({_SCOPE_COLUMNS}) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (tenant_id, object_kind, object_id) DO UPDATE SET "

@@ -167,8 +167,14 @@ def decode_embedding(blob: bytes) -> list[float]:
 def _target_revision_status(
     *, target_db: str, tenant_id: str, model_revision_id: str
 ) -> tuple[bool, bool]:
-    """``(published, granted)`` for one model revision, from the enterprise side."""
+    """``(published, granted)`` for one model revision, from the enterprise side.
+
+    ``granted`` asks the tenant-level question (does the revision carry the
+    tenant-wide approval?), not the caller-scoped reach the workflow resolver
+    answers: a revision only one department holds is not approved for migration.
+    """
     from octop.infra.db.pool import PostgresPool
+    from octop.infra.db.repos.workbuddy_catalog import CAPABILITY_MODEL, WorkBuddyCatalogRepo
     from octop.infra.db.repos.workbuddy_knowledge import WorkBuddyKnowledgeRepo
     from octop.infra.db.workbuddy_context import WorkBuddyDbContext
 
@@ -178,7 +184,9 @@ def _target_revision_status(
         ctx = WorkBuddyDbContext.for_tenant(tenant_id)
         revision = repo.get_platform_model_revision(ctx, model_revision_id)
         published = revision is not None and str(revision.status) == "published"
-        granted = repo.tenant_model_granted(ctx, model_revision_id)
+        granted = WorkBuddyCatalogRepo(pool).granted_tenant_wide(
+            tenant_id, kind=CAPABILITY_MODEL, revision_id=model_revision_id
+        )
         return published, granted
     finally:
         pool.close()

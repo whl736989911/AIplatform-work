@@ -31,12 +31,19 @@ from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import now_ts
+from octop.infra.db.repos.workbuddy_catalog import (
+    SUBJECT_DEPARTMENT_CHAIN,
+    grant_subject_reach,
+)
 from octop.infra.db.workbuddy_context import (
     WorkBuddyDbContext,
     require_postgres,
     workbuddy_transaction,
 )
 from octop.infra.errors import ErrorCode
+from octop.infra.rbac.model import RbacActor
+from octop.infra.rbac.repo import WorkBuddyRbacRepo
+from octop.infra.rbac.resolver import visibility_sql
 from octop.infra.workbuddy.workflow_compiler import (
     ACTIVATABLE_VERSION_ORIGINS,
     VERSION_ORIGINS,
@@ -50,6 +57,14 @@ WORKFLOW_COLUMNS = (
     "workflow_id, tenant_id, name, description, status, revision, active_version_id, "
     "shadow_version_id, created_by, created_by_membership_id, created_at, updated_at, archived_at"
 )
+
+#: The generic permission tables key workflows by this object kind.
+RBAC_OBJECT_KIND = "workflow"
+
+#: A new workflow starts company-visible: that is exactly how every workflow
+#: behaved before the permission model existed, so creating one changes nothing
+#: for a tenant until an administrator narrows its scope.
+DEFAULT_WORKFLOW_SCOPE = "enterprise"
 VERSION_COLUMNS = (
     "workflow_version_id, tenant_id, workflow_id, version_number, definition, definition_sha256, "
     "origin, base_version_id, source_version_id, change_summary, created_by, "
@@ -390,14 +405,47 @@ class WorkBuddyWorkflowRepo:
             return self._fetch_workflow(connection, tenant_id, workflow_id)
 
     def list_workflows(
-        self, tenant_id: str, *, user_id: int | None = None, conn: Any | None = None
+        self,
+        tenant_id: str,
+        *,
+        user_id: int | None = None,
+        department_id: str | None = None,
+        is_tenant_admin: bool = False,
+        conn: Any | None = None,
     ) -> list[WorkflowRecord]:
-        """Every workflow visible in this tenant, newest first."""
+        """Every workflow this actor may read in the tenant, newest first.
+
+        The four permission layers decide what is listed; a workflow that has no
+        permission row yet is treated as company-visible, which is the state every
+        workflow was in before the model existed (B-06 fills the rows in).
+        """
+        fragment, params = visibility_sql(
+            RbacActor(
+                user_id=int(user_id or 0),
+                tenant_id=tenant_id,
+                department_id=department_id,
+                is_tenant_admin=is_tenant_admin,
+            ),
+            scope_table="s",
+            acl_table="a",
+        )
+        visibility = (
+            " AND (NOT EXISTS (SELECT 1 FROM workbuddy_object_scopes s"
+            " WHERE s.tenant_id = workbuddy_workflows.tenant_id"
+            f" AND s.object_kind = '{RBAC_OBJECT_KIND}'"
+            " AND s.object_id = workbuddy_workflows.workflow_id)"
+            " OR EXISTS (SELECT 1 FROM workbuddy_object_scopes s"
+            " WHERE s.tenant_id = workbuddy_workflows.tenant_id"
+            f" AND s.object_kind = '{RBAC_OBJECT_KIND}'"
+            " AND s.object_id = workbuddy_workflows.workflow_id"
+            f" AND {fragment}))"
+        )
         with self._connection(tenant_id, user_id=user_id, conn=conn) as connection:
             rows = connection.execute(
                 f"SELECT {WORKFLOW_COLUMNS} FROM workbuddy_workflows "
-                "WHERE tenant_id = ? ORDER BY updated_at DESC, workflow_id",
-                (tenant_id,),
+                f"WHERE tenant_id = ?{visibility} "
+                "ORDER BY updated_at DESC, workflow_id",
+                (tenant_id, *params),
             ).fetchall()
         return [WorkflowRecord.from_row(row) for row in rows]
 
@@ -545,6 +593,19 @@ class WorkBuddyWorkflowRepo:
             if row is None:
                 raise WorkflowInvalid("workflow insert returned no row")
             workflow = WorkflowRecord.from_row(row)
+            if created_by_user_id is not None:
+                # Same transaction: a workflow without its permission row would be
+                # invisible to everyone the moment the model starts filtering.
+                WorkBuddyRbacRepo(self._db).set_scope(
+                    WorkBuddyDbContext.for_tenant(tenant_id, user_id=created_by_user_id),
+                    object_kind=RBAC_OBJECT_KIND,
+                    object_id=workflow.workflow_id,
+                    scope=DEFAULT_WORKFLOW_SCOPE,
+                    owner_user_id=None,
+                    department_id=None,
+                    created_by_user_id=int(created_by_user_id),
+                    conn=connection,
+                )
             version = self._insert_version(
                 connection,
                 tenant_id=tenant_id,
@@ -827,6 +888,12 @@ class PostgresWorkflowSemanticResolver:
     explicit tenant predicate both apply.  A dependency that cannot be queried
     raises :class:`DependencyUnavailable` instead of guessing, and a reference
     that is not provable is refused rather than silently accepted.
+
+    Reachability is answered for the **caller**, not for the tenant: a tool or
+    model is usable when a grant reaches the caller's identity — the tenant-wide
+    row, a grant on the caller's department or one of its parents, or a grant on
+    the caller itself.  ``user_id`` is therefore required for tool, model, and
+    knowledge-base checks; a resolver built without it fails closed.
     """
 
     def __init__(self, conn: Any, tenant_id: str, *, user_id: int | None = None) -> None:
@@ -842,45 +909,73 @@ class PostgresWorkflowSemanticResolver:
                 "workflow semantic resolver cannot query the tenant catalog"
             ) from exc
 
+    def _grant_reach(self, sql: str, params: Sequence[Any]) -> Any | None:
+        """Run a grant query with the caller's department chain in scope."""
+        if self._user_id is None:
+            raise DependencyUnavailable("tool and model resolution needs the calling user context")
+        return self._one(sql, params)
+
     def check_tool(self, tool_name: str, parameters: Mapping[str, Any]) -> SemanticDecision:
-        row = self._one(
+        row = self._grant_reach(
+            SUBJECT_DEPARTMENT_CHAIN + " "
             "SELECT 1 AS granted FROM workbuddy_tenant_tool_grants g "
             "JOIN workbuddy_platform_tool_revisions r ON r.tool_revision_id = g.tool_revision_id "
-            "WHERE g.tenant_id = ? AND r.tool_key = ? AND r.status = 'published' LIMIT 1",
-            (self._tenant_id, str(tool_name)),
+            "WHERE g.tenant_id = ? AND r.tool_key = ? AND r.status = 'published' "
+            f"AND {grant_subject_reach('g')} LIMIT 1",
+            (
+                self._tenant_id,
+                self._user_id,
+                self._tenant_id,
+                self._tenant_id,
+                str(tool_name),
+                self._user_id,
+            ),
         )
         if row is None:
             return SemanticDecision.refused(
                 "WORKFLOW_TOOL_UNAVAILABLE",
-                f"tool {tool_name!r} is not granted to this tenant",
+                f"tool {tool_name!r} is not granted to this member",
             )
         return SemanticDecision.allowed()
 
     def check_model(self, model: str | None) -> SemanticDecision:
         if model is None:
-            row = self._one(
+            row = self._grant_reach(
+                SUBJECT_DEPARTMENT_CHAIN + " "
                 "SELECT r.model_key FROM workbuddy_tenant_capabilities c "
                 "JOIN workbuddy_platform_model_revisions r "
                 "ON r.model_revision_id = c.default_model_revision_id "
-                "WHERE c.tenant_id = ? AND r.status = 'published' LIMIT 1",
-                (self._tenant_id,),
+                "JOIN workbuddy_tenant_model_grants g ON g.tenant_id = c.tenant_id "
+                "AND g.model_revision_id = c.default_model_revision_id "
+                "WHERE c.tenant_id = ? AND r.status = 'published' "
+                f"AND {grant_subject_reach('g')} LIMIT 1",
+                (self._tenant_id, self._user_id, self._tenant_id, self._tenant_id, self._user_id),
             )
             if row is None:
                 return SemanticDecision.refused(
                     ErrorCode.MODEL_NOT_CONFIGURED.value,
-                    "no default model is configured for this tenant",
+                    "no default model is configured for this member",
                 )
             return SemanticDecision.allowed()
-        row = self._one(
+        row = self._grant_reach(
+            SUBJECT_DEPARTMENT_CHAIN + " "
             "SELECT 1 AS granted FROM workbuddy_tenant_model_grants g "
             "JOIN workbuddy_platform_model_revisions r ON r.model_revision_id = g.model_revision_id "
-            "WHERE g.tenant_id = ? AND r.model_key = ? AND r.status = 'published' LIMIT 1",
-            (self._tenant_id, str(model)),
+            "WHERE g.tenant_id = ? AND r.model_key = ? AND r.status = 'published' "
+            f"AND {grant_subject_reach('g')} LIMIT 1",
+            (
+                self._tenant_id,
+                self._user_id,
+                self._tenant_id,
+                self._tenant_id,
+                str(model),
+                self._user_id,
+            ),
         )
         if row is None:
             return SemanticDecision.refused(
                 ErrorCode.MODEL_NOT_CONFIGURED.value,
-                f"model {model!r} is not approved for this tenant",
+                f"model {model!r} is not approved for this member",
             )
         return SemanticDecision.allowed()
 

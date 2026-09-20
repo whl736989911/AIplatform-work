@@ -186,26 +186,58 @@ CREATE TABLE IF NOT EXISTS workbuddy_tenant_capabilities (
     REFERENCES workbuddy_platform_model_revisions(model_revision_id) ON DELETE RESTRICT
 );
 
+-- Approved tools/models were tenant-wide; B-03 adds the subject dimension so a
+-- revision can also be granted to one department or one member. ``subject_key``
+-- materialises the subject inside the key, so the same revision reaches several
+-- subjects at once while one subject keeps one row per revision.
 CREATE TABLE IF NOT EXISTS workbuddy_tenant_tool_grants (
   tenant_id                UUID NOT NULL REFERENCES workbuddy_tenants(tenant_id) ON DELETE CASCADE,
   tool_revision_id         UUID NOT NULL REFERENCES workbuddy_platform_tool_revisions(tool_revision_id) ON DELETE CASCADE,
+  subject_key              TEXT NOT NULL DEFAULT 'tenant',
+  user_id                  INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  department_id            UUID,
   granted_by_membership_id UUID,
   granted_at               BIGINT NOT NULL,
-  PRIMARY KEY (tenant_id, tool_revision_id)
+  PRIMARY KEY (tenant_id, tool_revision_id, subject_key),
+  CONSTRAINT workbuddy_tool_grants_subject_shape CHECK (
+    (subject_key = 'tenant' AND user_id IS NULL AND department_id IS NULL)
+    OR (subject_key = 'member:' || user_id::text AND user_id IS NOT NULL AND department_id IS NULL)
+    OR (subject_key = 'department:' || department_id::text AND department_id IS NOT NULL AND user_id IS NULL)
+  ),
+  CONSTRAINT workbuddy_tool_grants_department_fkey FOREIGN KEY (tenant_id, department_id)
+    REFERENCES workbuddy_departments(tenant_id, department_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS workbuddy_tenant_model_grants (
   tenant_id                UUID NOT NULL REFERENCES workbuddy_tenants(tenant_id) ON DELETE CASCADE,
   model_revision_id        UUID NOT NULL REFERENCES workbuddy_platform_model_revisions(model_revision_id) ON DELETE CASCADE,
+  subject_key              TEXT NOT NULL DEFAULT 'tenant',
+  user_id                  INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  department_id            UUID,
   granted_by_membership_id UUID,
   granted_at               BIGINT NOT NULL,
-  PRIMARY KEY (tenant_id, model_revision_id)
+  PRIMARY KEY (tenant_id, model_revision_id, subject_key),
+  CONSTRAINT workbuddy_model_grants_subject_shape CHECK (
+    (subject_key = 'tenant' AND user_id IS NULL AND department_id IS NULL)
+    OR (subject_key = 'member:' || user_id::text AND user_id IS NOT NULL AND department_id IS NULL)
+    OR (subject_key = 'department:' || department_id::text AND department_id IS NOT NULL AND user_id IS NULL)
+  ),
+  CONSTRAINT workbuddy_model_grants_department_fkey FOREIGN KEY (tenant_id, department_id)
+    REFERENCES workbuddy_departments(tenant_id, department_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_workbuddy_tenant_tool_grants_revision
   ON workbuddy_tenant_tool_grants(tool_revision_id);
 CREATE INDEX IF NOT EXISTS idx_workbuddy_tenant_model_grants_revision
   ON workbuddy_tenant_model_grants(model_revision_id);
+CREATE INDEX IF NOT EXISTS idx_workbuddy_tenant_tool_grants_member
+  ON workbuddy_tenant_tool_grants(tenant_id, user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_workbuddy_tenant_tool_grants_department
+  ON workbuddy_tenant_tool_grants(tenant_id, department_id) WHERE department_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_workbuddy_tenant_model_grants_member
+  ON workbuddy_tenant_model_grants(tenant_id, user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_workbuddy_tenant_model_grants_department
+  ON workbuddy_tenant_model_grants(tenant_id, department_id) WHERE department_id IS NOT NULL;
 
 -- ── Guard triggers ───────────────────────────────────────────────────────────
 

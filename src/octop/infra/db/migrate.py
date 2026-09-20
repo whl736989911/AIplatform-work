@@ -1736,6 +1736,75 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
         conn.executescript(sql)
 
 
+def _ensure_workbuddy_grant_subjects(db: DatabasePool) -> None:
+    """Give tool/model grants their subject columns on databases that predate the fold.
+
+    ``016_workbuddy_catalog.pg.sql`` first shipped tenant-wide grant tables; the
+    subject dimension was folded into that file, so a database whose recorded
+    version already skipped it needs the same DDL here. Each table is converted
+    once: the guard is the folded column itself, and the statements after it are
+    idempotent for a database that is part way through.
+    """
+    if db.dialect != "postgresql" or not _relation_exists(db, "workbuddy_tenant_tool_grants"):
+        return
+    subjects = (
+        (
+            "workbuddy_tenant_tool_grants",
+            "tool_revision_id",
+            "workbuddy_tool_grants_subject_shape",
+            "workbuddy_tool_grants_department_fkey",
+        ),
+        (
+            "workbuddy_tenant_model_grants",
+            "model_revision_id",
+            "workbuddy_model_grants_subject_shape",
+            "workbuddy_model_grants_department_fkey",
+        ),
+    )
+    for table, revision_column, shape_name, department_fkey in subjects:
+        if "subject_key" in _table_columns(db, table):
+            continue
+        with db.transaction() as conn:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS"
+                " subject_key TEXT NOT NULL DEFAULT 'tenant'"
+            )
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS user_id INTEGER"
+                " REFERENCES users(id) ON DELETE CASCADE"
+            )
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS department_id UUID")
+            conn.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_pkey")
+            conn.execute(
+                f"ALTER TABLE {table} ADD CONSTRAINT {table}_pkey"
+                f" PRIMARY KEY (tenant_id, {revision_column}, subject_key)"
+            )
+            conn.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {shape_name}")
+            conn.execute(
+                f"ALTER TABLE {table} ADD CONSTRAINT {shape_name} CHECK ("
+                " (subject_key = 'tenant' AND user_id IS NULL AND department_id IS NULL)"
+                " OR (subject_key = 'member:' || user_id::text"
+                " AND user_id IS NOT NULL AND department_id IS NULL)"
+                " OR (subject_key = 'department:' || department_id::text"
+                " AND department_id IS NOT NULL AND user_id IS NULL)"
+                ")"
+            )
+            conn.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {department_fkey}")
+            conn.execute(
+                f"ALTER TABLE {table} ADD CONSTRAINT {department_fkey}"
+                " FOREIGN KEY (tenant_id, department_id)"
+                " REFERENCES workbuddy_departments(tenant_id, department_id) ON DELETE CASCADE"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_member"
+                f" ON {table}(tenant_id, user_id) WHERE user_id IS NOT NULL"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_department"
+                f" ON {table}(tenant_id, department_id) WHERE department_id IS NOT NULL"
+            )
+
+
 def run_migrations(db: DatabasePool) -> None:
     if db.dialect == "sqlite":
         _repair_legacy_schema(db)
@@ -1774,3 +1843,4 @@ def run_migrations(db: DatabasePool) -> None:
     _ensure_user_policy_schema(db)
     _ensure_agent_profile_columns(db)
     _ensure_sso_provider_kind_schema(db)
+    _ensure_workbuddy_grant_subjects(db)

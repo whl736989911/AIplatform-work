@@ -45,6 +45,7 @@ from octop.infra.db.workbuddy_context import (
     workbuddy_transaction,
 )
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.rbac.model import RbacActor
 from octop.infra.workbuddy.workflow_compiler import (
     CompiledWorkflow,
     WorkflowCompileError,
@@ -170,6 +171,56 @@ def _is_owner(record: WorkflowRecord, principal: WorkBuddyPrincipal) -> bool:
     )
 
 
+def _rbac_actor(principal: WorkBuddyPrincipal) -> RbacActor:
+    """The permission model's view of the caller (same identities, no extra lookup)."""
+    return RbacActor(
+        user_id=int(principal.user_id),
+        tenant_id=principal.tenant_id,
+        department_id=principal.department_id,
+        is_tenant_admin=principal.is_admin,
+    )
+
+
+def _reachable(
+    server: Any, principal: WorkBuddyPrincipal, workflow_id: str, permission: str
+) -> bool:
+    """True when the workflow's permission layers reach ``permission``.
+
+    A workflow with no permission row is company-visible for reads — the state every
+    workflow was in before the model existed, and the same fallback the list query
+    applies — while management of it stays with the creator and tenant admins,
+    which the caller checks before asking here.
+    """
+    from octop.infra.db.repos.workbuddy_workflows import RBAC_OBJECT_KIND
+    from octop.infra.rbac.repo import WorkBuddyRbacRepo
+    from octop.infra.rbac.service import RbacService
+
+    context = WorkBuddyDbContext.for_tenant(principal.tenant_id, user_id=principal.user_id)
+    db = server.services.db
+    scope_row = WorkBuddyRbacRepo(db).get_scope(context, RBAC_OBJECT_KIND, workflow_id)
+    if scope_row is None:
+        return permission == "read"
+    try:
+        RbacService(db).require(
+            context,
+            object_kind=RBAC_OBJECT_KIND,
+            object_id=workflow_id,
+            actor=_rbac_actor(principal),
+            permission=permission,
+        )
+        return True
+    except OctopError:
+        return False
+
+
+def _require_readable(server: Any, principal: WorkBuddyPrincipal, record: WorkflowRecord) -> None:
+    """Reading a workflow needs a layer that reaches it; anything else is a 404."""
+    if principal.is_admin or _is_owner(record, principal):
+        return
+    if not _reachable(server, principal, record.workflow_id, "read"):
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, _WORKFLOW_NOT_FOUND)
+
+
 def _load_workflow(
     repo: Any, principal: WorkBuddyPrincipal, workflow_id: str, *, conn: Any | None = None
 ) -> WorkflowRecord:
@@ -182,13 +233,24 @@ def _load_workflow(
 
 
 def _load_managed_workflow(
-    repo: Any, principal: WorkBuddyPrincipal, workflow_id: str, *, conn: Any | None = None
+    repo: Any,
+    principal: WorkBuddyPrincipal,
+    workflow_id: str,
+    *,
+    server: Any | None = None,
+    conn: Any | None = None,
 ) -> WorkflowRecord:
-    """Creator or tenant admin only; everyone else sees a uniform 404."""
+    """Creator, tenant admin, or a holder of write/admin through the permission model.
+
+    Everyone else sees a uniform 404, so an object that is out of reach stays
+    indistinguishable from one that does not exist.
+    """
     record = _load_workflow(repo, principal, workflow_id, conn=conn)
-    if not principal.is_admin and not _is_owner(record, principal):
-        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, _WORKFLOW_NOT_FOUND)
-    return record
+    if principal.is_admin or _is_owner(record, principal):
+        return record
+    if server is not None and _reachable(server, principal, record.workflow_id, "write"):
+        return record
+    raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, _WORKFLOW_NOT_FOUND)
 
 
 # --------------------------------------------------------------------------- #
@@ -374,7 +436,12 @@ async def list_workflows(
     """Admins see every workflow; members see the published execution catalog."""
     repo = _repo(server)
     try:
-        records = repo.list_workflows(principal.tenant_id, user_id=principal.user_id)
+        records = repo.list_workflows(
+            principal.tenant_id,
+            user_id=principal.user_id,
+            department_id=principal.department_id,
+            is_tenant_admin=principal.is_admin,
+        )
         if not principal.is_admin:
             revoked = repo.list_revoked_workflow_ids(principal.tenant_id)
             records = [
@@ -405,6 +472,7 @@ async def get_workflow(
     repo = _repo(server)
     try:
         record = _load_workflow(repo, principal, workflow_id)
+        _require_readable(server, principal, record)
         managed = principal.is_admin or _is_owner(record, principal)
         active = repo.load_active_version(principal.tenant_id, record.workflow_id)
     except Exception as exc:  # noqa: BLE001
@@ -446,7 +514,7 @@ async def save_workflow_version(
             server.services.db,
             WorkBuddyDbContext.for_tenant(principal.tenant_id, user_id=principal.user_id),
         ) as conn:
-            record = _load_managed_workflow(repo, principal, workflow_id)
+            record = _load_managed_workflow(repo, principal, workflow_id, server=server)
             _require_if_match(request, record)
             from octop.infra.db.repos.workbuddy_workflows import (
                 PostgresWorkflowSemanticResolver,
@@ -507,7 +575,7 @@ async def activate_workflow_version(
             server.services.db,
             WorkBuddyDbContext.for_tenant(principal.tenant_id, user_id=principal.user_id),
         ) as conn:
-            record = _load_managed_workflow(repo, principal, workflow_id)
+            record = _load_managed_workflow(repo, principal, workflow_id, server=server)
             _require_if_match(request, record)
             updated = repo.activate_version(
                 principal.tenant_id,
@@ -545,7 +613,7 @@ async def rollback_workflow_version(
             server.services.db,
             WorkBuddyDbContext.for_tenant(principal.tenant_id, user_id=principal.user_id),
         ) as conn:
-            record = _load_managed_workflow(repo, principal, workflow_id)
+            record = _load_managed_workflow(repo, principal, workflow_id, server=server)
             _require_if_match(request, record)
             bundle = repo.rollback_version(
                 principal.tenant_id,
@@ -584,7 +652,7 @@ async def list_workflow_versions(
     """Creator/admin only; members see a uniform 404."""
     repo = _repo(server)
     try:
-        record = _load_managed_workflow(repo, principal, workflow_id)
+        record = _load_managed_workflow(repo, principal, workflow_id, server=server)
         versions = repo.list_versions(principal.tenant_id, record.workflow_id)
     except Exception as exc:  # noqa: BLE001
         raise _refusal(exc) from exc
@@ -611,7 +679,7 @@ async def get_workflow_version(
     """The version must belong to the workflow in the path."""
     repo = _repo(server)
     try:
-        record = _load_managed_workflow(repo, principal, workflow_id)
+        record = _load_managed_workflow(repo, principal, workflow_id, server=server)
         version = repo.get_version(
             principal.tenant_id,
             record.workflow_id,

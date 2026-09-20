@@ -14,6 +14,7 @@ import re
 import time
 import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -169,6 +170,17 @@ def _model_revision(*, status: str = "published") -> WorkBuddyModelRevision:
     )
 
 
+@dataclass(frozen=True)
+class _CapabilityGrant:
+    """The subject grant record the router renders."""
+
+    kind: str
+    revision_id: str
+    subject_kind: str
+    subject_id: str | None
+    granted_at: int = 0
+
+
 class _FakeCatalogRepo:
     """In-memory catalog repo recording every call the router makes."""
 
@@ -179,6 +191,7 @@ class _FakeCatalogRepo:
         self.public_tools: list[WorkBuddyToolRevision] = []
         self.public_models: list[WorkBuddyModelRevision] = []
         self.capabilities: WorkBuddyCapabilities | None = None
+        self.capability_grants: list[Any] = []
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self.tool_failure: Exception | None = None
         self.model_failure: Exception | None = None
@@ -371,6 +384,27 @@ class _FakeCatalogRepo:
         )
         self.capabilities = record
         return record
+
+    def list_capability_grants(self, tenant_id: str, *, kind: str) -> list[Any]:
+        self.calls.append(("list_capability_grants", (tenant_id,), {"kind": kind}))
+        return list(self.capability_grants)
+
+    def grant_capability(self, tenant_id: str, **kwargs: Any) -> Any:
+        self.calls.append(("grant_capability", (tenant_id,), kwargs))
+        if self.capability_failure is not None:
+            raise self.capability_failure
+        return _CapabilityGrant(
+            kind=kwargs["kind"],
+            revision_id=kwargs["revision_id"],
+            subject_kind=kwargs["subject_kind"],
+            subject_id=kwargs.get("subject_id"),
+        )
+
+    def revoke_capability_grant(self, tenant_id: str, **kwargs: Any) -> bool:
+        self.calls.append(("revoke_capability_grant", (tenant_id,), kwargs))
+        if self.capability_failure is not None:
+            raise self.capability_failure
+        return True
 
 
 class _FakeServer:
@@ -1081,6 +1115,8 @@ def test_catalogs_return_only_tenant_approved_published_revisions(
         "default_model_id": None,
         "revision": 1,
         "updated_at": 1_700_000_000,
+        "tool_grants": [],
+        "model_grants": [],
     }
 
 

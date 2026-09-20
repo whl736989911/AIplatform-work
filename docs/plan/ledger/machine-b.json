@@ -2,20 +2,82 @@
   "machine": "machine-B",
   "line": "B",
   "owner": "machine-B（权限与知识库）",
-  "updated": "2026-09-20T07:40:00Z",
+  "updated": "2026-09-20T09:55:00Z",
   "batches": {
     "1": {
       "state": "done",
-      "tasks": ["B-01", "B-08", "B-09"],
+      "tasks": [
+        "B-01",
+        "B-08",
+        "B-09"
+      ],
       "pr": 30,
-      "commits": ["dcd40828"],
+      "commits": [
+        "dcd40828"
+      ],
       "evidence": "静态：ruff check src tests scripts 通过；ruff format --check 1086 文件已格式化；mypy src/octop 542 文件 0 错。迁移三态（专用临时库一次性脚本）：全新 SQLite 水位→51；既有 SQLite 旧水位重升→51 且探针数据保留；全新 PG 水位→51，新表 workbuddy_object_scopes/workbuddy_object_acl 存在且 RLS enabled+forced，documents.file_ref_id 可空、source NOT NULL 默认 'upload'、两条 source CHECK 与部分唯一索引 wb_knowledge_documents_file_ref_unique(... WHERE file_ref_id IS NOT NULL) 均生效；050+051 二次应用无错（幂等）。测试：pytest tests/unit/db tests/unit/workbuddy tests/integration/test_workbuddy_business_smoke.py tests/integration/test_workbuddy_runtime_postgres.py -q -p no:randomly → 486 passed, 3 skipped。本批次新增 52 项测试（rbac 模型 22、rbac PostgreSQL 9、文本-only 服务 6、文本-only PostgreSQL 6、迁移脚本 9）",
       "notes": "B-01 提供通用 scope+ACL 骨架（迁移 050 + 新 src/octop/infra/rbac/，含列表可见性谓词与单对象判定的一致性矩阵测试；该矩阵在本批次内抓到并修复了两处真实漂移：SQL 漏管理员对部门级对象的读权限、仓库层重建 actor 时丢 is_tenant_admin）。B-09 以 source 判别列 + 可空 file_ref_id + 部分唯一索引实现文本-only 通道，服务新增 index_text_document（不触碰对象存储），路由接受 source/text。B-08 的 scripts/migrate_kb.py 只做只读对账与 A/B/C 判定，本批次不写入目标库。未新增错误码，未改 errors.py 与 i18n。未把知识库既有权限实现迁入 rbac/（B-10/B-13 合流时收敛）。"
     },
-    "2": { "state": "pending", "tasks": ["B-02", "B-03", "B-04"], "pr": null, "commits": [], "evidence": "", "notes": "" },
-    "3": { "state": "pending", "tasks": ["B-05", "B-06", "B-07"], "pr": null, "commits": [], "evidence": "", "notes": "" },
-    "4": { "state": "pending", "tasks": ["B-10", "B-12"], "pr": null, "commits": [], "evidence": "", "notes": "" },
-    "5": { "state": "pending", "tasks": ["B-13", "B-14", "B-15"], "pr": null, "commits": [], "evidence": "", "notes": "" },
-    "6": { "state": "pending", "tasks": ["B-11", "B-16"], "pr": null, "commits": [], "evidence": "", "notes": "B-16 合规后端需先签合规政策，未签则跳过" }
+    "2": {
+      "state": "done",
+      "tasks": [
+        "B-02",
+        "B-03",
+        "B-04"
+      ],
+      "pr": 34,
+      "commits": [
+        "9cadd56b",
+        "93550def"
+      ],
+      "evidence": "静态：ruff check src tests scripts 通过；ruff format --check 1089 文件已格式化；mypy src/octop 542 文件 0 错。全量：uv run pytest -m \"not live\" -q -p no:randomly = 3698 passed, 114 skipped, 33 deselected, 0 failed（25m56s）。批次门禁：tests/unit/db = 153 passed/1 skipped（迁移三态，含迁移折叠幂等）；tests/unit/workbuddy + tests/integration/test_workbuddy_business_smoke.py + tests/integration/test_workbuddy_runtime_postgres.py = 371 passed/2 skipped。新增验收（真实 PostgreSQL）：test_workbuddy_workflow_visibility_postgresql.py 7 项；test_workbuddy_capability_subjects_postgresql.py 11 项（三层可达与越界拒绝、默认模型按调用者可达、能力替换保留 subject 行、撤销修订清空主体、跨租户/非成员/形状被拒、管理端 API 授权→撤销闭环、旧库折叠幂等）。pre-commit（make precommit + dashboard 构建）通过。",
+      "notes": "B-02 工作流接入权限四层：创建与 workbuddy_object_scopes 行同一事务写入（默认 enterprise，主体取自服务端上下文）、列表过滤与纯解析器逐 actor 一致、详情/保存/发布/回滚/归档统一判定且不可见一律 404；测试抓到并修复「列表按 legacy 默认公司可见、详情走 RbacService 无该回退」的口径不一致。B-03 工具/模型授权加 subject：subject_key（tenant/department:<id>/member:<user_id>）进主键，折叠进 016_workbuddy_catalog.pg.sql 并以 migrate.py 幂等修复 _ensure_workbuddy_grant_subjects 覆盖已跳过该文件的库；update_capabilities 只替换 subject_key='tenant' 的行（部门/成员授权不被覆盖）；撤销租户级模型授权时清空默认模型（默认模型必须保持租户级批准）。B-04 解析器按调用者解析（租户级行 ∪ 部门父链 ∪ 本人），默认模型须对调用者可达否则 MODEL_NOT_CONFIGURED，缺 user_id 时 fail-closed；A 线三处构造点未改实现，契约定稿写入 docs/plan/two-machine-workstreams.md §3.6。另修 scripts/migrate_kb.py：授权判定改问租户级事实（新增 WorkBuddyCatalogRepo.granted_tenant_wide），与调用者可达性明确区分。contracts/route-manifest.json 追加两条端点（supplemental 46→48、total 108→110），未新增迁移号（按 AGENTS.md 折叠进当前未发布的 016）。未包含：部门/成员授权前端配置页（B-07）、知识库权限向 rbac/ 收敛（B-10/B-13）、执行期工具/模型运行时复核。注意：首次提交时钩子在随机顺序下出现 1 项偶发失败（未记录用例名，随后单跑与全量确定序均通过，无法复现，疑似既有顺序耦合）；第二次提交钩子全绿，PR 已提并及时合并。"
+    },
+    "3": {
+      "state": "pending",
+      "tasks": [
+        "B-05",
+        "B-06",
+        "B-07"
+      ],
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": ""
+    },
+    "4": {
+      "state": "pending",
+      "tasks": [
+        "B-10",
+        "B-12"
+      ],
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": ""
+    },
+    "5": {
+      "state": "pending",
+      "tasks": [
+        "B-13",
+        "B-14",
+        "B-15"
+      ],
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": ""
+    },
+    "6": {
+      "state": "pending",
+      "tasks": [
+        "B-11",
+        "B-16"
+      ],
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": "B-16 合规后端需先签合规政策，未签则跳过"
+    }
   }
 }
