@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from octop.api.deps import get_server
 from octop.api.routers.workbuddy_identity import (
@@ -620,6 +620,43 @@ async def ingest_webhook(
     raw_body = await request.body()
     payload = _triggers(server).ingest_webhook(
         webhook_path, raw_body=raw_body, headers=dict(request.headers)
+    )
+    return workbuddy_envelope(request, payload)
+
+
+class ChatMessageBody(BaseModel):
+    """A message in a conversation: the id makes a retried send safe."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message_id: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=8000)
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages",
+    status_code=202,
+    summary="Post a message that may fire the flows bound to this conversation",
+)
+async def post_chat_message(
+    request: Request,
+    conversation_id: str,
+    body: ChatMessageBody,
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """A chat message raises an event; the flows bound to this conversation answer.
+
+    The endpoint decides nothing about *who* should respond: it raises the event
+    and each registration's own filter picks, exactly as the webhook intake does.
+    A message that matches nothing is still accepted — a conversation that no
+    workflow listens to is a normal conversation, not an error.
+    """
+    payload = _triggers(server).ingest_chat_message(
+        _actor(principal),
+        conversation_id=conversation_id,
+        message_id=body.message_id,
+        text=body.text,
     )
     return workbuddy_envelope(request, payload)
 

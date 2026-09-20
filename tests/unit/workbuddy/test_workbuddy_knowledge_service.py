@@ -36,6 +36,7 @@ from octop.infra.db.repos.workbuddy_knowledge import (
 )
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.knowledge import (
+    CHAT_MESSAGE_EVENT,
     ArchiveEntry,
     ArchiveLimits,
     EmbeddingDescriptor,
@@ -379,6 +380,15 @@ class FakeTriggerRepo:
         if self.registration is None or self.registration.webhook_path != webhook_path:
             return None
         return self.registration
+
+    def resolve_event_registrations(self, ctx: Any, *, event_name: str) -> list[Any]:
+        """The real query's contract: active event registrations for one name."""
+        row = self.registration
+        if row is None or row.kind != "event" or row.event_name != event_name:
+            return []
+        if not row.enabled or row.tenant_id != TENANT:
+            return []
+        return [row]
 
     def claim_delivery(self, ctx: Any, registration_id: str, **fields: Any) -> DeliveryClaim:
         key = (TENANT, registration_id, str(fields["event_key"]))
@@ -1352,3 +1362,85 @@ def test_an_empty_text_document_fails_closed_and_records_the_failure() -> None:
     assert repo.published == []
     assert repo.statuses[-1][0] == "failed"
     assert jobs.finished[-1][1] == "failed"
+
+
+def _chat_registration(**overrides: Any) -> WorkBuddyTriggerRegistrationRow:
+    """A workflow bound to one conversation: an event registration whose filter says so."""
+    values: dict[str, Any] = {
+        "kind": "event",
+        "name": "chat flow",
+        "webhook_path": None,
+        "event_name": CHAT_MESSAGE_EVENT,
+        "event_filter": {"conversation_id": "conv-1"},
+    }
+    values.update(overrides)
+    return _registration(**values)
+
+
+def test_a_chat_message_fires_the_flow_bound_to_that_conversation() -> None:
+    """A-17: 消息可触发流程——绑定由注册的过滤器决定，不靠猜。"""
+    dispatcher = FakeDispatcher()
+    repo = FakeTriggerRepo(_chat_registration())
+    service = _trigger_service(
+        repo, TriggerHooks(secret_backend=FakeSecretBackend({}), dispatcher=dispatcher)
+    )
+
+    result = service.ingest_chat_message(
+        _actor(), conversation_id="conv-1", message_id="m-1", text="帮我查一下报价"
+    )
+    assert result["matched"] == 1, result
+    assert dispatcher.calls == ["chat:m-1"], dispatcher.calls
+    delivery = result["deliveries"][0]
+    assert delivery["execution_id"] == "exec-1", delivery
+    assert delivery["status"] == "executed", delivery
+
+
+def test_a_message_in_another_conversation_is_accepted_but_runs_nothing() -> None:
+    dispatcher = FakeDispatcher()
+    repo = FakeTriggerRepo(_chat_registration())
+    service = _trigger_service(
+        repo, TriggerHooks(secret_backend=FakeSecretBackend({}), dispatcher=dispatcher)
+    )
+
+    # A conversation nobody bound a flow to is a normal conversation, not an error.
+    result = service.ingest_chat_message(
+        _actor(), conversation_id="conv-2", message_id="m-2", text="你好"
+    )
+    assert result["matched"] == 0 and result["deliveries"] == [], result
+    assert dispatcher.calls == [], dispatcher.calls
+
+
+def test_a_retried_message_does_not_run_the_flow_twice() -> None:
+    dispatcher = FakeDispatcher()
+    repo = FakeTriggerRepo(_chat_registration())
+    service = _trigger_service(
+        repo, TriggerHooks(secret_backend=FakeSecretBackend({}), dispatcher=dispatcher)
+    )
+
+    first = service.ingest_chat_message(
+        _actor(), conversation_id="conv-1", message_id="m-1", text="报价"
+    )
+    second = service.ingest_chat_message(
+        _actor(), conversation_id="conv-1", message_id="m-1", text="报价"
+    )
+    assert first["deliveries"][0]["duplicate"] is False, first
+    assert second["deliveries"][0]["duplicate"] is True, second
+    assert second["deliveries"][0]["execution_id"] == "exec-1", second
+    # The message id is the dedupe key: one delivery, one run.
+    assert dispatcher.calls == ["chat:m-1"], dispatcher.calls
+
+
+def test_a_chat_message_without_a_dispatcher_fails_closed() -> None:
+    repo = FakeTriggerRepo(_chat_registration())
+    service = _trigger_service(
+        repo, TriggerHooks(secret_backend=FakeSecretBackend({}), dispatcher=None)
+    )
+
+    with pytest.raises(OctopError) as raised:
+        service.ingest_chat_message(
+            _actor(), conversation_id="conv-1", message_id="m-9", text="在吗"
+        )
+    # Nobody can answer, so the message is refused (and the delivery says why)
+    # rather than accepted into silence.
+    assert raised.value.code == ErrorCode.DEPENDENCY_UNAVAILABLE, raised.value
+    assert repo.rejected, repo.rejected

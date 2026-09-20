@@ -63,6 +63,13 @@ VECTOR_DIMENSIONS = EMBEDDING_DIMENSIONS
 MAX_QUERY_LENGTH = 2_000
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
+
+#: The event a chat message raises (A-17). A workflow answers a conversation by
+#: registering an ``event`` trigger for this name whose filter names the
+#: conversation — so "which flow answers this chat" is answered by the same
+#: matching the webhook path already uses, and a flow bound to another
+#: conversation is quietly not run.
+CHAT_MESSAGE_EVENT = "chat.message"
 MAX_MATCH_COUNT = 50
 UPLOAD_TTL_SECONDS = 900
 
@@ -1818,6 +1825,86 @@ class WorkBuddyTriggerService:
         return self._dispatch(
             ctx, registration, claim.delivery, event_key=event_key, event=event, is_test=False
         )
+
+    def ingest_chat_message(
+        self,
+        actor: WorkBuddyKnowledgeActor,
+        *,
+        conversation_id: str,
+        message_id: str,
+        text: str,
+    ) -> dict[str, Any]:
+        """A message in a conversation fires the flows bound to it (A-17).
+
+        The binding is an ordinary event registration whose filter names the
+        conversation, so this method decides nothing about who should answer: it
+        raises the message as an event and lets the shared matcher choose, which
+        keeps "消息可触发流程" and the webhook path from drifting apart.
+
+        ``message_id`` is the dedupe key. A client that retries a send (or a
+        transport that delivers twice) does not run the workflow twice — the
+        delivery ledger already knows how to refuse that, and reuses it here.
+
+        No dispatcher means no dispatch: like the webhook path, this refuses
+        (and records why) rather than accepting a message nobody will answer.
+        """
+        ctx = self.context(actor)
+        event = {
+            "event": CHAT_MESSAGE_EVENT,
+            "conversation_id": conversation_id,
+            "text": text,
+        }
+        registrations = [
+            registration
+            for registration in self._repository().resolve_event_registrations(
+                ctx, event_name=CHAT_MESSAGE_EVENT
+            )
+            if event_matches_filter(event, dict(registration.event_filter or {}))
+        ]
+        event_key = f"chat:{message_id}"
+        body_sha256 = sha256_hex(f"{conversation_id}:{message_id}:{text}".encode())
+        deliveries: list[dict[str, Any]] = []
+        for registration in registrations:
+            claim: DeliveryClaim = self._repository().claim_delivery(
+                ctx,
+                registration.registration_id,
+                event_key=event_key,
+                body_sha256=body_sha256,
+                event_name=CHAT_MESSAGE_EVENT,
+                signature_version=registration.secret_version,
+                signature_timestamp=self._now(),
+                is_test=False,
+                actor_user_id=actor.user_id,
+            )
+            if not claim.dispatch:
+                # The same message, already delivered to this workflow: report it
+                # rather than running the workflow a second time.
+                deliveries.append(
+                    {
+                        "registration_id": registration.registration_id,
+                        "workflow_id": registration.workflow_id,
+                        "delivery_id": claim.delivery.delivery_id,
+                        "execution_id": claim.delivery.execution_id,
+                        "status": claim.delivery.status,
+                        "duplicate": True,
+                    }
+                )
+                continue
+            result = self._dispatch(
+                ctx,
+                registration,
+                claim.delivery,
+                event_key=event_key,
+                event=event,
+                is_test=False,
+            )
+            deliveries.append({"workflow_id": registration.workflow_id, **result})
+        return {
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "matched": len(registrations),
+            "deliveries": deliveries,
+        }
 
     def test_delivery(self, actor: WorkBuddyKnowledgeActor, registration_id: str) -> dict[str, Any]:
         """Admin replay: dispatch a synthetic event and record the audit row."""
