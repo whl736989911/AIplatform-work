@@ -11,6 +11,14 @@
 - WorkBuddy 通用权限骨架（迁移 050 + `octop.infra.rbac`）：把知识库已有的四层权限模型（公司/部门/个人/单独授权）抽成与对象类型无关的一套表与解析——`workbuddy_object_scopes` 记隐式范围（`personal` 仅所有者、`department` 仅当前成员、`enterprise` 全员，形状与知识库同款 CHECK），`workbuddy_object_acl` 记可增可撤的显式授权（`read`/`write`/`admin`，主体为一人或一部门）。解析取「隐式等级与命中授权等级的最大值」，授权只能加不能夺；不可见对象对外与不存在一致（404 而非 403）。两张表强制 RLS（ENABLE + FORCE）与租户内复合外键，SQLite 侧只推进水位并在事务入口 fail closed。列表查询与单对象判定共用同一套可见性谓词，并有测试比对二者，防止两边漂移。
 - WorkBuddy 知识库文本-only 迁移通道（迁移 051）：文档新增 `source` 判别列（`upload`/`text`/`migration`），`file_ref_id` 放宽为可空并配 `source` 形状约束与部分唯一索引——这样「个人版只留分块文本与向量、不保留原文件」的库也能导入，同一知识库可有多篇无原文件的文档，而「一个已存文件只对应一篇文档」的约束仍然成立。服务新增 `index_text_document`（对传入文本分块、嵌入、原子发布，全程不触碰对象存储），路由 `POST /knowledge-bases/{id}/documents` 接受 `source` 与 `text`；上传类文档走原路径不变，走错入口会被明确拒绝而不是静默降级。
 - 知识库迁移对账脚本 `scripts/migrate_kb.py`：读取个人版控制库（`~/.octop/octop.db`）与各库的 `index.sqlite`（分块文本 + `<Nf` little-endian float32 向量），逐库给出导入路径与理由——A 原样搬（模型修订已发布且已授权、维度一致）、B 重新嵌入（模型可用但维度不符）、C 挂起（模型未发布或未授权，需管理员先授权），未给目标库时如实报 `unknown` 而不猜测。报告含每库文档数、分块数、向量维度、目标范围（`shared=1 → enterprise`）与总计；只读、可重复运行，本批次不写入任何一侧。
+- WorkBuddy 控制台改为**员工优先的信息架构**：侧边栏分成「日常工作」（工作台 / 收件箱 / 工作流 / 运行）与「治理与设置」（知识库 / 提案 / 审批 / 市场 / 合规 / 生命周期）两组，日常四类入口排在最前。
+- WorkBuddy **工作台**（`/workbuddy`）：一屏给出待我处理的审批、我的工作流与最近运行，每个区块独立降级——某个接口未合并只影响那一块，其余照常显示真实数据。
+- WorkBuddy **收件箱**（`/workbuddy/inbox`）：待我审批与待我审阅的提案集中在一处，审批页签复用既有可操作的审批面板。
+- WorkBuddy **运行**（`/workbuddy/runs`）：跨工作流的执行记录，支持按范围/状态过滤与从 `?workflow=` 预过滤，点开任意一条复用既有执行详情抽屉。
+- 工作流详情页新增**改进提案**页签，并让选中的工作流进入 URL（`?workflow=`）：工作台与运行页可以深链到具体工作流，提案详情复用同一份 `ProposalDetailPanel`，控制台只有一份「读/审/提升提案」的实现。
+- 市场**本租户安装台账**列表接口 `GET /marketplace/installations`（租户来自登录主体，不来自请求），并把安装页签接上该列表。
+- 提案**分配独立审核人**接口 `POST /improvement-proposals/{id}/reviewers`：校验审核人为同租户 active 成员且不是提案创建者，越权与自审一律拒绝。
+- 生命周期**再认证 → 导出下载挑战**链路：`POST /auth/reauthenticate` 签发五分钟一次性再认证凭据（绑定 tenant/user/purpose、`no-store`），`POST /exports/{id}/download-challenge` 凭该凭据签发兑换挑战（`no-store`，不延长导出 72 小时窗口）。
 - WorkBuddy 知识索引记录为真实作业（合同 §4.6.2）：`POST /knowledge-bases/{id}/documents` 返回的 `job_id` 指向 `workbuddy_jobs` 中一条 `knowledge_index` 作业（此前是一个查不到对应行的随机 uuid）；索引开始时作业置为 `running`，结束时写入 `result`（文档、世代、分块数），失败时写入失败码。
 - WorkBuddy 提案生成记录为真实作业（合同 §4.6.2）：`POST /workflows/{id}/improvement-proposals` 的 202 返回 `job_id` 指向 `workbuddy_jobs` 中一条 `improvement_proposal` 作业，成功后 `result` 带 `proposal_id`/`workflow_id`，失败时记录拒绝码；客户端丢失响应后可用 `GET /jobs` 找回。
 - WorkBuddy 节点重试：按定义声明的 `retry.max_attempts`/`backoff_sec` 执行重试，只对「可证明未发出调用」的失败（依赖不可达、请求被拒）与已声明只读/幂等的工具生效；每次重试复用同一逻辑操作键 `execution_id:node_id`；未知结果仍进入对账而不是重发。
@@ -28,6 +36,10 @@
 - WorkBuddy 作业结果写入：`finish_job` 未按 jsonb 绑定 `result`，任何以对象作为结果的作业都会在写入时失败。
 - WorkBuddy 租户并发配额按实际运行槽计数：审批等待释放槽位，恢复时原子重取，重叠执行不再越过上限。
 - 延迟取消（对账中取消）不再遗留每月执行预留与运行槽。
+- 提案详情页的「分配审核人」按钮此前调用一个后端从未实现的路由（恒 404）：现按冻结合同补上 `POST /improvement-proposals/{id}/reviewers`，并在前端去掉「该路由尚未实现」的提示。
+- 生命周期页的「重新认证 / 签发下载挑战」两步此前对着两个不存在的 stage-D 路由（恒 404）：现补齐 `POST /auth/reauthenticate` 与 `POST /exports/{id}/download-challenge`，凭据一次性且五分钟有效，签发挑战不延长导出 72 小时窗口。
+- 市场「安装台账」页签此前无列表可调（合同只发布按 id 查询），页面只能提示无法展示：现发布 `GET /marketplace/installations`（租户主体从登录上下文解析、分页），并把台账接上列表。
+- 新增提案/生命周期两块路由的合同对齐测试：与冻结合同做双向比对（路由必须两边都在、成功状态码一致、租户路由必须依赖租户主体）。这三个缺陷的共同成因正是「合同声明了路由、代码里没有、也没有任何测试比对」。
 
 ### 文档
 

@@ -33,6 +33,7 @@ __all__ = [
     "CANARY_BUCKET_MODULUS",
     "CANARY_MIN_FULL_DAYS",
     "CANARY_MIN_SETTLED_RUNS",
+    "MAX_ASSIGNED_REVIEWERS",
     "MAX_PATCH_OPERATIONS",
     "OPEN_STATUSES",
     "PENDING_STATUSES",
@@ -64,6 +65,7 @@ __all__ = [
     "ReviewDecision",
     "ReviewRecord",
     "ReviewVote",
+    "ReviewerAssignment",
     "RiskAssessment",
     "SemanticChange",
     "ShadowProof",
@@ -96,6 +98,9 @@ CANARY_MIN_FULL_DAYS = 7
 CANARY_MIN_SETTLED_RUNS = 100
 SHADOW_MIN_SETTLED_RUNS = 10
 MAX_PATCH_OPERATIONS = 200
+# A review panel stays small: the approver count is one or two, and an unbounded
+# list would let one request rewrite the whole reviewer set of a proposal.
+MAX_ASSIGNED_REVIEWERS = 20
 CANARY_FULL_DAY_SECONDS = 86_400
 ALLOWLIST_UNAVAILABLE = "TOOL_ALLOWLIST_UNAVAILABLE"
 
@@ -1453,6 +1458,22 @@ class NewReview:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewerAssignment:
+    """One member the workflow manager designated as an independent reviewer.
+
+    The assignment is a governance fact, not a vote: it carries the membership
+    the caller named and the user that membership belongs to, so the review
+    roster is readable without another membership lookup.
+    """
+
+    membership_id: str
+    user_id: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"membership_id": self.membership_id, "user_id": self.user_id}
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewRecord:
     review_id: str
     proposal_id: str
@@ -1555,6 +1576,28 @@ class ProposalStore(Protocol):
 
     def add_review(self, review: NewReview) -> ReviewRecord: ...
 
+    def resolve_active_memberships(self, membership_ids: Sequence[str]) -> dict[str, int]:
+        """User id per requested membership, for active members of this tenant.
+
+        Unknown, foreign and inactive memberships are absent from the result, so
+        a caller cannot tell a member of another tenant from one that does not
+        exist.
+        """
+        ...
+
+    def list_reviewers(self, proposal_id: str) -> list[ReviewerAssignment]: ...
+
+    def assign_reviewers(
+        self,
+        proposal_id: str,
+        *,
+        reviewers: Sequence[ReviewerAssignment],
+        actor_user_id: int,
+        assigned_at: int,
+    ) -> list[ReviewerAssignment]:
+        """Record the reviewer roster of a proposal, replacing the previous one."""
+        ...
+
     def list_shadow_runs(self, proposal_id: str) -> list[ShadowRunRow]: ...
 
     def add_shadow_run(self, proposal_id: str, run: ShadowRunRow) -> ShadowRunRow: ...
@@ -1596,6 +1639,7 @@ class ProposalView:
     proposal: ProposalRecord
     stale: bool = False
     reviews: tuple[ReviewRecord, ...] = ()
+    reviewers: tuple[ReviewerAssignment, ...] = ()
     shadow_proof: ShadowProof | None = None
     evaluations: tuple[EvaluationRow, ...] = ()
     last_gate: GateVerdict | None = None
@@ -1639,6 +1683,8 @@ class ProposalView:
                 }
                 for review in self.reviews
             ]
+        if self.reviewers:
+            payload["reviewers"] = [reviewer.to_dict() for reviewer in self.reviewers]
         if self.shadow_proof is not None:
             payload["shadow_proof"] = self.shadow_proof.to_dict()
         if self.evaluations:
@@ -1668,6 +1714,32 @@ def _metrics_dict(metrics: PhaseMetrics) -> dict[str, Any]:
         "safety_violations": metrics.safety_violations,
         "wait_ms": metrics.wait_ms,
     }
+
+
+def _requested_reviewers(values: Sequence[str]) -> tuple[str, ...]:
+    """Canonical, de-duplicated membership ids in the order they were requested.
+
+    Canonical spelling matters: the store resolves memberships by their exact
+    id, so an id that is merely spelled differently must not read as a different
+    (or missing) member.
+    """
+    reviewers: dict[str, None] = {}
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            raise ProposalPolicyError(
+                "WORKBUDDY_INVALID_ARGUMENT", "a reviewer membership id must not be empty"
+            )
+        try:
+            membership_id = str(uuid.UUID(text)).lower()
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ProposalPolicyError(
+                "WORKBUDDY_INVALID_ARGUMENT", f"reviewer {text!r} is not a membership id"
+            ) from exc
+        reviewers.setdefault(membership_id, None)
+    if not reviewers:
+        raise ProposalPolicyError("WORKBUDDY_INVALID_ARGUMENT", "at least one reviewer is required")
+    return tuple(reviewers)
 
 
 class WorkBuddyProposalsService:
@@ -1808,6 +1880,67 @@ class WorkBuddyProposalsService:
             record = self._transition(record, ProposalStatus.APPROVED, {"status_reason": None})
         else:
             record = self._require(proposal_id)
+        return self._view(
+            record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id)
+        )
+
+    # -- reviewer roster --------------------------------------------------- #
+
+    def assign_reviewers(
+        self,
+        proposal_id: str,
+        *,
+        reviewers: Sequence[str],
+        actor: ProposalActor,
+    ) -> ProposalView:
+        """Designate the independent reviewers of an open proposal.
+
+        Only the workflow manager (tenant admin) may staff a review, and every
+        designated member must be an active member of the caller's tenant and
+        must not be the author of the proposal — the same independence rule the
+        vote itself applies.  Foreign, inactive and unknown memberships are
+        refused alike, so the roster cannot be used to probe another tenant.
+        """
+        if not actor.is_admin:
+            raise ProposalPolicyError(
+                "FORBIDDEN_ROLE", "only the workflow manager assigns reviewers"
+            )
+        record = self._refresh_staleness(self._require(proposal_id))
+        if record.status not in OPEN_STATUSES:
+            raise ProposalPolicyError(
+                "INVALID_STATE",
+                f"proposal is {record.status.value}; reviewers are fixed",
+            )
+        requested = _requested_reviewers(reviewers)
+        creator_membership = str(record.created_by_membership_id or "").lower()
+        if creator_membership and creator_membership in requested:
+            raise ProposalPolicyError(
+                "CREATOR_SELF_REVIEW", "the proposal creator cannot review it"
+            )
+        resolved = self._store.resolve_active_memberships(requested)
+        missing = [membership for membership in requested if membership not in resolved]
+        if missing:
+            # The refusal echoes only ids the caller just sent: it never says
+            # whether the membership exists elsewhere.
+            raise ProposalPolicyError(
+                "WORKBUDDY_INVALID_ARGUMENT",
+                "every reviewer must be an active member of this tenant",
+                details={"reviewer_membership_ids": missing},
+            )
+        if record.created_by_user_id in resolved.values():
+            raise ProposalPolicyError(
+                "CREATOR_SELF_REVIEW", "the proposal creator cannot review it"
+            )
+        roster = tuple(
+            ReviewerAssignment(membership_id=membership, user_id=resolved[membership])
+            for membership in requested
+        )
+        self._store.assign_reviewers(
+            proposal_id,
+            reviewers=roster,
+            actor_user_id=actor.user_id,
+            assigned_at=self._now(),
+        )
         return self._view(
             record, detail=True, pointer=self._store.workflow_pointer(record.workflow_id)
         )
@@ -2061,6 +2194,7 @@ class WorkBuddyProposalsService:
                 proposal=record,
                 stale=stale,
                 reviews=tuple(self._store.list_reviews(record.proposal_id)),
+                reviewers=tuple(self._store.list_reviewers(record.proposal_id)),
             )
         reviews = tuple(self._store.list_reviews(record.proposal_id))
         evaluations = tuple(self._store.list_evaluations(record.proposal_id))
@@ -2068,6 +2202,7 @@ class WorkBuddyProposalsService:
             proposal=record,
             stale=stale,
             reviews=reviews,
+            reviewers=tuple(self._store.list_reviewers(record.proposal_id)),
             shadow_proof=self._shadow_proof(record.proposal_id),
             evaluations=evaluations,
             last_gate=self._latest_gate(record.proposal_id),

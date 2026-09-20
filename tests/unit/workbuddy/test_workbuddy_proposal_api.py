@@ -8,7 +8,7 @@ If-Match promotion contract are proven without a database.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +31,13 @@ ADMIN_MEMBER = "33333333-3333-4333-8333-333333333333"
 WORKFLOW_ID = "44444444-4444-4444-8444-444444444444"
 REVISION = 7
 APPROVER = "55555555-5555-4555-8555-555555555555"
+
+# Active members of TENANT, plus the two refusable shapes: the author's *second*
+# membership in the same tenant, and a member that is not active any more.
+REVIEWER_A = "66666666-6666-4666-8666-666666666666"
+REVIEWER_B = "77777777-7777-4777-8777-777777777777"
+CREATOR_OTHER_MEMBER = "88888888-8888-4888-8888-888888888888"
+SUSPENDED_MEMBER = "99999999-9999-4999-8999-999999999999"
 
 
 def workflow_definition() -> dict[str, Any]:
@@ -106,7 +113,17 @@ class _Store:
         self.shadow: dict[str, list[P.ShadowRunRow]] = {}
         self.evaluations: dict[str, list[P.EvaluationRow]] = {}
         self.counter = 0
-        self.reviewer_membership = "66666666-6666-4666-8666-666666666666"
+        self.reviewer_membership = REVIEWER_A
+        # Reviewer directory: membership id -> (user id, membership status).
+        # Only the active members of TENANT may be assigned to a review.
+        self.members: dict[str, tuple[int, str]] = {
+            CREATOR_MEMBER: (10, "active"),
+            CREATOR_OTHER_MEMBER: (10, "active"),
+            REVIEWER_A: (20, "active"),
+            REVIEWER_B: (21, "active"),
+            SUSPENDED_MEMBER: (22, "suspended"),
+        }
+        self.reviewers: dict[str, list[P.ReviewerAssignment]] = {}
 
     def _id(self, prefix: str) -> str:
         self.counter += 1
@@ -245,6 +262,28 @@ class _Store:
 
     def list_reviews(self, proposal_id: str) -> list[P.ReviewRecord]:
         return list(self.reviews.get(proposal_id, ()))
+
+    def resolve_active_memberships(self, membership_ids: Sequence[str]) -> dict[str, int]:
+        return {
+            membership_id: self.members[membership_id][0]
+            for membership_id in membership_ids
+            if self.members.get(membership_id, (0, ""))[1] == "active"
+        }
+
+    def list_reviewers(self, proposal_id: str) -> list[P.ReviewerAssignment]:
+        return list(self.reviewers.get(proposal_id, ()))
+
+    def assign_reviewers(
+        self,
+        proposal_id: str,
+        *,
+        reviewers: Sequence[P.ReviewerAssignment],
+        actor_user_id: int,
+        assigned_at: int,
+    ) -> list[P.ReviewerAssignment]:
+        roster = list(reviewers)
+        self.reviewers[proposal_id] = roster
+        return roster
 
     def list_shadow_runs(self, proposal_id: str) -> list[P.ShadowRunRow]:
         return list(self.shadow.get(proposal_id, ()))
@@ -656,3 +695,128 @@ async def test_promote_requires_tenant_admin(monkeypatch: pytest.MonkeyPatch) ->
         )
 
     assert response.status_code == 403
+
+
+async def _open_proposal(app: FastAPI) -> str:
+    """Create the pending proposal the reviewer tests staff."""
+    created = await _request(
+        app,
+        "POST",
+        CREATE_PATH,
+        principal=_principal(),
+        json_body={"workflow_revision": REVISION, "patch": MEDIUM_PATCH},
+    )
+    assert created.status_code == 202, created.text
+    return created.json()["data"]["proposal_id"]
+
+
+async def test_workflow_manager_assigns_reviewers_that_the_detail_lists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _Store(workflow_definition())
+    app = _app(store, monkeypatch)
+    manager = _principal(user_id=99, role="admin", member_id=ADMIN_MEMBER)
+    proposal_id = await _open_proposal(app)
+
+    assigned = await _request(
+        app,
+        "POST",
+        f"/improvement-proposals/{proposal_id}/reviewers",
+        principal=manager,
+        json_body={"reviewer_membership_ids": [REVIEWER_A, REVIEWER_B]},
+    )
+    detail = await _request(app, "GET", f"/improvement-proposals/{proposal_id}", principal=manager)
+
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["data"]["proposal_id"] == proposal_id
+    roster = assigned.json()["data"]["reviewers"]
+    assert [row["membership_id"] for row in roster] == [REVIEWER_A, REVIEWER_B]
+    assert [row["user_id"] for row in roster] == [20, 21]
+    # Durable state, not an echo of this response: the proposal reports it too.
+    assert detail.json()["data"]["reviewers"] == roster
+
+
+async def test_the_proposal_author_can_never_be_assigned(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _Store(workflow_definition())
+    app = _app(store, monkeypatch)
+    manager = _principal(user_id=99, role="admin", member_id=ADMIN_MEMBER)
+    proposal_id = await _open_proposal(app)
+
+    # The author's own membership, and a second membership of the same user: the
+    # independence rule follows the user, not the id they were named by.
+    for creator_membership in (CREATOR_MEMBER, CREATOR_OTHER_MEMBER):
+        refused = await _request(
+            app,
+            "POST",
+            f"/improvement-proposals/{proposal_id}/reviewers",
+            principal=manager,
+            json_body={"reviewer_membership_ids": [REVIEWER_A, creator_membership]},
+        )
+        assert refused.status_code == 403, refused.text
+        assert refused.json()["error"]["code"] == "FORBIDDEN_NOT_APPROVER"
+
+    # A refused assignment staffs nobody.
+    detail = await _request(app, "GET", f"/improvement-proposals/{proposal_id}", principal=manager)
+    assert "reviewers" not in detail.json()["data"]
+
+
+async def test_foreign_and_inactive_reviewers_are_refused_alike(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _Store(workflow_definition())
+    app = _app(store, monkeypatch)
+    manager = _principal(user_id=99, role="admin", member_id=ADMIN_MEMBER)
+    proposal_id = await _open_proposal(app)
+    never_issued = str(uuid.uuid4())
+
+    inactive = await _request(
+        app,
+        "POST",
+        f"/improvement-proposals/{proposal_id}/reviewers",
+        principal=manager,
+        json_body={"reviewer_membership_ids": [REVIEWER_A, SUSPENDED_MEMBER]},
+    )
+    unknown = await _request(
+        app,
+        "POST",
+        f"/improvement-proposals/{proposal_id}/reviewers",
+        principal=manager,
+        json_body={"reviewer_membership_ids": [never_issued]},
+    )
+
+    assert inactive.status_code == unknown.status_code == 400
+    assert (
+        inactive.json()["error"]["code"]
+        == unknown.json()["error"]["code"]
+        == "WORKBUDDY_INVALID_ARGUMENT"
+    )
+    # The refusal names only the ids the caller sent, and reads the same for a
+    # foreign member and for one that was never issued.
+    assert inactive.json()["error"]["details"]["reviewer_membership_ids"] == [SUSPENDED_MEMBER]
+    assert unknown.json()["error"]["details"]["reviewer_membership_ids"] == [never_issued]
+    assert unknown.json()["error"]["message"] == inactive.json()["error"]["message"]
+
+    detail = await _request(app, "GET", f"/improvement-proposals/{proposal_id}", principal=manager)
+    assert "reviewers" not in detail.json()["data"]
+
+
+async def test_assigning_reviewers_requires_the_workflow_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _Store(workflow_definition())
+    app = _app(store, monkeypatch)
+    proposal_id = await _open_proposal(app)
+
+    # The real tenant-admin guard, with a plain member behind it.
+    app.dependency_overrides.pop(api._require_admin, None)
+    app.dependency_overrides[workbuddy_principal] = lambda: _principal()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            f"/api/v1/improvement-proposals/{proposal_id}/reviewers",
+            json={"reviewer_membership_ids": [REVIEWER_A]},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "FORBIDDEN"
+    assert store.reviewers == {}

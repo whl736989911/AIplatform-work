@@ -343,14 +343,18 @@
     "paneSettings": "Settings",
     "paneRecords": "Tasks",
     "enterpriseGovernance": "Enterprise",
-    "workbuddy": "WorkBuddy",
     "workbuddyKnowledge": "Tenant Knowledge",
     "workbuddyWorkflows": "Workflows",
     "workbuddyApprovals": "Approvals",
     "workbuddyProposals": "Improvement Proposals",
     "workbuddyMarketplace": "Marketplace",
     "workbuddyCompliance": "Compliance",
-    "workbuddyLifecycle": "Data Lifecycle"
+    "workbuddyLifecycle": "Data Lifecycle",
+    "workbuddyDaily": "Daily work",
+    "workbuddyGovernance": "Governance & settings",
+    "workbuddyHome": "Dashboard",
+    "workbuddyInbox": "Inbox",
+    "workbuddyRuns": "Runs"
   },
   "skillPackages": {
     "title": "Skill Packages",
@@ -6116,7 +6120,8 @@
         "versions": "Versions",
         "executions": "Executions",
         "triggers": "Triggers",
-        "jobs": "Jobs"
+        "jobs": "Jobs",
+        "proposals": "Improvements"
       },
       "state": {
         "unavailableTitle": "Not available yet",
@@ -6478,6 +6483,10 @@
           "failed": "Failed",
           "cancelled": "Cancelled"
         }
+      },
+      "proposals": {
+        "title": "Improvement proposals for this workflow",
+        "empty": "No improvement proposals for this workflow yet."
       }
     },
     "approvals": {
@@ -6742,8 +6751,6 @@
       "reviewers": {
         "button": "Assign reviewers",
         "title": "Assign independent reviewers",
-        "pendingRoute": "This route is frozen at stage B1 and not implemented yet",
-        "pendingRouteHint": "The manifest pins POST /improvement-proposals/{id}/reviewers (assign an active same-tenant member who is not the creator); no branch implements it yet, so the server's answer is shown verbatim and nothing is assumed to have been saved.",
         "field": "Reviewer membership ids",
         "fieldHint": "Membership UUIDs of this tenant; the creator and inactive members are refused server-side.",
         "placeholder": "Type or paste membership UUIDs",
@@ -6921,12 +6928,12 @@
       },
       "installations": {
         "title": "Installations",
-        "desc": "Read one installation — the frozen manifest has no list route — with its consent evidence and upgrade history; an explicit upgrade needs its own consent for the target version.",
+        "desc": "This tenant's install ledger — a member reads what they started, a tenant admin the whole tenant — plus each installation's consent evidence and upgrade history; an explicit upgrade needs its own consent for the target version.",
         "open": "Open",
         "openPlaceholder": "Installation id (UUID)",
         "sessionIds": "This session:",
         "empty": "No installation open",
-        "emptyHint": "Enter an installation id, or install a template — the resulting installation id is then listed above.",
+        "emptyHint": "Pick an installation from the ledger above, or enter an installation id.",
         "loadFailed": "Failed to load the installation",
         "detailTitle": "Installation detail",
         "installationId": "Installation id",
@@ -6958,7 +6965,14 @@
           "to": "To version",
           "status": "Status",
           "error": "Error"
-        }
+        },
+        "ledgerTitle": "Installations",
+        "ledgerLoadFailed": "Failed to load the installation list",
+        "ledgerEmpty": "No installation recorded",
+        "ledgerEmptyHint": "Install a template, and its installation appears here.",
+        "ledgerCapped": "Only the most recent page is listed.",
+        "status": "Status",
+        "updatedAt": "Updated at"
       },
       "upgrade": {
         "button": "Upgrade",
@@ -7273,6 +7287,43 @@
         "stepPurge": "Purge",
         "stepPending": "Pending"
       }
+    },
+    "shared": {
+      "notMergedTitle": "This capability is not in this deployment yet",
+      "notMergedHint": "The backend route is not merged yet, so this page shows no fabricated data. It appears as soon as the slice lands.",
+      "loadFailed": "Failed to load",
+      "empty": "Nothing here yet",
+      "open": "Open"
+    },
+    "home": {
+      "title": "Dashboard",
+      "subtitle": "What needs you, what you use, and what just ran — on one screen.",
+      "pendingTitle": "Waiting on me",
+      "pendingEmpty": "No approvals are waiting on you.",
+      "workflowsTitle": "My workflows",
+      "runsTitle": "Recent runs",
+      "openInbox": "Open inbox",
+      "openWorkflows": "Open workflows",
+      "openRuns": "Open runs"
+    },
+    "inbox": {
+      "title": "Inbox",
+      "subtitle": "Approvals and reviews that need you, in one place.",
+      "approvalsTitle": "Waiting on my approval",
+      "proposalsTitle": "Proposals awaiting my review",
+      "proposalsEmpty": "No proposals are waiting for your review.",
+      "proposalsScope": "Scope: every proposal in the under-review state across this tenant. The proposals route has no reviewer filter yet, so this is not limited to proposals assigned to you.",
+      "proposalsEmptyHint": "Under-review proposals appear here as soon as one is opened and still needs a reviewer."
+    },
+    "runs": {
+      "title": "Runs",
+      "subtitle": "Executions across workflows; open one to inspect its steps.",
+      "empty": "No executions yet.",
+      "columnWorkflow": "Workflow",
+      "columnStatus": "Status",
+      "columnTrigger": "Trigger",
+      "columnStarted": "Started",
+      "columnFinished": "Finished"
     }
   }
 }

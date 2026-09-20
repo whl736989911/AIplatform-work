@@ -425,6 +425,14 @@
     },
     {
       "method": "GET",
+      "path": "/marketplace/installations",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "本租户安装台账，200",
+      "authorization": "安装发起者/工作流管理者；租户取自登录主体"
+    },
+    {
+      "method": "GET",
       "path": "/marketplace/installations/{id}",
       "stage": "source",
       "success_status": 200,
@@ -848,6 +856,14 @@
       "authorization": "已认证用户提交密码；凭证绑定 tenant/user/purpose"
     },
     {
+      "method": "GET",
+      "path": "/exports/{id}/manifest",
+      "stage": "D",
+      "success_status": 200,
+      "summary": "读取冻结的导出清单，200",
+      "authorization": "原申请 admin 且仍有权限；no-store"
+    },
+    {
       "method": "POST",
       "path": "/exports/{id}/download-challenge",
       "stage": "D",
@@ -858,7 +874,7 @@
   ],
   "counts": {
     "source": 62,
-    "supplemental": 44,
-    "total": 106
+    "supplemental": 46,
+    "total": 108
   }
 }

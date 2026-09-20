@@ -1,7 +1,10 @@
 import type { ReactNode } from "react";
 import {
+  Inbox,
+  LayoutDashboard,
   Monitor,
   MessageSquareText,
+  PlayCircle,
   Timer,
   SlidersHorizontal,
   Waypoints,
@@ -71,6 +74,9 @@ export const SIDEBAR_GROUPED_NAV_KEYS = [
   "admin-security",
   "admin-advanced",
   "agent-config",
+  "workbuddy-home",
+  "workbuddy-inbox",
+  "workbuddy-runs",
   "workbuddy-knowledge",
   "workbuddy-workflows",
   "workbuddy-approvals",
@@ -133,12 +139,23 @@ export function buildNavSections(
   // the server decides what each tenant role may read or change, and the pages
   // render the server's answer (including "not available yet" while a backend
   // slice is still unmerged) instead of guessing locally.
-  const workbuddyItems: NavItem[] = [
+  //
+  // The console is employee-first: the four entries a member touches every day
+  // come first, the governance surfaces follow in their own group.  Both groups
+  // stay visible to every member on purpose — hiding governance behind a
+  // client-side role guess would contradict the rule above.
+  const dailyItems: NavItem[] = [
     {
-      key: "workbuddy-knowledge",
-      path: "/workbuddy/knowledge",
-      icon: <BookOpen size={iconSize} strokeWidth={iconStroke} />,
-      labelKey: "nav.workbuddyKnowledge",
+      key: "workbuddy-home",
+      path: "/workbuddy",
+      icon: <LayoutDashboard size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyHome",
+    },
+    {
+      key: "workbuddy-inbox",
+      path: "/workbuddy/inbox",
+      icon: <Inbox size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyInbox",
     },
     {
       key: "workbuddy-workflows",
@@ -147,16 +164,32 @@ export function buildNavSections(
       labelKey: "nav.workbuddyWorkflows",
     },
     {
-      key: "workbuddy-approvals",
-      path: "/workbuddy/approvals",
-      icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} />,
-      labelKey: "nav.workbuddyApprovals",
+      key: "workbuddy-runs",
+      path: "/workbuddy/runs",
+      icon: <PlayCircle size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyRuns",
+    },
+  ];
+  sections.push({ groupKey: "nav.workbuddyDaily", items: dailyItems });
+
+  const governanceItems: NavItem[] = [
+    {
+      key: "workbuddy-knowledge",
+      path: "/workbuddy/knowledge",
+      icon: <BookOpen size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyKnowledge",
     },
     {
       key: "workbuddy-proposals",
       path: "/workbuddy/proposals",
       icon: <Lightbulb size={iconSize} strokeWidth={iconStroke} />,
       labelKey: "nav.workbuddyProposals",
+    },
+    {
+      key: "workbuddy-approvals",
+      path: "/workbuddy/approvals",
+      icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyApprovals",
     },
     {
       key: "workbuddy-marketplace",
@@ -177,7 +210,7 @@ export function buildNavSections(
       labelKey: "nav.workbuddyLifecycle",
     },
   ];
-  sections.push({ groupKey: "nav.workbuddy", items: workbuddyItems });
+  sections.push({ groupKey: "nav.workbuddyGovernance", items: governanceItems });
 
   const settingsItems: NavItem[] = [
     {

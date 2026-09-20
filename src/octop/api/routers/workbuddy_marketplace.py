@@ -354,6 +354,33 @@ async def install_template(
     )
 
 
+@router.get("/marketplace/installations", summary="List this tenant's installations")
+async def list_installations(
+    request: Request,
+    principal: _Principal,
+    server: Any = Depends(get_server),
+    limit: int | None = None,
+    offset: int | None = None,
+) -> dict[str, Any]:
+    """The caller's install ledger — never a tenant named by the request.
+
+    The same visibility rule as the detail route decides the rows: a tenant admin
+    reads the tenant's ledger, a member reads the installations they started.
+    """
+    service = _service(server)
+    try:
+        rows = service.list_installations(
+            tenant_id=principal.tenant_id,
+            member_id=principal.member_id,
+            is_admin=principal.is_admin,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as exc:  # noqa: BLE001 - a refusal must be coded, never a 500
+        raise _refusal(exc) from exc
+    return workbuddy_envelope(request, rows)
+
+
 @router.get(
     "/marketplace/installations/{installation_id}",
     summary="Installation state for this tenant",

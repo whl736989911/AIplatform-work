@@ -4,6 +4,7 @@ import {
   buildNavSections,
   isGroupedNavKey,
 } from "./sidebarNav";
+import { pathToKey, resolveSelectedKey } from "../routes";
 import type { OctopUser } from "../api/modules/auth";
 
 const adminUser = {
@@ -40,6 +41,53 @@ describe("sidebarNav", () => {
     }
     for (const key of flatKeys) {
       expect(isGroupedNavKey(key)).toBe(false);
+    }
+  });
+
+  // The console is employee-first: the four entries a member touches every day
+  // come first and stay together, and no console surface silently disappears
+  // into another group.
+  it("keeps the four daily console entries first and complete", () => {
+    const sections = buildNavSections(adminUser, { mobileEnabled: true });
+    const dailyIndex = sections.findIndex(
+      (s) => s.groupKey === "nav.workbuddyDaily",
+    );
+    const governanceIndex = sections.findIndex(
+      (s) => s.groupKey === "nav.workbuddyGovernance",
+    );
+    expect(dailyIndex).toBeGreaterThanOrEqual(0);
+    expect(governanceIndex).toBeGreaterThan(dailyIndex);
+
+    expect(sections[dailyIndex].items.map((i) => i.key)).toEqual([
+      "workbuddy-home",
+      "workbuddy-inbox",
+      "workbuddy-workflows",
+      "workbuddy-runs",
+    ]);
+
+    const governanceKeys: Record<string, true> = Object.fromEntries(
+      sections[governanceIndex].items.map((i) => [i.key, true as const]),
+    );
+    for (const key of [
+      "workbuddy-knowledge",
+      "workbuddy-proposals",
+      "workbuddy-approvals",
+      "workbuddy-marketplace",
+      "workbuddy-compliance",
+      "workbuddy-lifecycle",
+    ]) {
+      expect(governanceKeys[key]).toBe(true);
+    }
+  });
+
+  // A nav entry whose path is not in `pathToKey` renders but never highlights,
+  // which reads as "the sidebar is broken" rather than "this page is unmapped".
+  it("maps every nav entry to the key it highlights", () => {
+    for (const section of buildNavSections(adminUser, { mobileEnabled: true })) {
+      for (const item of section.items) {
+        expect(pathToKey[item.path]).toBe(item.key);
+        expect(resolveSelectedKey(item.path)).toBe(item.key);
+      }
     }
   });
 });

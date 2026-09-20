@@ -13,7 +13,8 @@ Guarantees this module keeps:
 
 * redeem tokens are stored as sha256 only and consumed by a single conditional
   ``UPDATE ... WHERE consumed_at IS NULL AND revoked_at IS NULL AND expires_at > now``
-  so exactly one caller can win;
+  so exactly one caller can win; re-authentication credentials follow the same
+  rule (sha256 only, five-minute ceiling, consumed once);
 * deletion request stage changes are compare-and-swap on ``version``;
 * tenant row deletion is driven by an explicit, ordered table list, counts what
   it removed, and never touches the ledger, tombstones or other evidence tables;
@@ -411,6 +412,68 @@ class WorkBuddyLifecycleRepo:
              WHERE tenant_id = ? AND export_job_id = ? AND status = 'ready'
             """,
             (int(redeemed_at), redeemed_by, int(redeemed_at), str(tenant_id), str(export_job_id)),
+        )
+        return int(cursor.rowcount) == 1
+
+    # ── re-authentication credentials ───────────────────────────────────
+
+    def insert_reauth_credential(
+        self,
+        conn: Any,
+        *,
+        tenant_id: str,
+        user_id: int,
+        purpose: str,
+        credential_sha256: str,
+        issued_at: int,
+        expires_at: int,
+    ) -> dict[str, Any]:
+        row = conn.execute(
+            """
+            INSERT INTO workbuddy_reauth_credentials
+              (tenant_id, user_id, purpose, credential_sha256, issued_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            RETURNING reauth_credential_id, expires_at
+            """,
+            (
+                str(tenant_id),
+                int(user_id),
+                str(purpose),
+                credential_sha256,
+                int(issued_at),
+                int(expires_at),
+            ),
+        ).fetchone()
+        row = _row_dict(row)
+        if row is None:
+            raise RuntimeError("re-authentication credential insert returned no row")
+        return row
+
+    def get_reauth_credential(
+        self, conn: Any, *, tenant_id: str, credential_sha256: str
+    ) -> dict[str, Any] | None:
+        return _row_dict(
+            conn.execute(
+                """
+                SELECT * FROM workbuddy_reauth_credentials
+                WHERE tenant_id = ? AND credential_sha256 = ?
+                """,
+                (str(tenant_id), credential_sha256),
+            ).fetchone()
+        )
+
+    def consume_reauth_credential(
+        self, conn: Any, *, tenant_id: str, credential_sha256: str, consumed_at: int
+    ) -> bool:
+        """Single conditional UPDATE: exactly one of N racing callers wins."""
+        cursor = conn.execute(
+            """
+            UPDATE workbuddy_reauth_credentials
+               SET consumed_at = ?
+             WHERE tenant_id = ? AND credential_sha256 = ?
+               AND consumed_at IS NULL AND expires_at > ?
+            """,
+            (int(consumed_at), str(tenant_id), credential_sha256, int(consumed_at)),
         )
         return int(cursor.rowcount) == 1
 
