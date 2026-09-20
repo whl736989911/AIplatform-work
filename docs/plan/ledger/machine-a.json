@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-20T14:30:00Z",
+  "updated": "2026-09-20T14:45:00Z",
   "batches": {
     "1": {
       "state": "done",
@@ -51,7 +51,8 @@
         "5f7ee95c"
       ],
       "evidence": "A-07：schema 三个 allOf 分支 + 三个新诊断码 + 入口/可达性规则（多输入根允许、单根定义逐字等价）+ 运行时三类节点执行（knowledge 走可注入检索端口、缺端口 fail-closed）+ 元数据自动带上新类型；A-06：四步向导（字段全部由 metadata 驱动、实时校验按 path/node_id 归页并阻断下一步、保存走 建草稿→存版本→发布、发布后可试运行）。验证：后端静态全绿（ruff/format 1106/mypy 544）；A-07 专项 54 passed（编译器 8 + 运行时 5 + 既有兼容）；前端 lint 0 error / tsc / vitest 178 文件 938 用例 / build 全通过（含向导 3 项）；本地化 parity 通过",
-      "notes": "本批次已 rebase 到含「A 线批次 2 + B 线批次 2」的 main。未包含项：knowledge 检索端口未接线（部署方接线，未接线即 fail-closed）；向导按线性步骤链生成边；试运行不在向导内展示逐节点结果；三类新节点暂无专门图标。"
+      "notes": "本批次已 rebase 到含「A 线批次 2 + B 线批次 2」的 main。未包含项：knowledge 检索端口未接线（部署方接线，未接线即 fail-closed）；向导按线性步骤链生成边；试运行不在向导内展示逐节点结果；三类新节点暂无专门图标。",
+      "merge": "已合入 main（PR #35，squash，2026-09-20T06:10:12Z）；合并时删除了基分支，导致以它为基的 PR #37 被 GitHub 自动关闭"
     },
     "4": {
       "state": "done",
@@ -78,7 +79,8 @@
         "A-18"
       ],
       "tasks_partial": {},
-      "tasks_pending": []
+      "tasks_pending": [],
+      "merge": "待处理：原 PR #37 因基分支（批次 3）被删除而自动关闭且无法重开（其基分支已不存在），需在批次 4 的分支 rebase 到 squash 后的新 main 之后，重新开一个以 main 为基的 PR。本机 git 到 github.com:443 的连接持续中断（gh 的 API 正常），故 rebase 所需的新 main 尚未取得。"
     },
     "5": {
       "state": "done",
@@ -99,7 +101,8 @@
         "cb298055 并入批次 4（逐级同步 main 的文档更正）"
       ],
       "evidence": "后端：ruff/format（1104 文件）/mypy（549 文件）全绿；全量 tests/unit + 业务冒烟 3228 passed / 101 skipped，另有 1 个 teardown ERROR（RBAC 探针角色因 octop_test_gate 库残留对象无法 drop，清库重建后该文件 8 passed，确认为遗留状态而非本批次回归）。新增单元：attribution 5 + improvement 8 + authoring 17（含索引位移、依赖随步骤替换、产出键保持、两入口被拒）。端到端（真实 PG）：运行时文件 53 passed（含 A-12 的 4 条）、提案文件 16 passed（含 A-14/A-15 的 5 条）、工作流文件含 A-15 的 3 条。前端：tsc -b exit 0、lint 0 error（67 条既有 hooks 告警）、vitest 961 passed / 963（两条套件级超时 ExecutionDetailDrawer、InputInbox 隔离跑分别 4/4、5/5 通过，整个 WorkBuddy/Workflows 目录 6 文件 18 例全过，与批次 1 记录的既有超时条件同款）；本地化 parity 中英键完全一致。清单：125 条，本批次 4 条新路由逐条对齐，且 /workflow-authoring 已纳入 test_router_covers_every_manifest_route 比对。",
-      "notes": "① 结构修正：A-12…A-15 的提交起初落在批次 4 的分支上，已拆到独立分支 feat/orchestration-batch5-corrections-authoring，批次 4 分支收回为只含批次 4（--force-with-lease），维持按批次合入。② 失误记录：解批次 4 账本冲突时解析脚本报错但命令用 ; 串联，导致带冲突标记的账本被提交推送（20456fac），随后 1a60eab2 修正；此后链式命令一律用 &&。③ 集成：main 领先批次 3 的只有一个文档更正提交，已逐级并入（batch3←main、batch4←batch3、batch5←batch4），三次合并只动 docs/plan/，代码树未变，各批次既有门禁结论继续有效。④ 未接线项：作者模型（workbuddy_authoring_source）与分析器模型（workbuddy_improvement_source）都是可注入端口，部署未接线时 fail-closed（503），故描述→草稿的成功路径由注入桩件在端到端覆盖，未做真实模型的人工冒烟。⑤ 归因读取为 admin-only 的保守默认（它是分析器的输入，分析器以管理员身份运行），未发明新的可见性规则。"
+      "notes": "① 结构修正：A-12…A-15 的提交起初落在批次 4 的分支上，已拆到独立分支 feat/orchestration-batch5-corrections-authoring，批次 4 分支收回为只含批次 4（--force-with-lease），维持按批次合入。② 失误记录：解批次 4 账本冲突时解析脚本报错但命令用 ; 串联，导致带冲突标记的账本被提交推送（20456fac），随后 1a60eab2 修正；此后链式命令一律用 &&。③ 集成：main 领先批次 3 的只有一个文档更正提交，已逐级并入（batch3←main、batch4←batch3、batch5←batch4），三次合并只动 docs/plan/，代码树未变，各批次既有门禁结论继续有效。④ 未接线项：作者模型（workbuddy_authoring_source）与分析器模型（workbuddy_improvement_source）都是可注入端口，部署未接线时 fail-closed（503），故描述→草稿的成功路径由注入桩件在端到端覆盖，未做真实模型的人工冒烟。⑤ 归因读取为 admin-only 的保守默认（它是分析器的输入，分析器以管理员身份运行），未发明新的可见性规则。",
+      "merge": "待处理：分支已含 A-12…A-15 全部提交并与批次 4 合并（cb298055），但因 git 传输中断尚未推送成功，PR 未建；待网络恢复后 rebase 到批次 4 的新尖端并开 PR（基为 main）。"
     },
     "6": {
       "state": "pending",
