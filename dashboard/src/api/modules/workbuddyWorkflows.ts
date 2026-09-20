@@ -326,6 +326,51 @@ export function parseWorkflowVersionDiff(raw: unknown): WorkflowVersionDiff {
   };
 }
 
+export interface WorkflowAuthoringRequest {
+  /** The description a person wrote. The model never receives a definition. */
+  request: string;
+  name?: string | null;
+  description?: string | null;
+}
+
+/** One step as the author described it: what it is, and what it is for. */
+export interface AuthoredStep {
+  id: string;
+  kind: string;
+  purpose: string;
+  uses: string[];
+}
+
+/** Why a generated draft looks the way it does, and how long it took to compile. */
+export interface WorkflowAuthoringExplanation {
+  rounds: number;
+  steps: AuthoredStep[];
+}
+
+/** A generated draft, plus the author's own explanation of the steps in it. */
+export interface AuthoredWorkflow extends WorkflowWithVersion {
+  authoring: WorkflowAuthoringExplanation;
+}
+
+export function parseWorkflowAuthoringExplanation(
+  raw: unknown,
+): WorkflowAuthoringExplanation {
+  const record = (raw ?? {}) as Record<string, unknown>;
+  const steps = Array.isArray(record.steps) ? record.steps : [];
+  return {
+    rounds: typeof record.rounds === "number" ? record.rounds : 0,
+    steps: steps.map((entry) => {
+      const step = (entry ?? {}) as Record<string, unknown>;
+      return {
+        id: String(step.id ?? ""),
+        kind: String(step.kind ?? ""),
+        purpose: String(step.purpose ?? ""),
+        uses: Array.isArray(step.uses) ? step.uses.map((used) => String(used)) : [],
+      };
+    }),
+  };
+}
+
 export interface WorkflowCreateRequest {
   name: string;
   description?: string | null;
@@ -616,6 +661,15 @@ export const workbuddyWorkflowsApi = {
     unwrap<WorkflowDetail>(`${BASE}/workflows/${encodeURIComponent(id)}`),
   createWorkflow: (body: WorkflowCreateRequest) =>
     unwrap<WorkflowWithVersion>(`${BASE}/workflows`, jsonInit("POST", body)),
+
+  /**
+   * Describe a workflow and get a draft back. The server runs the authoring loop
+   * (restricted document → lowering → compiler, at most two rounds) and returns
+   * the explanation; a description that never compiles comes back as an error
+   * whose diagnostics say what the compiler still objected to.
+   */
+  authorWorkflowDraft: (body: WorkflowAuthoringRequest) =>
+    unwrap<AuthoredWorkflow>(`${BASE}/workflow-authoring`, jsonInit("POST", body)),
   saveWorkflowVersion: (id: string, body: WorkflowSaveRequest, etag: string) =>
     unwrap<WorkflowWithVersion>(
       `${BASE}/workflows/${encodeURIComponent(id)}`,

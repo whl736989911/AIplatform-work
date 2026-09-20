@@ -45,7 +45,21 @@ import styles from "./index.module.less";
 const { Text } = Typography;
 
 /** The step types a member picks from, in the order the wizard explains them. */
-const STEP_TYPES = ["input", "knowledge", "llm", "tool", "transform", "condition", "approval", "output"];
+/**
+ * Pick order for the step type list. The *set* of types comes from the metadata
+ * (which is derived from the schema), so a type the schema declares can never be
+ * missing from the picker; this array only decides the order they are shown in.
+ */
+const STEP_TYPE_ORDER = [
+  "input",
+  "knowledge",
+  "llm",
+  "tool",
+  "transform",
+  "condition",
+  "approval",
+  "output",
+];
 
 export interface WizardStep {
   /** Stable node id, also the default output key. */
@@ -181,6 +195,15 @@ export default function CreateWizard({ open, onClose, onCreated }: Props) {
   // Stable identity: `addInput` depends on it, and a fresh array every render
   // would rebuild that callback for no reason.
   const inputTypes = useMemo(() => metadata?.inputs.types ?? ["string"], [metadata]);
+  const stepTypes = useMemo(() => {
+    if (metadata === null) return STEP_TYPE_ORDER;
+    const declared = metadata.node_types.map((entry) => entry.type);
+    // Known types in the curated order, then anything the schema added since.
+    return [
+      ...STEP_TYPE_ORDER.filter((type) => declared.includes(type)),
+      ...declared.filter((type) => !STEP_TYPE_ORDER.includes(type)),
+    ];
+  }, [metadata]);
 
   const definition = useMemo(
     () => ({
@@ -512,7 +535,7 @@ export default function CreateWizard({ open, onClose, onCreated }: Props) {
                       size="small"
                       value={step.type}
                       onChange={(value) => updateStep(index, { type: value, config: {} })}
-                      options={STEP_TYPES.filter((type) =>
+                      options={stepTypes.filter((type) =>
                         metadata === null ? true : metadata.node_types.some((entry) => entry.type === type),
                       ).map((type) => ({
                         value: type,
@@ -560,7 +583,7 @@ export default function CreateWizard({ open, onClose, onCreated }: Props) {
               );
             })}
             <Space wrap>
-              {STEP_TYPES.filter((type) => type !== "input" && type !== "output").map((type) => (
+              {stepTypes.filter((type) => type !== "input" && type !== "output").map((type) => (
                 <Button key={type} size="small" icon={<Plus size={14} />} onClick={() => addStep(type)}>
                   {t(`workbuddy.workflows.wizard.type.${type}`)}
                 </Button>
