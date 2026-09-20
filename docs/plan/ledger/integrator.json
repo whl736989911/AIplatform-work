@@ -1,7 +1,21 @@
 {
   "integrator": "machine-A",
-  "next_batch": 1,
-  "verified": {},
+  "next_batch": 2,
+  "verified": {
+    "1": {
+      "by": "machine-A",
+      "at": "2026-09-20T01:53:00Z",
+      "notes": "两台机器的批次 1 都已并入 main：A 线 PR #29（A-01 前端 IA、A-19 分配审核人、A-20 再认证/下载挑战、A-21 市场台账），B 线 PR #30（B-01 权限骨架、B-08 迁移对账脚本、B-09 文本-only 通道）。集成门禁按 CI 同口径串行执行：静态 ruff check + ruff format 1102 文件 + mypy 544 文件全绿；后端 -m \"not live\" 3585 passed / 209 skipped / 0 failed；PG+redis（专用库 + Redis）96 passed / 1 skipped / 0 failed；前端 lint 0 error + tsc -b + vitest 173 文件 923 用例 + build 全通过；迁移三态（A 031·033 + B 050·051 全链）：全新 PG→v51（A/B 对象齐备、权限两表 RLS enabled+forced）、既有库 v33→v51（计数与既有列集合不变）、全新 SQLite→v51 无报错。边界核对：B 线改动完全在其所有权内（workbuddy_knowledge.*、新 rbac/**、scripts/migrate_kb.py、迁移 050/051、只写 machine-b.json），未触碰 A 线文件。",
+      "fixes": [
+        "集成用例夹具以 list_members()[0] 取 owner（该查询无 ORDER BY，CI 堆序不同）→ 改按 user_id 确定性定位",
+        "名册“当前状态”靠审计流最新事件重建，而 created_at 秒级 + event_id 随机 → 迁移 033 把名册放回提案行（审计事件保留为历史），并派生出 A 线修复 PR #32",
+        "033 的 PG 迁移文件漏写 UPDATE _schema_version（水位停在 31，被后续 050/051 掩盖）→ 已补；三态复跑全通过"
+      ],
+      "unverified": [
+        "B-08 的 scripts/migrate_kb.py 只读对账未在真实个人版控制库上实测（本机无该库）；其单测通过且代码只读、不写入任何一侧"
+      ]
+    }
+  },
   "blocked": [
     {
       "id": "policy-compliance",
