@@ -55,6 +55,7 @@ from octop.infra.db.repos.workbuddy_runtime import (
 )
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.workbuddy.attribution import attribute_corrections
 from octop.infra.workbuddy.cel_sandbox import CELSandboxError, evaluate_cel
 from octop.infra.workbuddy.log_redaction import register_secret
 from octop.infra.workbuddy.roles import TENANT_ADMIN_ROLES
@@ -4499,6 +4500,50 @@ class WorkBuddyRuntimeService:
         execution = self._load_execution(actor, execution_id)
         rows = self._feedback.list_execution_feedback_for_execution(ctx, execution.id)
         return [feedback_payload(row) for row in rows]
+
+    def attribute_workflow_corrections(
+        self,
+        actor: RuntimeActor,
+        workflow_id: str,
+        *,
+        since: float | None = None,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        """Corrections for one workflow, grouped by the version they were made against.
+
+        Scoping is per version on purpose: republishing changes the graph, and a
+        cluster attributed to the *current* structure would send someone to fix a
+        step that is no longer there. Each version's rows are attributed against the
+        definition that version actually ran, whose hash is verified on the way in.
+
+        A tenant-admin view, because this is the input to the analyser (A-14), which
+        runs as a platform job rather than on behalf of one member.
+        """
+        self._require_postgres()
+        if not actor.is_admin:
+            raise OctopError(ErrorCode.FORBIDDEN, "attribution is a tenant-admin view")
+        ctx = self._ctx(actor)
+        rows = self._feedback.list_execution_feedback(
+            ctx, workflow_id=workflow_id, since=since, limit=limit
+        )
+        by_version: dict[str, list[ExecutionFeedbackRow]] = {}
+        for row in rows:
+            by_version.setdefault(row.workflow_version_id, []).append(row)
+        versions: list[dict[str, Any]] = []
+        for version_id, members in by_version.items():
+            locked = self._versions.load_version(ctx, workflow_id, version_id)
+            compiled = compile_stored_definition(locked.definition, locked.definition_sha256)
+            clusters = attribute_corrections(compiled, members)
+            versions.append(
+                {
+                    "workflow_version_id": version_id,
+                    "definition_sha256": locked.definition_sha256,
+                    "feedback_rows": len(members),
+                    "clusters": [cluster.to_payload() for cluster in clusters],
+                }
+            )
+        versions.sort(key=lambda item: -item["feedback_rows"])
+        return {"workflow_id": workflow_id, "versions": versions}
 
     def _recorded_expired(self, ctx: WorkBuddyDbContext, execution: ExecutionRow) -> frozenset[str]:
         """Nodes of this execution whose question passed its deadline unanswered.

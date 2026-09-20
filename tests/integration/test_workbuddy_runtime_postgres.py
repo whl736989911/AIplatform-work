@@ -3104,3 +3104,76 @@ async def test_a_refused_event_backs_off_then_is_dead_lettered(
     assert dead["status"] == "failed", dead
     assert int(dead["attempts"]) == 2, dead
     assert "broker refused the publish" in str(dead["last_error"]), dead
+
+
+def attribution_definition() -> dict[str, Any]:
+    """greet → polish: a corrected value whose producer chain is worth naming."""
+    return {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {"who": {"type": "string", "required": True}},
+        "nodes": [
+            {
+                "id": "greet",
+                "type": "transform",
+                "name": "Greet",
+                "config": {"input": {"who": "{{ inputs.who }}"}, "expression": "input"},
+                "save_as": "greeting",
+            },
+            {
+                "id": "polish",
+                "type": "transform",
+                "name": "Polish",
+                "config": {"input": "{{ nodes.greet.output }}", "expression": "input"},
+                "save_as": "polished",
+            },
+        ],
+        "edges": [{"from": "greet", "to": "polish"}],
+    }
+
+
+async def test_a_correction_points_upstream_at_the_step_that_feeds_it(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T43: attribution names the step a correction belongs to and what produced it."""
+    workflow_id = _publish(pool, tenant, attribution_definition(), "Attribution runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "a13"}}
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        review = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        # Both save_as keys are run outputs; correct the one the second step made.
+        assert set(review.json()["data"]["produced"]) == {"greeting", "polished"}, review.text
+        corrected = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {"polished": {"value": "fixed"}}},
+        )
+        assert corrected.status_code == 200, corrected.text
+
+        attributed = await client.get(f"/workflows/{workflow_id}/attribution")
+        assert attributed.status_code == 200, attributed.text
+        versions = attributed.json()["data"]["versions"]
+        assert len(versions) == 1, versions
+        assert versions[0]["workflow_version_id"], versions
+        clusters = versions[0]["clusters"]
+        assert len(clusters) == 1, clusters
+        cluster = clusters[0]
+        assert cluster["node_id"] == "polish", cluster
+        assert cluster["output_key"] == "polished", cluster
+        assert cluster["kind"] == "correction" and cluster["direction"] == "upstream", cluster
+        assert cluster["corrections"] == 1 and cluster["executions"] == 1, cluster
+        # The only place a fix could go: the step that fed the corrected one.
+        assert cluster["scope_node_ids"] == ["greet"], cluster
+        assert cluster["scope_output_keys"] == ["greeting"], cluster
+        assert cluster["examples"][0]["after"] == {"value": "fixed"}, cluster
+
+    member = _principal(tenant, role="member", user_id=_seed_user(pool, "rt-a13-member"))
+    async with _client(app, member) as client:
+        refused = await client.get(f"/workflows/{workflow_id}/attribution")
+        assert refused.status_code == 403, refused.text

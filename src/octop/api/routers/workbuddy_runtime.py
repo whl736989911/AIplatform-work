@@ -430,6 +430,28 @@ async def list_output_reviews(
 
 
 @router.get(
+    "/workflows/{workflow_id}/attribution",
+    summary="Where a workflow's corrections point, by version",
+)
+async def workflow_attribution(
+    workflow_id: str,
+    request: Request,
+    principal: _AdminPrincipal,
+    server: Any = Depends(get_server),
+    since: float | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
+) -> dict[str, Any]:
+    """Correction clusters per version, with the upstream steps each points at."""
+    payload = _service(server).attribute_workflow_corrections(
+        _actor(principal),
+        _uuid(workflow_id, field="workflow"),
+        since=since,
+        limit=limit,
+    )
+    return workbuddy_envelope(request, payload)
+
+
+@router.get(
     "/executions/{execution_id}/feedback",
     summary="List what people changed or supplied for one execution",
 )

@@ -974,11 +974,19 @@
       "success_status": 200,
       "summary": "某次执行的纠正与补充事实记录，200",
       "authorization": "发起者或受控 admin（与运行本身同一判定，读不到即 404）"
+    },
+    {
+      "method": "GET",
+      "path": "/workflows/{workflow_id}/attribution",
+      "stage": "A5",
+      "success_status": 200,
+      "summary": "某工作流的纠正归因（按版本分组，含上游范围），200",
+      "authorization": "仅受控租户 admin（这是分析器 A-14 的输入，以平台作业身份运行）"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 59,
-    "total": 121
+    "supplemental": 60,
+    "total": 122
   }
 }
