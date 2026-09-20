@@ -1,7 +1,7 @@
 {
   "version": 1,
   "createdAt": "2026-09-19T22:27:35.941Z",
-  "updatedAt": "2026-09-20T00:12:06Z",
+  "updatedAt": "2026-09-20T03:17:01Z",
   "briefPath": ".omx/ultragoal/brief.md",
   "goalsPath": ".omx/ultragoal/goals.json",
   "ledgerPath": ".omx/ultragoal/ledger.jsonl",
@@ -32,10 +32,11 @@
       "id": "G003",
       "title": "批次 3：创建向导 + 节点集显式化（A-06、A-07）",
       "objective": "A-06 创建向导：输入/步骤/数据/输出四步 + 实时校验 + 试运行，非技术员工能建出可运行工作流；A-07 节点集扩展：input/knowledge/output 显式化，编译通过且旧定义兼容。证据：向导端到端建出一个可运行工作流（真实服务人工冒烟 + 试运行输出）；旧定义回归编译通过；状态写回 machine-a.json 批次 3。",
-      "status": "pending",
-      "attempt": 0,
+      "status": "complete",
+      "attempt": 1,
       "createdAt": "2026-09-19T22:27:35.941Z",
-      "updatedAt": "2026-09-19T22:27:53.974Z"
+      "updatedAt": "2026-09-20T03:17:01Z",
+      "completedAt": "2026-09-20T03:17:01Z"
     },
     {
       "id": "G004",

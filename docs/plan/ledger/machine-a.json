@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-20T00:12:06Z",
+  "updated": "2026-09-20T03:17:01Z",
   "batches": {
     "1": {
       "state": "done",
@@ -38,15 +38,20 @@
       "notes": "已 rebase 到批次 1 合并后的 main（force-with-lease 强推自己的功能分支）。未包含项：「重跑到此」（与批次 4 的 waiting_input/resume 一起设计）、定义编辑器动态表单（属 A-06）、非 LLM 节点 per-node token 记 null、版本比较不做语义影响面分析（属 A-13/A-14）。并行切片另修两个真实缺陷：对账对话框必 422、步骤/对账状态词表前后端不一致。"
     },
     "3": {
-      "state": "pending",
+      "state": "done",
       "tasks": [
         "A-06",
         "A-07"
       ],
-      "pr": null,
-      "commits": [],
-      "evidence": "",
-      "notes": ""
+      "pr": 35,
+      "commits": [
+        "ca05d80c",
+        "fbbdc264",
+        "0552c4b1",
+        "5f7ee95c"
+      ],
+      "evidence": "A-07：schema 三个 allOf 分支 + 三个新诊断码 + 入口/可达性规则（多输入根允许、单根定义逐字等价）+ 运行时三类节点执行（knowledge 走可注入检索端口、缺端口 fail-closed）+ 元数据自动带上新类型；A-06：四步向导（字段全部由 metadata 驱动、实时校验按 path/node_id 归页并阻断下一步、保存走 建草稿→存版本→发布、发布后可试运行）。验证：后端静态全绿（ruff/format 1106/mypy 544）；A-07 专项 54 passed（编译器 8 + 运行时 5 + 既有兼容）；前端 lint 0 error / tsc / vitest 178 文件 938 用例 / build 全通过（含向导 3 项）；本地化 parity 通过",
+      "notes": "本批次已 rebase 到含「A 线批次 2 + B 线批次 2」的 main。未包含项：knowledge 检索端口未接线（部署方接线，未接线即 fail-closed）；向导按线性步骤链生成边；试运行不在向导内展示逐节点结果；三类新节点暂无专门图标。"
     },
     "4": {
       "state": "pending",
