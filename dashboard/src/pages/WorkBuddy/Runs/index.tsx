@@ -7,12 +7,16 @@
  * detail drawer (steps, edge decisions, reconciliation evidence) instead of a
  * second, thinner rendering of the same execution.
  *
- * Nothing on this page edits an execution: the detail action is a read, and the
- * one write it offers — answering a question a run is parked on — goes through
- * the inbox's answer drawer and the execution's own answer route, which is the
- * run's only way forward. The workflow filter can arrive in the URL
+ * Nothing on this page edits an execution: the detail action is a read, the one
+ * write it offers for a live run — answering a question it is parked on — goes
+ * through the inbox's answer drawer and the execution's own answer route, which
+ * is the run's only way forward, and a settled run can be shown to reviewers
+ * through the inbox's review drawer, which records what a person said about the
+ * result without touching the run. The workflow filter can arrive in the URL
  * (`?workflow=<id>`, e.g. from a link on the dashboard) and the picker writes it
- * back, so a filtered view is shareable, visibly labelled and always clearable.
+ * back, so a filtered view is shareable, visibly labelled and always clearable;
+ * `?execution=<id>` opens one run's detail — including the run a review was
+ * re-run as — and is written back the same way.
  *
  * No data is fabricated: an unmerged slice (404/501) or a real failure renders
  * the shared informational / error state, and a workflow the name lookup does
@@ -23,7 +27,7 @@ import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Segmented, Select, Space, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { Eye, PenLine, RefreshCw } from "lucide-react";
+import { BadgeCheck, Eye, PenLine, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import PageShell from "../../../layouts/PageShell";
 import { ResizableTable } from "../../../components/ResizableTable";
@@ -31,6 +35,7 @@ import { useServerTimezone } from "../../../hooks/useServerTimezone";
 import { formatServerIsoDateTime } from "../../../utils/formatMessageTime";
 import {
   EXECUTION_STATUSES,
+  TERMINAL_EXECUTION_STATUSES,
   workbuddyRuntimeApi,
   type Execution,
   type ExecutionStatus,
@@ -49,16 +54,19 @@ import {
 } from "../Workflows/consoleState";
 import ExecutionDetailDrawer from "../Workflows/ExecutionDetailDrawer";
 import AnswerDrawer from "../Inbox/AnswerDrawer";
+import OutputReviewEntry from "./OutputReviewEntry";
 
 const { Text } = Typography;
 
 /** Chip colour per execution status, matching the Workflows executions tab. */
 function statusColor(status: ExecutionStatus): string {
-  if (status === "succeeded") return "green";
+  if (status === "success") return "green";
   if (status === "failed") return "red";
   if (status === "waiting_approval") return "gold";
   // A run parked on a question is waiting on a person, not on its own work.
   if (status === "waiting_input") return "cyan";
+  // Parked on an unknown external write, which is also a person's decision.
+  if (status === "waiting_reconciliation") return "orange";
   if (status === "partial") return "orange";
   return "default";
 }
@@ -69,18 +77,34 @@ export default function RunsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [scope, setScope] = useState<WorkBuddyScope>("self");
   const [status, setStatus] = useState<ExecutionStatus | "">("");
-  const [detailId, setDetailId] = useState<string | null>(null);
   const [answerExecutionId, setAnswerExecutionId] = useState<string | null>(
+    null,
+  );
+  const [reviewExecutionId, setReviewExecutionId] = useState<string | null>(
     null,
   );
 
   const workflowId = searchParams.get("workflow");
+  // The detail drawer is URL-addressed, because the one link that opens a run
+  // from outside this page — a review pointing at the run it re-ran — has to
+  // survive a reload like every other link on the console.
+  const detailId = searchParams.get("execution");
 
   const selectWorkflow = useCallback(
     (id: string | null) => {
       const next = new URLSearchParams(searchParams);
       if (id) next.set("workflow", id);
       else next.delete("workflow");
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const selectExecution = useCallback(
+    (id: string | null) => {
+      const next = new URLSearchParams(searchParams);
+      if (id) next.set("execution", id);
+      else next.delete("execution");
       setSearchParams(next, { replace: true });
     },
     [searchParams, setSearchParams],
@@ -168,7 +192,7 @@ export default function RunsPage() {
     {
       title: t("workbuddy.workflows.executions.column.actions"),
       key: "actions",
-      width: 200,
+      width: 280,
       fixed: "right",
       render: (_value, row) => (
         <Space size={4}>
@@ -176,7 +200,7 @@ export default function RunsPage() {
             type="link"
             size="small"
             icon={<Eye size={13} />}
-            onClick={() => setDetailId(row.id)}
+            onClick={() => selectExecution(row.id)}
           >
             {t("workbuddy.shared.open")}
           </Button>
@@ -191,6 +215,19 @@ export default function RunsPage() {
               onClick={() => setAnswerExecutionId(row.id)}
             >
               {t("workbuddy.runs.answer")}
+            </Button>
+          )}
+          {/* A settled run can be shown to reviewers. The entry reads whether a
+              review exists; it is never a way to hold, release or re-open the
+              run, and the copy on both branches says the run has settled. */}
+          {TERMINAL_EXECUTION_STATUSES.includes(row.status) && (
+            <Button
+              type="link"
+              size="small"
+              icon={<BadgeCheck size={13} />}
+              onClick={() => setReviewExecutionId(row.id)}
+            >
+              {t("workbuddy.runs.review")}
             </Button>
           )}
         </Space>
@@ -284,14 +321,20 @@ export default function RunsPage() {
           columns={columns}
           dataSource={executions.data}
           pagination={false}
-          scroll={{ x: 1080 }}
+          scroll={{ x: 1160 }}
           storageKey="workbuddy-runs"
         />
       )}
 
       <ExecutionDetailDrawer
         executionId={detailId}
-        onClose={() => setDetailId(null)}
+        onClose={() => selectExecution(null)}
+      />
+
+      <OutputReviewEntry
+        executionId={reviewExecutionId}
+        onClose={() => setReviewExecutionId(null)}
+        onChanged={() => void executions.reload()}
       />
 
       <AnswerDrawer

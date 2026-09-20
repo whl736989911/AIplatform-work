@@ -299,7 +299,7 @@ function ExecutionDetailBody({ executionId }: { executionId: string }) {
         >
           <Tag
             color={
-              data.status === "succeeded"
+              data.status === "success"
                 ? "green"
                 : data.status === "failed"
                 ? "red"
