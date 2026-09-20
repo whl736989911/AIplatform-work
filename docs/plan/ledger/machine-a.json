@@ -2,7 +2,11 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
+<<<<<<< HEAD
   "updated": "2026-09-20T04:39:17Z",
+=======
+  "updated": "2026-09-20T03:23:42Z",
+>>>>>>> feat/orchestration-batch3-nodes
   "batches": {
     "1": {
       "state": "done",
@@ -62,6 +66,7 @@
         "A-11",
         "A-18"
       ],
+<<<<<<< HEAD
       "pr": 37,
       "commits": [
         "717889a0 A-08 后端（ask 节点 + waiting_input + 输入请求表/端点 + 迁移 034 + 两处缺陷修复）",
@@ -79,6 +84,12 @@
       ],
       "tasks_partial": {},
       "tasks_pending": []
+=======
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": "（批次 4 任务集更正：补入漏排的 A-10 超时与升级、A-18 会话续期）"
+>>>>>>> feat/orchestration-batch3-nodes
     },
     "5": {
       "state": "pending",
