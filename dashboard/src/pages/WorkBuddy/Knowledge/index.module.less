@@ -76,6 +76,146 @@
   margin-bottom: 12px;
 }
 
+/* Documents: folder tree beside the current folder's table. */
+
+.documentsLayout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.folderPane {
+  flex: 0 0 220px;
+  min-width: 0;
+  max-height: 520px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--fn-border-primary);
+  border-radius: 8px;
+}
+
+.folderPaneHeader {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--fn-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+.folderNode {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-width: 0;
+}
+
+.folderNodeName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folderNodeCount {
+  font-size: 12px;
+  color: var(--fn-text-tertiary, rgba(0, 0, 0, 0.35));
+}
+
+.documentsBody {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.folderBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.pathBreadcrumb {
+  display: flex;
+  flex: 1 1 160px;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  font-family: var(--fn-font-mono, ui-monospace, monospace);
+}
+
+.pathBreadcrumbSegment {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.pathBreadcrumbSep {
+  padding: 0 2px;
+  color: var(--fn-text-tertiary);
+  user-select: none;
+}
+
+.pathBreadcrumbLink {
+  max-width: 160px;
+  padding: 2px 4px;
+  overflow: hidden;
+  font: inherit;
+  color: var(--fn-text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+
+  &:hover {
+    color: var(--fn-primary, #2563eb);
+    background: var(--fn-bg-hover);
+  }
+}
+
+.pathBreadcrumbCurrent {
+  max-width: 200px;
+  padding: 2px 4px;
+  overflow: hidden;
+  color: var(--fn-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.failureList {
+  margin: 0;
+  padding-left: 18px;
+
+  li {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+}
+
+.previewMeta {
+  margin-bottom: 12px;
+}
+
+/* Extracted text keeps its own line breaks; long words wrap instead of scrolling. */
+.previewText {
+  margin: 0;
+  font-family: var(--fn-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .hitList {
   display: flex;
   flex-direction: column;
@@ -120,5 +260,15 @@
 
   .searchQueryItem {
     min-width: 100%;
+  }
+
+  .documentsLayout {
+    flex-direction: column;
+  }
+
+  .folderPane {
+    flex: none;
+    width: 100%;
+    max-height: 260px;
   }
 }

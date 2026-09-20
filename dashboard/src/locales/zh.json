@@ -6184,7 +6184,13 @@
         "titleHint": "文档创建后即开始后台索引。",
         "createDocument": "创建文档",
         "created": "文档已进入索引队列",
-        "createFailed": "创建文档失败"
+        "createFailed": "创建文档失败",
+        "columnFolder": "位置",
+        "previewHint": "点击标题可预览抽取文本。",
+        "download": "下载文本",
+        "downloadFailed": "下载抽取文本失败",
+        "folderEmpty": "此文件夹暂无文档",
+        "folderEmptyHint": "「{{folder}}」下暂无文档，可在左侧文件夹树中选择其他文件夹。"
       },
       "acl": {
         "title": "访问授权",
@@ -6248,6 +6254,49 @@
         "generation": "生成版本",
         "document": "文档",
         "untitled": "未命名文档"
+      },
+      "folders": {
+        "title": "文件夹",
+        "pathNav": "文件夹路径",
+        "root": "根目录",
+        "loadFailed": "无法加载文件夹列表",
+        "notMergedTitle": "当前部署尚未提供文件夹接口",
+        "move": "移动",
+        "moveTitle": "移动「{{title}}」",
+        "moveCurrent": "当前位置",
+        "moveTarget": "目标文件夹",
+        "movePlaceholder": "例如：Ops/Runbooks（留空表示根目录）",
+        "moveHint": "多层级用 / 分隔；输入尚不存在的路径即新建该文件夹，文件夹随其中的文档存在。",
+        "moveSuccess": "文档已移动",
+        "moveFailed": "移动文档失败",
+        "issue": {
+          "absolute": "文件夹路径必须是相对路径，不能以 / 开头",
+          "trailing": "文件夹路径不能以 / 结尾",
+          "empty_segment": "文件夹路径不能包含空的层级",
+          "relative_segment": "文件夹路径不能包含 . 或 .. 层级",
+          "backslash": "文件夹路径不能包含反斜杠",
+          "stray_spaces": "文件夹每一层级的首尾不能有空格",
+          "too_long": "文件夹路径过长（最多 400 个字符）"
+        }
+      },
+      "preview": {
+        "title": "抽取文本预览",
+        "loadFailed": "无法加载抽取文本",
+        "chunkCount": "{{count}} 个分块",
+        "truncated": "预览已截断",
+        "truncatedHint": "仅显示前 {{limit}} 个字符；下载按钮保存的是完整抽取文本。",
+        "empty": "该文档暂无已索引文本，可能仍在索引中。"
+      },
+      "reindex": {
+        "document": "重建索引",
+        "documentQueued": "已为「{{title}}」重建索引",
+        "documentFailed": "重建索引失败",
+        "base": "整库重建索引",
+        "baseConfirm": "为「{{name}}」的全部文档重建索引？每篇文档都会发布新的索引版本，旧版本在新版本发布前仍可检索。",
+        "baseQueued": "已为 {{count}} 篇文档排队重建索引",
+        "basePartial": "已排队 {{queued}} 篇，{{failed}} 篇被拒绝",
+        "baseFailed": "整库重建索引失败",
+        "baseFailuresTitle": "{{count}} 篇文档未能重建索引"
       }
     },
     "workflows": {

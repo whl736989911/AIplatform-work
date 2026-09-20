@@ -11,7 +11,7 @@
  * raw embedding vector, so neither does any type here.
  */
 
-import { request } from "../request";
+import { request, requestBlob } from "../request";
 
 const BASE = "/v1";
 
@@ -205,6 +205,8 @@ export interface KnowledgeDocument {
   job_id: string;
   created_at: number;
   updated_at: number;
+  /** Folder the document sits in; ``""`` is the base root. */
+  folder_path: string;
 }
 
 export interface KnowledgeDocumentDeleted {
@@ -216,6 +218,77 @@ export interface KnowledgeDocumentDeleted {
 export interface KnowledgeDocumentList {
   items: KnowledgeDocument[];
   count: number;
+}
+
+// --- Folders, indexed text and reindexing (B-10) ---------------------------
+
+/**
+ * One folder of a base with its live document count. A folder exists exactly
+ * while it holds a document, so the client synthesises missing ancestors; the
+ * root is reported as ``""``.
+ */
+export interface KnowledgeFolder {
+  path: string;
+  document_count: number;
+}
+
+export interface KnowledgeFolderList {
+  kb_id: string;
+  folders: KnowledgeFolder[];
+}
+
+/** ``folder_path`` is the target folder; ``""`` moves the document to the root. */
+export interface KnowledgeFolderMove {
+  folder_path: string;
+}
+
+export interface KnowledgeDocumentMoved {
+  document_id: string;
+  kb_id: string;
+  folder_path: string;
+}
+
+/**
+ * The indexed text of one document — the same route serves the preview
+ * (``limit``) and the plain-text export (``download=true``).
+ */
+export interface KnowledgeDocumentText {
+  document_id: string;
+  kb_id: string;
+  title: string;
+  text: string;
+  /** True when ``limit`` cut the text short. */
+  truncated: boolean;
+  chunk_count: number;
+}
+
+/** 202: a fresh generation was scheduled for one document. */
+export interface KnowledgeDocumentReindexed {
+  document_id: string;
+  kb_id: string;
+  job_id: string;
+  reindexed: boolean;
+}
+
+/** One document a base-wide reindex refused, with the server's error code. */
+export interface KnowledgeReindexFailure {
+  document_id: string;
+  code: string;
+}
+
+/** 202: ``queued`` documents were scheduled, ``failed`` ones were refused. */
+export interface KnowledgeBaseReindexed {
+  kb_id: string;
+  queued: number;
+  failed: KnowledgeReindexFailure[];
+}
+
+/** Query for the document-text route: ``limit`` trims, ``download`` attaches. */
+function textQuery(limit: number | undefined, download: boolean): string {
+  const parts: string[] = [];
+  if (limit !== undefined) parts.push(`limit=${limit}`);
+  if (download) parts.push("download=true");
+  return parts.length === 0 ? "" : `?${parts.join("&")}`;
 }
 
 // --- Search ----------------------------------------------------------------
@@ -369,6 +442,57 @@ export const workbuddyKnowledgeApi = {
         kbId,
       )}/documents/${encodeURIComponent(documentId)}`,
       { method: "DELETE" },
+    ),
+
+  // Folders
+  listFolders: (kbId: string) =>
+    unwrap<KnowledgeFolderList>(
+      `${BASE}/knowledge-bases/${encodeURIComponent(kbId)}/folders`,
+    ),
+  moveDocumentToFolder: (
+    kbId: string,
+    documentId: string,
+    body: KnowledgeFolderMove,
+  ) =>
+    unwrap<KnowledgeDocumentMoved>(
+      `${BASE}/knowledge-bases/${encodeURIComponent(
+        kbId,
+      )}/documents/${encodeURIComponent(documentId)}/folder`,
+      jsonInit("PATCH", body),
+    ),
+
+  // Indexed text: preview (limit) and export (plain-text attachment)
+  getDocumentText: (kbId: string, documentId: string, limit?: number) =>
+    unwrap<KnowledgeDocumentText>(
+      `${BASE}/knowledge-bases/${encodeURIComponent(
+        kbId,
+      )}/documents/${encodeURIComponent(documentId)}/text${textQuery(
+        limit,
+        false,
+      )}`,
+    ),
+  downloadDocumentText: (kbId: string, documentId: string) =>
+    requestBlob(
+      `${BASE}/knowledge-bases/${encodeURIComponent(
+        kbId,
+      )}/documents/${encodeURIComponent(documentId)}/text${textQuery(
+        undefined,
+        true,
+      )}`,
+    ),
+
+  // Reindexing
+  reindexDocument: (kbId: string, documentId: string) =>
+    unwrap<KnowledgeDocumentReindexed>(
+      `${BASE}/knowledge-bases/${encodeURIComponent(
+        kbId,
+      )}/documents/${encodeURIComponent(documentId)}/reindex`,
+      jsonInit("POST", {}),
+    ),
+  reindexBase: (kbId: string) =>
+    unwrap<KnowledgeBaseReindexed>(
+      `${BASE}/knowledge-bases/${encodeURIComponent(kbId)}/reindex`,
+      jsonInit("POST", {}),
     ),
 
   // Search

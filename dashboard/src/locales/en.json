@@ -6045,7 +6045,13 @@
         "titleHint": "Indexing starts as soon as the document is created and runs in the background.",
         "createDocument": "Create document",
         "created": "Document queued for indexing",
-        "createFailed": "Could not create the document"
+        "createFailed": "Could not create the document",
+        "columnFolder": "Folder",
+        "previewHint": "Select a title to preview its extracted text.",
+        "download": "Download text",
+        "downloadFailed": "Could not download the extracted text",
+        "folderEmpty": "No documents in this folder",
+        "folderEmptyHint": "“{{folder}}” holds no documents; pick another folder in the tree on the left."
       },
       "acl": {
         "title": "Access grants",
@@ -6109,6 +6115,49 @@
         "generation": "Generation",
         "document": "Document",
         "untitled": "Untitled document"
+      },
+      "folders": {
+        "title": "Folders",
+        "pathNav": "Folder path",
+        "root": "Base root",
+        "loadFailed": "Could not load the folder list",
+        "notMergedTitle": "This deployment does not serve the folder route yet",
+        "move": "Move",
+        "moveTitle": "Move “{{title}}”",
+        "moveCurrent": "Current folder",
+        "moveTarget": "Target folder",
+        "movePlaceholder": "e.g. Ops/Runbooks (empty moves it to the root)",
+        "moveHint": "Separate levels with /; naming a folder that does not exist yet creates it, and a folder exists while it holds documents.",
+        "moveSuccess": "Document moved",
+        "moveFailed": "Could not move the document",
+        "issue": {
+          "absolute": "A folder path must be relative and cannot start with /",
+          "trailing": "A folder path cannot end with /",
+          "empty_segment": "A folder path cannot contain an empty segment",
+          "relative_segment": "A folder path cannot contain a . or .. segment",
+          "backslash": "A folder path cannot contain a backslash",
+          "stray_spaces": "A folder segment cannot start or end with a space",
+          "too_long": "The folder path is too long (400 characters at most)"
+        }
+      },
+      "preview": {
+        "title": "Extracted text preview",
+        "loadFailed": "Could not load the extracted text",
+        "chunkCount": "{{count}} chunks",
+        "truncated": "Preview truncated",
+        "truncatedHint": "Only the first {{limit}} characters are shown; the download button saves the whole extracted text.",
+        "empty": "This document has no indexed text yet — indexing may still be running."
+      },
+      "reindex": {
+        "document": "Reindex",
+        "documentQueued": "Reindexing “{{title}}”",
+        "documentFailed": "Could not reindex the document",
+        "base": "Reindex base",
+        "baseConfirm": "Reindex every document of “{{name}}”? Each document publishes a fresh generation; the current one stays retrievable until the new one is published.",
+        "baseQueued": "{{count}} documents queued for reindexing",
+        "basePartial": "{{queued}} queued, {{failed}} refused",
+        "baseFailed": "Could not reindex the knowledge base",
+        "baseFailuresTitle": "{{count}} documents could not be reindexed"
       }
     },
     "workflows": {

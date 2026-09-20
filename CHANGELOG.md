@@ -8,6 +8,7 @@
 
 ### 新增
 
+- WorkBuddy 知识库页**文档区合流**（B-10 前端）：左侧文件夹树（缺祖先的嵌套路径自动合成祖先节点并全展开，否则子节点不可达）+ 面包屑与「位置」列；点标题用 `limit` 预览抽取文本（截断时提示可下载全文）；「下载文本」走 `download=true` 取 `text/plain` 附件（文件名=标题+.txt）；单篇与整库重建索引入口（整库的 `failed` 逐条常驻提示失败码，绝不静默）；「移动」对话框可在既有路径中选择或直接输入新路径建新文件夹（客户端先按服务端同口径校验，非法路径不发请求）。既有上传握手/删除/四态处理未改；`workbuddyKnowledge.ts` 追加 6 个封装，中英语言包纯追加同名键。
 - WorkBuddy 知识库**默认打开库接口**（B-10 收尾）：`GET /knowledge-bases/default-open` 列出当前成员默认打开的库，`PUT /knowledge-bases/{id}/default-open` 为其打开/关闭某个库（每成员偏好，共享库各持己见）；字面路径**声明在 `{id}` 参数路由之前**（否则会被吞掉），并加了顺序回归用例守住这一点。
 - WorkBuddy 知识库**文件夹**（迁移 055，B-10 第三批）：文档新增 `folder_path`（有界 CHECK 拒绝绝对路径、`..`/`.` 段、双斜杠、尾斜杠、反斜杠与段内/两端空白），并按 `(tenant, kb, folder_path, title)` 建部分索引；文件夹就是活文档的路径集合（个人版用占位文档建模，这里以文档为唯一事实源，不再维护第二套生命周期），`GET /knowledge-bases/{id}/folders` 列出各路径与文档数（根目录始终在列），`PATCH /knowledge-bases/{id}/documents/{document_id}/folder` 把文档移入文件夹或移回根目录；文档载荷带 `folder_path`，前端可据此直接渲染目录树。
 - WorkBuddy 知识库**旧接口适配层**（B-12 第一步）：新增 `infra/workbuddy/knowledge_adapter.py` 作为个人版与企业版两侧的接缝——`OCTOP_KNOWLEDGE_SOURCE` 取值 `personal`（默认，个人表仍为准、不镜像）、`dual`（双写、读个人侧）或 `enterprise`（读企业侧并投影回个人载荷）；个人库创建/更新时按「创建者 + 名称」幂等地镜像成企业行（`shared` 映射为 `enterprise` 范围，共享行不落 owner 以满足租户表形状约束），删除时按名归档企业孪生；`enterprise` 模式下列表把企业行投影成个人载荷。未配置、拼错、无租户、SQLite 控制面或租户没有已授权嵌入修订时，一律退回个人表而不是让请求失败。

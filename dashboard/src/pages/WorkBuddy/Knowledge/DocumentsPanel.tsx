@@ -1,10 +1,13 @@
 /**
  * 知识库 → 文档.
  *
- * Lists the selected base's documents, runs the bound-upload handshake
- * (request target → complete → bind file reference) and removes documents.
- * Uploads and removals need write permission; read-only bases render the list
- * without mutation controls.
+ * Lists the selected base's documents one folder at a time (the folder tree on
+ * the left is the navigation), runs the bound-upload handshake (request target →
+ * complete → bind file reference), removes documents, previews and exports the
+ * indexed text and reindexes one document or the whole base.
+ *
+ * Reads (list, preview, export) need the base's read permission; uploads,
+ * removals, moves and reindexing need write permission.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -23,13 +26,22 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { FileText, FileUp, RefreshCw, Trash2 } from "lucide-react";
+import {
+  Download,
+  FileText,
+  FileUp,
+  MoveRight,
+  RefreshCw,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { message } from "@/utils/antdMessage";
 import { ResizableTable } from "../../../components/ResizableTable";
 import { EmptyState } from "../../../components/EmptyState";
 import { useServerTimezone } from "../../../hooks/useServerTimezone";
 import { formatServerDateTime } from "../../../utils/formatMessageTime";
+import { knowledgeBreadcrumb } from "../../../utils/knowledgePath";
 import { apiErrorMessage } from "../../../utils/apiError";
 import {
   canonicalKnowledgeMime,
@@ -38,11 +50,20 @@ import {
   type KnowledgeBase,
   type KnowledgeDocument,
   type KnowledgeFileRef,
+  type KnowledgeFolder,
+  type KnowledgeReindexFailure,
   type KnowledgeUpload,
 } from "../../../api/modules/workbuddyKnowledge";
 import { TabPanelHeader } from "../../Settings/AdvancedSettings/TabPanelHeader";
 import { useKnowledgeResource } from "./useKnowledgeResource";
 import { knowledgeLabel } from "./labels";
+import {
+  documentsInFolder,
+  documentTextFilename,
+  KNOWLEDGE_ROOT_PATH,
+} from "./folders";
+import { FolderTree, MoveDocumentModal } from "./FolderTree";
+import DocumentPreviewDrawer from "./DocumentPreviewDrawer";
 import styles from "./index.module.less";
 
 const { Text } = Typography;
@@ -334,9 +355,20 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
   const timeZone = useServerTimezone();
   const [uploadOpen, setUploadOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [reindexingId, setReindexingId] = useState<string | null>(null);
+  const [reindexingBase, setReindexingBase] = useState(false);
+  const [reindexFailures, setReindexFailures] = useState<
+    KnowledgeReindexFailure[] | null
+  >(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewDocument, setPreviewDocument] =
+    useState<KnowledgeDocument | null>(null);
+  const [moveTarget, setMoveTarget] = useState<KnowledgeDocument | null>(null);
+  const [folder, setFolder] = useState(KNOWLEDGE_ROOT_PATH);
   const canWrite = base.permission === "write" || base.permission === "admin";
 
-  const resource = useKnowledgeResource<KnowledgeDocument[]>(
+  const documents = useKnowledgeResource<KnowledgeDocument[]>(
     [],
     () =>
       workbuddyKnowledgeApi
@@ -344,7 +376,39 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
         .then((page) => page.items),
     [base.kb_id],
   );
-  const refreshDocuments = resource.refresh;
+  const folders = useKnowledgeResource<KnowledgeFolder[]>(
+    [],
+    () =>
+      workbuddyKnowledgeApi
+        .listFolders(base.kb_id)
+        .then((page) => page.folders),
+    [base.kb_id],
+  );
+  const refreshDocuments = documents.refresh;
+  const refreshFolders = folders.refresh;
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refreshDocuments(), refreshFolders()]);
+  }, [refreshDocuments, refreshFolders]);
+
+  // Another base means another folder tree: back to the root, without the
+  // failures or preview of the base the reader just left.
+  useEffect(() => {
+    setFolder(KNOWLEDGE_ROOT_PATH);
+    setReindexFailures(null);
+    setPreviewDocument(null);
+    setPreviewOpen(false);
+    setMoveTarget(null);
+  }, [base.kb_id]);
+
+  // A folder exists while a document sits in it; emptying one by moving its last
+  // document away must not strand the reader in a folder the tree no longer has.
+  useEffect(() => {
+    if (folder === KNOWLEDGE_ROOT_PATH) return;
+    if (folders.loading || folders.error) return;
+    if (!folders.data.some((entry) => entry.path === folder)) {
+      setFolder(KNOWLEDGE_ROOT_PATH);
+    }
+  }, [folder, folders.data, folders.loading, folders.error]);
 
   const onDelete = useCallback(
     async (document: KnowledgeDocument) => {
@@ -355,7 +419,7 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
           document.document_id,
         );
         message.success(t("workbuddy.knowledge.documents.deleteSuccess"));
-        await refreshDocuments();
+        await refreshAll();
       } catch (err) {
         message.error(
           apiErrorMessage(
@@ -368,20 +432,131 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
         setDeletingId(null);
       }
     },
-    [base.kb_id, refreshDocuments, t],
+    [base.kb_id, refreshAll, t],
   );
+
+  const onDownload = useCallback(
+    async (row: KnowledgeDocument) => {
+      setDownloadingId(row.document_id);
+      try {
+        const blob = await workbuddyKnowledgeApi.downloadDocumentText(
+          base.kb_id,
+          row.document_id,
+        );
+        const link = window.document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = documentTextFilename(row.title, row.document_id);
+        link.click();
+        URL.revokeObjectURL(link.href);
+      } catch (err) {
+        message.error(
+          apiErrorMessage(
+            err,
+            t("workbuddy.knowledge.documents.downloadFailed"),
+            t,
+          ),
+        );
+      } finally {
+        setDownloadingId(null);
+      }
+    },
+    [base.kb_id, t],
+  );
+
+  const onReindexDocument = useCallback(
+    async (row: KnowledgeDocument) => {
+      setReindexingId(row.document_id);
+      try {
+        await workbuddyKnowledgeApi.reindexDocument(
+          base.kb_id,
+          row.document_id,
+        );
+        message.success(
+          t("workbuddy.knowledge.reindex.documentQueued", { title: row.title }),
+        );
+        await refreshAll();
+      } catch (err) {
+        message.error(
+          apiErrorMessage(
+            err,
+            t("workbuddy.knowledge.reindex.documentFailed"),
+            t,
+          ),
+        );
+      } finally {
+        setReindexingId(null);
+      }
+    },
+    [base.kb_id, refreshAll, t],
+  );
+
+  const onReindexBase = useCallback(async () => {
+    setReindexingBase(true);
+    try {
+      const result = await workbuddyKnowledgeApi.reindexBase(base.kb_id);
+      // One unreadable document must not be swallowed behind a success toast:
+      // the server reports them by code, so they stay on screen until dismissed.
+      setReindexFailures(result.failed.length > 0 ? result.failed : null);
+      if (result.failed.length > 0) {
+        message.warning(
+          t("workbuddy.knowledge.reindex.basePartial", {
+            queued: result.queued,
+            failed: result.failed.length,
+          }),
+        );
+      } else {
+        message.success(
+          t("workbuddy.knowledge.reindex.baseQueued", {
+            count: result.queued,
+          }),
+        );
+      }
+      await refreshAll();
+    } catch (err) {
+      message.error(
+        apiErrorMessage(err, t("workbuddy.knowledge.reindex.baseFailed"), t),
+      );
+    } finally {
+      setReindexingBase(false);
+    }
+  }, [base.kb_id, refreshAll, t]);
+
+  const rootLabel = t("workbuddy.knowledge.folders.root");
+  const folderCrumbs = knowledgeBreadcrumb(folder, rootLabel);
+  const folderDocuments = documentsInFolder(documents.data, folder);
 
   const columns: ColumnsType<KnowledgeDocument> = [
     {
       title: t("workbuddy.knowledge.documents.columnTitle"),
       dataIndex: "title",
       key: "title",
-      width: 260,
+      width: 240,
       render: (value: string, row) => (
         <Tooltip title={row.document_id}>
-          <span>{value}</span>
+          <Button
+            type="link"
+            size="small"
+            onClick={() => {
+              setPreviewDocument(row);
+              setPreviewOpen(true);
+            }}
+          >
+            {value}
+          </Button>
         </Tooltip>
       ),
+    },
+    {
+      title: t("workbuddy.knowledge.documents.columnFolder"),
+      dataIndex: "folder_path",
+      key: "folder_path",
+      width: 160,
+      render: (value: string) =>
+        value ? (
+          <span className={styles.mono}>{value}</span>
+        ) : (
+          <Text type="secondary">{rootLabel}</Text>
+        ),
     },
     {
       title: t("workbuddy.knowledge.documents.columnStatus"),
@@ -435,30 +610,61 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
     {
       title: t("workbuddy.knowledge.common.actions"),
       key: "actions",
-      width: 140,
-      render: (_value, row) =>
-        canWrite ? (
-          <Popconfirm
-            title={t("workbuddy.knowledge.documents.deleteConfirm", {
-              title: row.title,
-            })}
-            okText={t("workbuddy.knowledge.common.confirm")}
-            cancelText={t("workbuddy.knowledge.common.cancel")}
-            onConfirm={() => void onDelete(row)}
+      width: 320,
+      render: (_value, row) => (
+        <Space size={0} wrap>
+          <Button
+            type="link"
+            size="small"
+            icon={<Download size={14} />}
+            loading={downloadingId === row.document_id}
+            onClick={() => void onDownload(row)}
           >
+            {t("workbuddy.knowledge.documents.download")}
+          </Button>
+          {canWrite && (
             <Button
               type="link"
               size="small"
-              danger
-              icon={<Trash2 size={14} />}
-              loading={deletingId === row.document_id}
+              icon={<RotateCcw size={14} />}
+              loading={reindexingId === row.document_id}
+              onClick={() => void onReindexDocument(row)}
             >
-              {t("workbuddy.knowledge.documents.remove")}
+              {t("workbuddy.knowledge.reindex.document")}
             </Button>
-          </Popconfirm>
-        ) : (
-          <Text type="secondary">—</Text>
-        ),
+          )}
+          {canWrite && (
+            <Button
+              type="link"
+              size="small"
+              icon={<MoveRight size={14} />}
+              onClick={() => setMoveTarget(row)}
+            >
+              {t("workbuddy.knowledge.folders.move")}
+            </Button>
+          )}
+          {canWrite && (
+            <Popconfirm
+              title={t("workbuddy.knowledge.documents.deleteConfirm", {
+                title: row.title,
+              })}
+              okText={t("workbuddy.knowledge.common.confirm")}
+              cancelText={t("workbuddy.knowledge.common.cancel")}
+              onConfirm={() => void onDelete(row)}
+            >
+              <Button
+                type="link"
+                size="small"
+                danger
+                icon={<Trash2 size={14} />}
+                loading={deletingId === row.document_id}
+              >
+                {t("workbuddy.knowledge.documents.remove")}
+              </Button>
+            </Popconfirm>
+          )}
+        </Space>
+      ),
     },
   ];
 
@@ -471,14 +677,32 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
           name: base.name,
         })}
         actions={
-          <Space size={8}>
+          <Space size={8} wrap>
             <Button
               size="small"
               icon={<RefreshCw size={14} />}
-              onClick={() => void resource.refresh()}
+              onClick={() => void refreshAll()}
             >
               {t("workbuddy.knowledge.common.refresh")}
             </Button>
+            {canWrite && (
+              <Popconfirm
+                title={t("workbuddy.knowledge.reindex.baseConfirm", {
+                  name: base.name,
+                })}
+                okText={t("workbuddy.knowledge.common.confirm")}
+                cancelText={t("workbuddy.knowledge.common.cancel")}
+                onConfirm={() => void onReindexBase()}
+              >
+                <Button
+                  size="small"
+                  icon={<RotateCcw size={14} />}
+                  loading={reindexingBase}
+                >
+                  {t("workbuddy.knowledge.reindex.base")}
+                </Button>
+              </Popconfirm>
+            )}
             {canWrite && (
               <Button
                 size="small"
@@ -503,20 +727,20 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
         />
       )}
 
-      {resource.unavailable ? (
+      {documents.unavailable ? (
         <Alert
           type="info"
           showIcon
           message={t("workbuddy.knowledge.common.notMergedTitle")}
           description={t("workbuddy.knowledge.common.notMergedHint")}
         />
-      ) : resource.error ? (
+      ) : documents.error ? (
         <Alert
           type="error"
           showIcon
           message={t("workbuddy.knowledge.documents.loadFailed")}
           description={apiErrorMessage(
-            resource.error,
+            documents.error,
             t("workbuddy.knowledge.documents.loadFailed"),
             t,
           )}
@@ -524,46 +748,156 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
             <Button
               size="small"
               icon={<RefreshCw size={14} />}
-              onClick={() => void resource.refresh()}
+              onClick={() => void refreshAll()}
             >
               {t("workbuddy.knowledge.common.retry")}
             </Button>
           }
         />
-      ) : resource.loading && resource.data.length === 0 ? (
-        <div className={styles.centered}>
-          <Spin />
-        </div>
-      ) : resource.data.length === 0 ? (
-        <EmptyState
-          variant="mascot"
-          title={t("workbuddy.knowledge.documents.empty")}
-          description={t("workbuddy.knowledge.documents.emptyHint")}
-          actionLabel={
-            canWrite ? t("workbuddy.knowledge.documents.upload") : undefined
-          }
-          onAction={canWrite ? () => setUploadOpen(true) : undefined}
-        />
       ) : (
-        <ResizableTable
-          columns={columns}
-          dataSource={resource.data}
-          rowKey="document_id"
-          size="middle"
-          tableLayout="fixed"
-          scroll={{ x: 1240 }}
-          storageKey="workbuddy-knowledge-documents-table-widths"
-          minWidth={72}
-          pagination={false}
-        />
+        <div className={styles.documentsLayout}>
+          <FolderTree
+            folders={folders.data}
+            loading={folders.loading}
+            error={folders.error}
+            unavailable={folders.unavailable}
+            selectedPath={folder}
+            onSelect={setFolder}
+            onRetry={() => void refreshFolders()}
+          />
+
+          <div className={styles.documentsBody}>
+            <div className={styles.folderBar}>
+              <nav
+                className={styles.pathBreadcrumb}
+                aria-label={t("workbuddy.knowledge.folders.pathNav")}
+              >
+                {folderCrumbs.map((crumb, index) => (
+                  <span
+                    key={`${crumb.path}:${index}`}
+                    className={styles.pathBreadcrumbSegment}
+                  >
+                    {index > 0 && (
+                      <span className={styles.pathBreadcrumbSep} aria-hidden>
+                        /
+                      </span>
+                    )}
+                    {index === folderCrumbs.length - 1 ? (
+                      <span
+                        className={styles.pathBreadcrumbCurrent}
+                        title={crumb.label}
+                      >
+                        {crumb.label}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className={styles.pathBreadcrumbLink}
+                        onClick={() => setFolder(crumb.path)}
+                        title={crumb.label}
+                      >
+                        {crumb.label}
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </nav>
+              <Text type="secondary" className={styles.hint}>
+                {t("workbuddy.knowledge.documents.previewHint")}
+              </Text>
+            </div>
+
+            {reindexFailures && reindexFailures.length > 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                closable
+                onClose={() => setReindexFailures(null)}
+                message={t("workbuddy.knowledge.reindex.baseFailuresTitle", {
+                  count: reindexFailures.length,
+                })}
+                description={
+                  <ul className={styles.failureList}>
+                    {reindexFailures.map((failure) => (
+                      <li key={failure.document_id}>
+                        <span className={styles.mono}>
+                          {failure.document_id}
+                        </span>
+                        <Tag color="red">{failure.code}</Tag>
+                      </li>
+                    ))}
+                  </ul>
+                }
+              />
+            )}
+
+            {documents.loading && documents.data.length === 0 ? (
+              <div className={styles.centered}>
+                <Spin />
+              </div>
+            ) : documents.data.length === 0 ? (
+              <EmptyState
+                variant="mascot"
+                title={t("workbuddy.knowledge.documents.empty")}
+                description={t("workbuddy.knowledge.documents.emptyHint")}
+                actionLabel={
+                  canWrite
+                    ? t("workbuddy.knowledge.documents.upload")
+                    : undefined
+                }
+                onAction={canWrite ? () => setUploadOpen(true) : undefined}
+              />
+            ) : folderDocuments.length === 0 ? (
+              <EmptyState
+                title={t("workbuddy.knowledge.documents.folderEmpty")}
+                description={t(
+                  "workbuddy.knowledge.documents.folderEmptyHint",
+                  { folder: folder || rootLabel },
+                )}
+              />
+            ) : (
+              <ResizableTable
+                columns={columns}
+                dataSource={folderDocuments}
+                rowKey="document_id"
+                size="middle"
+                tableLayout="fixed"
+                scroll={{ x: 1520 }}
+                storageKey="workbuddy-knowledge-documents-table-widths"
+                minWidth={72}
+                pagination={false}
+              />
+            )}
+          </div>
+        </div>
       )}
 
       <DocumentUploadModal
         base={base}
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
-        onCreated={resource.refresh}
+        onCreated={refreshAll}
       />
+
+      <DocumentPreviewDrawer
+        base={base}
+        document={previewDocument}
+        open={previewOpen}
+        downloading={downloadingId === previewDocument?.document_id}
+        onDownload={(row) => void onDownload(row)}
+        onClose={() => setPreviewOpen(false)}
+      />
+
+      {moveTarget !== null && (
+        <MoveDocumentModal
+          base={base}
+          document={moveTarget}
+          folders={folders.data}
+          open
+          onClose={() => setMoveTarget(null)}
+          onMoved={refreshAll}
+        />
+      )}
     </div>
   );
 }
