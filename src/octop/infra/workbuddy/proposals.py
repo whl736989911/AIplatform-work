@@ -1589,8 +1589,8 @@ class ProposalView:
                     "window_start": row.window_start,
                     "window_end": row.window_end,
                     "verdict": row.verdict.to_dict(),
-                    "baseline": _metrics_dict(row.baseline),
-                    "candidate": _metrics_dict(row.candidate),
+                    "baseline": metrics_payload(row.baseline),
+                    "candidate": metrics_payload(row.candidate),
                 }
                 for row in self.evaluations
             ]
@@ -1599,7 +1599,7 @@ class ProposalView:
         return payload
 
 
-def _metrics_dict(metrics: PhaseMetrics) -> dict[str, Any]:
+def metrics_payload(metrics: PhaseMetrics) -> dict[str, Any]:
     return {
         "settled_runs": metrics.settled_runs,
         "success_rate": metrics.success_rate,

@@ -594,9 +594,13 @@ class OutboxRow:
     payload: Any
     status: str
     attempts: int
+    #: Why a dead-lettered event stopped being retried. ``None`` while it is live;
+    #: the dispatcher records the last transport error when it gives up.
+    last_error: str | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> OutboxRow:
+        error = row.get("last_error")
         return cls(
             id=str(row["id"]),
             topic=str(row["topic"]),
@@ -604,6 +608,7 @@ class OutboxRow:
             payload=row["payload"],
             status=str(row["status"]),
             attempts=int(row["attempts"]),
+            last_error=str(error) if error is not None else None,
         )
 
 
@@ -1128,6 +1133,59 @@ class WorkBuddyRuntimeRepo:
                 (execution_id,),
             ).fetchall()
         return {str(row["node_id"]): row["output"] for row in rows}
+
+    def execution_metrics(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        user_id: int | None = None,
+        workflow_id: str | None = None,
+        window_start: float | None = None,
+        window_end: float | None = None,
+        limit: int = 20_000,
+        conn: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Settled executions with the time and tokens each one spent.
+
+        The same shape ``canary_metrics`` returns — the point of this method is
+        that tenant-level reporting and the promotion gates count the *same*
+        things the same way, so a number quoted in a report and a number a gate
+        judged on cannot disagree.
+
+        ``user_id`` is how "a member sees their own runs" is expressed: the scope
+        is a filter here rather than a policy applied afterwards, so a member
+        cannot widen it by forgetting an argument.
+        """
+        clauses = [
+            # Only settled executions are samples: a queued or parked one has no
+            # outcome yet, and counting it would flatter every percentage.
+            "status IN ('success', 'failed', 'partial', 'canceled')",
+        ]
+        params: list[Any] = []
+        if user_id is not None:
+            clauses.append("created_by_user_id = ?")
+            params.append(int(user_id))
+        if workflow_id is not None:
+            clauses.append("workflow_id = ?")
+            params.append(workflow_id)
+        if window_start is not None:
+            clauses.append("created_at >= to_timestamp(?)")
+            params.append(float(window_start))
+        if window_end is not None:
+            # Whole seconds, end second included — the same rule canary_metrics uses.
+            clauses.append("created_at < to_timestamp(?)")
+            params.append(float(window_end) + 1.0)
+        params.append(max(1, min(int(limit), 50_000)))
+        with runtime_transaction(self._db, ctx, conn) as c:
+            rows = c.execute(
+                "SELECT workflow_id, status, active_duration_ms, token_usage,"
+                " GREATEST(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000"
+                "          - active_duration_ms, 0) AS wait_ms"
+                f" FROM workbuddy_executions WHERE {' AND '.join(clauses)}"
+                " ORDER BY created_at, id LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def canary_metrics(
         self,
@@ -2547,6 +2605,30 @@ class WorkBuddyRuntimeRepo:
                 RETURNING *
                 """,
                 (max(1, int(visibility_seconds)), max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [OutboxRow.from_row(r) for r in rows]
+
+    def list_dead_outbox(self, *, tenant_id: str, limit: int = 100) -> list[OutboxRow]:
+        """One tenant's exhausted events, newest first, with the error that killed them.
+
+        The read runs in the platform context (the dispatcher's own), so the tenant
+        filter is explicit rather than delegated to row-level security: a caller
+        that forgot it would otherwise see every tenant's failures.
+
+        Dead letters are read, never replayed automatically: whether a fact is
+        still worth delivering after eight failures is a decision for a person,
+        and re-delivering something the world may already have seen is not one a
+        retry loop gets to make on its own.
+        """
+        with runtime_transaction(self._db, WorkBuddyDbContext.platform()) as c:
+            rows = c.execute(
+                """
+                SELECT * FROM workbuddy_outbox
+                WHERE tenant_id = ? AND status = 'failed'
+                ORDER BY available_at DESC, id DESC
+                LIMIT ?
+                """,
+                (tenant_id, max(1, min(int(limit), 500))),
             ).fetchall()
         return [OutboxRow.from_row(r) for r in rows]
 

@@ -21,6 +21,7 @@ const WorkBuddyKnowledgePage = lazy(
 const WorkBuddyHomePage = lazy(() => import("../pages/WorkBuddy/Home"));
 const WorkBuddyInboxPage = lazy(() => import("../pages/WorkBuddy/Inbox"));
 const WorkBuddyRunsPage = lazy(() => import("../pages/WorkBuddy/Runs"));
+const WorkBuddyChatflowPage = lazy(() => import("../pages/WorkBuddy/Chatflow"));
 const WorkBuddyWorkflowsPage = lazy(
   () => import("../pages/WorkBuddy/Workflows"),
 );
@@ -98,6 +99,7 @@ export const pathToKey: Record<string, string> = {
   "/workbuddy": "workbuddy-home",
   "/workbuddy/inbox": "workbuddy-inbox",
   "/workbuddy/runs": "workbuddy-runs",
+  "/workbuddy/chatflow": "workbuddy-chatflow",
   "/workbuddy/knowledge": "workbuddy-knowledge",
   "/workbuddy/workflows": "workbuddy-workflows",
   "/workbuddy/approvals": "workbuddy-approvals",
@@ -215,6 +217,7 @@ export const routeConfigs: RouteConfig[] = [
   { path: "/workbuddy", element: <WorkBuddyHomePage /> },
   { path: "/workbuddy/inbox", element: <WorkBuddyInboxPage /> },
   { path: "/workbuddy/runs", element: <WorkBuddyRunsPage /> },
+  { path: "/workbuddy/chatflow", element: <WorkBuddyChatflowPage /> },
   { path: "/workbuddy/knowledge", element: <WorkBuddyKnowledgePage /> },
   { path: "/workbuddy/workflows", element: <WorkBuddyWorkflowsPage /> },
   { path: "/workbuddy/approvals", element: <WorkBuddyApprovalsPage /> },

@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-20T14:55:00Z",
+  "updated": "2026-09-20T16:45:00Z",
   "batches": {
     "1": {
       "state": "done",
@@ -105,7 +105,7 @@
       "merge": "已合入 main（PR #39，squash，2026-09-20T06:15:34Z）；合入前把 main 同步进来一次（-X ours，理由同批次 4：main 相对分支的分歧就是前序批次的 squash，而分支里的对应内容与之逐字节等价）"
     },
     "6": {
-      "state": "pending",
+      "state": "done",
       "tasks": [
         "A-16",
         "A-17",
@@ -115,9 +115,19 @@
       ],
       "pr": null,
       "commits": [],
-      "evidence": "",
-      "notes": ""
+      "evidence": "A-23：新增 Redis 传输实体 `RedisOutboxPublisher`（LPUSH 每主题一队列、事件 id 随正文走、未配置即无 publisher 而非假装能投递）与 `resolve_redis_publisher()`；`GET /outbox/dead-letters` 按租户显式过滤、仅 admin、只读不可重放。单测 3 例 + 端到端 2 例（死信带错误可读、待投递的算死信、跨租户为空、成员 403）；静态门禁全绿。A-22：核实为**已实现且已覆盖**，本轮未改代码——`/webhooks/{webhook_path}`（唯一免认证路由，HMAC+时间窗+去重+事件过滤）经 `_dispatch` 调 `dispatcher.dispatch(...)` 真正启动执行，缺端口时 fail-closed 并记录拒绝原因；既有单测覆盖验收点（`test_webhook_replay_never_executes_twice` 断言 dispatcher 恰被调用一次、签名/时间窗/篡改、未证明依赖即拒绝、未知路径不可见、过滤不匹配只记录不派发）。 ｜ A-24：新增 `GET /execution-metrics`（127 条清单）——员工看自己发起的运行、管理员看整个租户，**同一套口径**（复用提案门禁的六个数字与 `phase_metrics`，新查询 `execution_metrics` 与 `canary_metrics` 同形：同一状态词汇、同为整秒窗口含结束秒、同样只算已结算；作用域由查询施加而非调用方记得收窄）；把提案里私有的指标载荷函数改为公开 `metrics_payload`（3 处调用点同步）。端到端 1 例：成员只见自己那 1 条、管理员见 2 条且成功率一致、尚未结算的运行不计入。前端：工作台新增「运行指标」块（同一套口径的六项 + 按工作流分解 + 明示作用域；空态而非零值），双语键 parity 通过，块 3 例 + 首页降级用例由 3 块改为 4 块；tsc/eslint 干净。 ｜ A-16：新增定义画布（React Flow）与 JSON 双向——仅连线是结构编辑，位置按工作流存本地（不属于定义，拖动不改 JSON），新建节点仍归元数据驱动的向导；纯转换 `definitionGraph.ts`（确定性初始布局、遇环不死循环、展示与回写同规则）7 例 + 组件渲染 1 例；工作流目录与 parity 共 35 例全过，tsc/eslint 干净。顺带修掉一处大小写重名（DefinitionCanvas.tsx vs definitionCanvas.ts）在大小写不敏感文件系统上的解析歧义。 ｜ A-17（后端切片）：`POST /conversations/{conversation_id}/messages` + `resolve_event_registrations` + `CHAT_MESSAGE_EVENT`；绑定写在 event 触发器的 event_filter 里，匹配复用 `event_matches_filter`；去重键 `chat:<message_id>`；无派发器 fail-closed 并记录拒绝。单测 4 例（触发且归属该执行 / 别的会话不触发 / 重发只跑一次 / 无派发器拒收）；知识服务文件 45 例全过；静态门禁全绿。会话页未做，故 A-17 记为 tasks_partial 而非 done。 ｜ A-17（前端）：新增「对话触发」页 + 路由/侧栏/双语键；消息 id 客户端生成（去重键，重发不重复执行）；页面读投递账本展示状态/运行/拒绝原因，空态如实；页面 2 例测试，路由与 parity 相关共 24 例全过，tsc/eslint 干净。",
+      "notes": "A-22 的代码与测试均在前序批次交付，本批次仅做核实（未新增代码）；A-23 为本批次新增。",
+      "tasks_done": [
+        "A-22",
+        "A-23",
+        "A-24",
+        "A-16",
+        "A-17"
+      ],
+      "tasks_pending": [],
+      "tasks_partial": {}
     }
   },
-  "next_batch": 6
+  "next_batch": null,
+  "notes": "A 线 24 项（A-01…A-24）全部落地；批次 1–5 已合入 main，批次 6 待开 PR 合入。"
 }

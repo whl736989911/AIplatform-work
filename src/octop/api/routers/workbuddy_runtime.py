@@ -429,6 +429,47 @@ async def list_output_reviews(
     return workbuddy_envelope(request, {"items": items})
 
 
+@router.get("/execution-metrics", summary="Settled-run metrics for the caller's scope")
+async def execution_metrics(
+    request: Request,
+    principal: _Principal,
+    server: Any = Depends(get_server),
+    since: float | None = Query(default=None),
+    until: float | None = Query(default=None),
+    workflow_id: str | None = Query(default=None),
+    limit: int = Query(default=20000, ge=1, le=50000),
+) -> dict[str, Any]:
+    """A member sees their own runs and an admin the tenant's — same口径, other rows.
+
+    Deliberately not admin-only: "员工看自己" is the acceptance, and the scope is
+    applied by the query rather than by the caller remembering to narrow it.
+    """
+    payload = _service(server).execution_metrics(
+        runtime_actor(principal),
+        since=since,
+        until=until,
+        workflow_id=None if workflow_id is None else _uuid(workflow_id, field="workflow"),
+        limit=limit,
+    )
+    return workbuddy_envelope(request, payload)
+
+
+@router.get("/outbox/dead-letters", summary="Events that gave up being delivered")
+async def list_outbox_dead_letters(
+    request: Request,
+    principal: _AdminPrincipal,
+    server: Any = Depends(get_server),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """A tenant admin's dead letters, with the transport error that stopped each.
+
+    Read-only on purpose: an event that failed eight times is a decision for a
+    person, and this endpoint is a window onto it rather than a replay button.
+    """
+    items = _service(server).list_outbox_dead_letters(runtime_actor(principal), limit=limit)
+    return workbuddy_envelope(request, {"items": items})
+
+
 @router.get(
     "/workflows/{workflow_id}/attribution",
     summary="Where a workflow's corrections point, by version",

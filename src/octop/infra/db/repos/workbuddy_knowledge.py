@@ -1235,6 +1235,45 @@ class WorkBuddyTriggerRepo:
             ).fetchone()
         return WorkBuddyTriggerRegistrationRow.from_row(row) if row is not None else None
 
+    def resolve_event_registrations(
+        self, ctx: WorkBuddyDbContext, *, event_name: str
+    ) -> list[WorkBuddyTriggerRegistrationRow]:
+        """Active event registrations for one event name, inside the caller's tenant.
+
+        Chat-flow bindings are event registrations whose filter names the
+        conversation, so the query only narrows by event name and the caller
+        decides what "matches" — the same decision the webhook path makes, made
+        once in the shared helper rather than twice with two different answers.
+        """
+        with workbuddy_transaction(self._db, ctx) as conn:
+            rows = conn.execute(
+                f"SELECT {_registration_columns()} FROM workbuddy_trigger_registrations "
+                "WHERE tenant_id = ? AND kind = 'event' AND event_name = ?"
+                " AND enabled = TRUE AND revoked_at IS NULL"
+                " ORDER BY created_at, registration_id",
+                (ctx.tenant_id, event_name),
+            ).fetchall()
+        return [WorkBuddyTriggerRegistrationRow.from_row(row) for row in rows]
+
+    def list_chat_deliveries(
+        self, ctx: WorkBuddyDbContext, *, conversation_id: str, limit: int = 100
+    ) -> list[WorkBuddyTriggerDeliveryRow]:
+        """What one conversation has triggered, newest first.
+
+        Read by prefix on the delivery's event key (``chat:<conversation>:<message>``),
+        which is how a message-triggered run stays attributable to the message that
+        caused it long after the request that sent it is gone.
+        """
+        prefix = f"chat:{conversation_id}:%"
+        with workbuddy_transaction(self._db, ctx) as conn:
+            rows = conn.execute(
+                "SELECT * FROM workbuddy_trigger_deliveries "
+                "WHERE tenant_id = ? AND event_key LIKE ?"
+                " ORDER BY created_at DESC, delivery_id DESC LIMIT ?",
+                (ctx.tenant_id, prefix, max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [WorkBuddyTriggerDeliveryRow.from_row(row) for row in rows]
+
     def revoke_registration(self, ctx: WorkBuddyDbContext, registration_id: str) -> bool:
         stamp = now_ts()
         with workbuddy_transaction(self._db, ctx) as conn:
