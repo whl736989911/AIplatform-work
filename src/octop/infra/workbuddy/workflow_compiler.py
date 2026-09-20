@@ -980,7 +980,14 @@ class _Compiler:
             # Reachability and ancestry are defined relative to that one entry.
             collector.raise_if_any("topology")
             return
-        self.entry_node_id = non_input_entries[0] if non_input_entries else entries[0]
+        if not entries:
+            # Every node has an incoming edge, so the graph has no source at all:
+            # that is precisely a cycle, which the pass below names node by node.
+            # Indexing here would abort the compile with an IndexError instead of
+            # returning that diagnostic.
+            self.entry_node_id = ""
+        else:
+            self.entry_node_id = non_input_entries[0] if non_input_entries else entries[0]
 
         indegree = {node_id: len(self.incoming[node_id]) for node_id in self.node_ids}
         ready = list(entries)

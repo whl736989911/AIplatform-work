@@ -46,6 +46,7 @@
 
 ### 修复
 
+- 修复**无源点的环导致编译崩溃**：拓扑检查先取入口节点、之后才找环，于是「每个节点都有入边」这种没有源点的纯环定义会以 `IndexError` 中断编译，`POST /workflow-definitions/validate` 返回 503 而不是调用方要用来修定义的环诊断。现在没有源点时直接交由环检查报出节点列表（422 + `WORKFLOW_CYCLE`），并补上这条此前缺失的用例——它是由 CI 的 live-PostgreSQL 用例发现的：该用例带 PG 标记，本地只跑了定向用例。
 - 修复阶段遗漏的**步骤节点类型约束**：迁移 018 建表时把 `workbuddy_step_runs.node_type` 限定为当时存在的五类（`tool`/`llm`/`condition`/`approval`/`transform`），此后新增的 `input`/`knowledge`/`output`（A-07）与本次的 `ask` 都不在其中——**任何含这些节点的工作流一旦真正运行，第一步落库就会以 check 违例整次失败**；而 A-07 的验证只到单元层（不写数据库），所以没有暴露。迁移 034 把该词表扩到与编译器节点集一致的九类。这个缺陷是批次 4 的端到端用例（真实 PostgreSQL 上跑停放 → 作答 → 恢复）第一次执行就抓到的——它也是"单元测试全绿不等于功能可用"的实例。
 - 修复**停在表单上的运行取消不掉**：`request_cancel` 的状态白名单只有 `queued`/`waiting_approval`，漏了新增的 `waiting_input`，于是员工在「等待填写」的执行上点取消不会有任何效果（接口既不改状态也不报错）。补入后取消会立即结算该执行——停在任何人工等待上的运行都必须能直接取消，因为它已经没有在途调用需要等。该修复由端到端用例（停放 → 取消 → 状态为 `canceled`）证明。
 - 修复 `workbuddy_executions` 写入方法 `insert_execution` 的**绑参缺列**：列清单已含迁移 024/025 加入的路由列（`proposal_id`/`cohort`/`bucket`/`route_canary_percent`/`subject`），绑定值却只有 12 个，调用即报占位符数量不符。该方法当前无调用方（运行时走 `insert_execution_if_absent`），属潜伏缺陷而非线上故障。现两者列集与绑参完全一致，并以真实 PG 探针逐字段回读证明同一入参写出同样形状的行（含 5 个路由列非空回读）。
