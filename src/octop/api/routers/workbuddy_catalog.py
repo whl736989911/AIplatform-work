@@ -27,7 +27,7 @@ from octop.api.routers.workbuddy_identity import (
     WorkBuddyPlatformPrincipal,
     WorkBuddyPrincipal,
     require_platform_audience,
-    require_workbuddy_admin,
+    require_workbuddy_duty,
     workbuddy_envelope,
     workbuddy_principal,
 )
@@ -45,11 +45,12 @@ from octop.infra.db.repos.workbuddy_catalog import (
     WorkBuddyRevisionRevoked,
 )
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.rbac.duties import DUTY_OPS
 
 router = APIRouter()
 
 _Principal = Annotated[WorkBuddyPrincipal, Depends(workbuddy_principal)]
-_AdminPrincipal = Annotated[WorkBuddyPrincipal, Depends(require_workbuddy_admin())]
+_AdminPrincipal = Annotated[WorkBuddyPrincipal, Depends(require_workbuddy_duty(DUTY_OPS))]
 _PlatformPrincipal = Annotated[WorkBuddyPlatformPrincipal, Depends(require_platform_audience())]
 
 # Every catalog-store refusal carries a stable code; any of them may surface
@@ -833,7 +834,7 @@ async def delete_capability_grant(
     revision_id: str,
     subject_kind: str = Query(pattern="^(tenant|department|member)$"),
     subject_id: str | None = Query(default=None, max_length=64),
-    admin: WorkBuddyPrincipal = Depends(require_workbuddy_admin()),
+    admin: WorkBuddyPrincipal = Depends(require_workbuddy_duty(DUTY_OPS)),
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     """Revoking the tenant-wide grant stops every member the subject list did not keep."""

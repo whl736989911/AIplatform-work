@@ -734,6 +734,9 @@ def test_routes_are_api_v1_relative_and_match_the_frozen_manifest() -> None:
         ("POST", "/invitations/{invitation_id}/revoke"),
         ("GET", "/tenant-quotas"),
         ("PUT", "/tenant-quotas"),
+        ("GET", "/duties"),
+        ("POST", "/duties/{duty}/grants"),
+        ("DELETE", "/duties/{duty}/grants"),
     }
     assert all(not route.path.startswith("/api/") for route in wb_id.router.routes)
 

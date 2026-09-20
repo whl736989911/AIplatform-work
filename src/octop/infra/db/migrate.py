@@ -1805,6 +1805,36 @@ def _ensure_workbuddy_grant_subjects(db: DatabasePool) -> None:
             )
 
 
+def _ensure_workbuddy_visibility_backfill(db: DatabasePool) -> None:
+    """Give every pre-existing workflow its implicit ``enterprise`` permission row.
+
+    Workflows created before the permission model existed read as company visible
+    through the legacy fallback, but the model itself sees no row. ``053`` ships
+    the statement; a database whose recorded version already skipped that file
+    needs it here, and the insert is idempotent for one that is part way through.
+    """
+    if db.dialect != "postgresql":
+        return
+    if not _relation_exists(db, "workbuddy_workflows"):
+        return
+    if not _relation_exists(db, "workbuddy_object_scopes"):
+        return
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO workbuddy_object_scopes ("
+            " tenant_id, object_kind, object_id, scope, owner_user_id, department_id,"
+            " created_by_user_id, created_at, updated_at"
+            ") SELECT w.tenant_id, 'workflow', w.workflow_id, 'enterprise', NULL, NULL,"
+            " w.created_by, w.created_at, w.updated_at"
+            " FROM workbuddy_workflows w"
+            " WHERE NOT EXISTS ("
+            " SELECT 1 FROM workbuddy_object_scopes s"
+            " WHERE s.tenant_id = w.tenant_id AND s.object_kind = 'workflow'"
+            " AND s.object_id = w.workflow_id)"
+            " ON CONFLICT (tenant_id, object_kind, object_id) DO NOTHING"
+        )
+
+
 def run_migrations(db: DatabasePool) -> None:
     if db.dialect == "sqlite":
         _repair_legacy_schema(db)
@@ -1844,3 +1874,4 @@ def run_migrations(db: DatabasePool) -> None:
     _ensure_agent_profile_columns(db)
     _ensure_sso_provider_kind_schema(db)
     _ensure_workbuddy_grant_subjects(db)
+    _ensure_workbuddy_visibility_backfill(db)

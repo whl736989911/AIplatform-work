@@ -2,7 +2,7 @@
   "machine": "machine-B",
   "line": "B",
   "owner": "machine-B（权限与知识库）",
-  "updated": "2026-09-20T09:55:00Z",
+  "updated": "2026-09-20T04:05:00Z",
   "batches": {
     "1": {
       "state": "done",
@@ -34,16 +34,18 @@
       "notes": "B-02 工作流接入权限四层：创建与 workbuddy_object_scopes 行同一事务写入（默认 enterprise，主体取自服务端上下文）、列表过滤与纯解析器逐 actor 一致、详情/保存/发布/回滚/归档统一判定且不可见一律 404；测试抓到并修复「列表按 legacy 默认公司可见、详情走 RbacService 无该回退」的口径不一致。B-03 工具/模型授权加 subject：subject_key（tenant/department:<id>/member:<user_id>）进主键，折叠进 016_workbuddy_catalog.pg.sql 并以 migrate.py 幂等修复 _ensure_workbuddy_grant_subjects 覆盖已跳过该文件的库；update_capabilities 只替换 subject_key='tenant' 的行（部门/成员授权不被覆盖）；撤销租户级模型授权时清空默认模型（默认模型必须保持租户级批准）。B-04 解析器按调用者解析（租户级行 ∪ 部门父链 ∪ 本人），默认模型须对调用者可达否则 MODEL_NOT_CONFIGURED，缺 user_id 时 fail-closed；A 线三处构造点未改实现，契约定稿写入 docs/plan/two-machine-workstreams.md §3.6。另修 scripts/migrate_kb.py：授权判定改问租户级事实（新增 WorkBuddyCatalogRepo.granted_tenant_wide），与调用者可达性明确区分。contracts/route-manifest.json 追加两条端点（supplemental 46→48、total 108→110），未新增迁移号（按 AGENTS.md 折叠进当前未发布的 016）。未包含：部门/成员授权前端配置页（B-07）、知识库权限向 rbac/ 收敛（B-10/B-13）、执行期工具/模型运行时复核。注意：首次提交时钩子在随机顺序下出现 1 项偶发失败（未记录用例名，随后单跑与全量确定序均通过，无法复现，疑似既有顺序耦合）；第二次提交钩子全绿，PR 已提并及时合并。"
     },
     "3": {
-      "state": "pending",
+      "state": "in_progress",
       "tasks": [
         "B-05",
         "B-06",
         "B-07"
       ],
       "pr": null,
-      "commits": [],
-      "evidence": "",
-      "notes": ""
+      "commits": [
+        "034b236d"
+      ],
+      "evidence": "静态：ruff check src tests scripts 通过；ruff format --check 1092 文件；mypy src/octop 544 文件 0 错。前端：cd dashboard && npm run lint（0 error / 67 既有 warning）、npx tsc -b（exit 0）、npx vitest run = 174 文件 / 929 用例全通过（新增 pages/Settings/Access 6 用例；语言包 en/zh 各 51 键一一对应、纯追加 0 删除）。后端：tests/unit/db = 153 passed/1 skipped（迁移三态，含全新库跑 052/053）；tests/unit/workbuddy + tests/integration/test_workbuddy_business_smoke.py + tests/integration/test_workbuddy_runtime_postgres.py = 380 passed/2 skipped（含新增 9 项岗位验收、8 项可见性验收）。",
+      "notes": "B-05 租户岗位授权：迁移 052（workbuddy_tenant_duty_grants，五岗位 + 三种主体 + 形状 CHECK + 复合外键 + 不可变触发器 + ENABLE/FORCE RLS）、infra/rbac/duties.py（词表/仓库/解析/require_duty）、require_workbuddy_duty 依赖工厂与 3 条管理端点（GET /duties、POST|DELETE /duties/{duty}/grants），并把 subject 词表抽出为 infra/rbac/subjects.py 供 B-03 与 B-05 共用（无第二套约定）。只加路不夺权：知识库治理 5 条路由→admin 或 kb_admin、能力许可→admin 或 ops、工作流保存→author、发布/回滚→publisher，管理员与既有写授权行为不变。**审批人（workbuddy_proposals.py）与运行时运维（workbuddy_runtime.py）属 A 线文件未改**，需 A 线用同一依赖工厂接入，已在 PR 说明交接。B-06 默认可见性回填：迁移 053 + migrate.py _ensure_workbuddy_visibility_backfill，给既有工作流补 enterprise 权限行，幂等可重跑，上线不丢东西。B-07 前端权限策略页：pages/Settings/Access/（页面+测试+样式+labels）与 api/modules/workbuddyAccess.ts，locales/{en,zh}.json 纯追加 access.* 51 键；**未改 routes/** 与 layouts/**（A 线文件）**，建议路由 /settings/access、导航分组「治理与设置」，接线待 A 线交接。状态：代码与自测已全部完成并提交在自有分支 feat/rbac-kb-jobs（034b236d/301e4f49/本提交），但按 §5.3 **未合并**——integrator 的 verified[2] 尚未出现（machine-A 批次 2 仍 pending，其 ledger 心跳停在 2026-09-19T22:54Z）；verified[2] 出现后立即提 PR 合并。未包含：B-07 的真机浏览器验证（本机无运行中的后端与租户 JWT，UI 证据来自 jsdom 三态用例与语言包审计）。"
     },
     "4": {
       "state": "pending",

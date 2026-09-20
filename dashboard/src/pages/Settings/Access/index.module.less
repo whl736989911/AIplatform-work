@@ -1,0 +1,68 @@
+/* 权限策略 (/settings/access) — 岗位词表 + 授权台账。 */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
+}
+
+.policyList {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.vocabulary {
+  padding: 12px 14px;
+  border: 1px solid var(--fn-border-primary);
+  border-radius: 8px;
+  background: var(--fn-bg-secondary, rgba(0, 0, 0, 0.02));
+}
+
+.vocabularyHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.vocabularyTitle {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dutyGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.dutyCard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--fn-border-primary);
+  border-radius: 6px;
+}
+
+.dutyHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dutyName {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dutyDesc {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fn-text-secondary, rgba(0, 0, 0, 0.45));
+}

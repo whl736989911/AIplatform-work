@@ -27,13 +27,24 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import jwt
-from fastapi import APIRouter, Depends, Request, Response
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Query, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
 
 from octop.api.deps import current_user, extract_raw_token, get_server, sign_token
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.workbuddy_context import WorkBuddyPostgresRequiredError
+from octop.infra.db.workbuddy_context import (
+    WorkBuddyDbContext,
+    WorkBuddyPostgresRequiredError,
+)
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.rbac.duties import (
+    DUTIES,
+    WorkBuddyDutyGrant,
+    WorkBuddyDutyRepo,
+    require_duty,
+    validate_duty,
+)
+from octop.infra.rbac.model import RbacActor
 from octop.infra.users.email import parse_optional_email
 from octop.infra.users.identity import Role, User
 from octop.infra.users.password import validate_password_policy
@@ -424,6 +435,36 @@ def require_workbuddy_admin() -> Callable[..., Awaitable[WorkBuddyPrincipal]]:
                 "workbuddy tenant admin required",
                 details={"role": principal.role},
             )
+        return principal
+
+    return _dep
+
+
+def require_workbuddy_duty(duty: str) -> Callable[..., Awaitable[WorkBuddyPrincipal]]:
+    """Dependency factory: require one tenant duty.
+
+    A tenant admin holds every duty, so swapping a route onto this gate never
+    takes a power away from the people who already had it; a member who holds
+    the duty may do that job without being promoted to admin.
+    """
+    clean_duty = validate_duty(duty)
+
+    async def _dep(
+        principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+        server: Any = Depends(get_server),
+    ) -> WorkBuddyPrincipal:
+        if principal.is_admin:
+            return principal
+        require_duty(
+            server.services.db,
+            RbacActor(
+                user_id=int(principal.user_id),
+                tenant_id=principal.tenant_id,
+                department_id=principal.department_id,
+                is_tenant_admin=False,
+            ),
+            clean_duty,
+        )
         return principal
 
     return _dep
@@ -1208,12 +1249,109 @@ async def put_tenant_quotas(
     return workbuddy_envelope(request, _quota_payload(list(rows)))
 
 
+# --------------------------------------------------------------------------- #
+# Tenant duties (B-05): the jobs a member may do without being an admin
+# --------------------------------------------------------------------------- #
+
+
+class DutyGrantBody(BaseModel):
+    """One subject of a duty grant: the tenant, a department, or a member.
+
+    ``subject_id`` is the department id for a department and the user id for a
+    member; a tenant-wide duty carries neither.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject_kind: str = Field(pattern="^(tenant|department|member)$")
+    subject_id: str | None = Field(default=None, max_length=64)
+
+
+def _duty_context(principal: WorkBuddyPrincipal) -> WorkBuddyDbContext:
+    return WorkBuddyDbContext.for_tenant(principal.tenant_id, user_id=principal.user_id)
+
+
+def _duty_grant_payload(grant: WorkBuddyDutyGrant) -> dict[str, Any]:
+    return {
+        "duty": grant.duty,
+        "subject_kind": grant.subject_kind,
+        "subject_id": grant.subject_id,
+        "granted_at": grant.granted_at,
+    }
+
+
+@router.get("/duties", summary="List tenant duty grants")
+async def list_tenant_duties(
+    request: Request,
+    principal: WorkBuddyPrincipal = Depends(require_workbuddy_admin()),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Every duty grant plus the duty vocabulary, for the access policy page."""
+    repo = WorkBuddyDutyRepo(server.services.db)
+    grants = repo.list_grants(_duty_context(principal))
+    return workbuddy_envelope(
+        request,
+        {"duties": list(DUTIES), "items": [_duty_grant_payload(grant) for grant in grants]},
+    )
+
+
+@router.post("/duties/{duty}/grants", status_code=201, summary="Grant a tenant duty")
+@_store_errors
+async def create_tenant_duty_grant(
+    request: Request,
+    duty: str,
+    body: DutyGrantBody,
+    principal: WorkBuddyPrincipal = Depends(require_workbuddy_admin()),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Give one department or member a job; a tenant-wide row gives it to everyone."""
+    grant = WorkBuddyDutyRepo(server.services.db).grant(
+        _duty_context(principal),
+        duty=duty,
+        subject_kind=body.subject_kind,
+        subject_id=body.subject_id,
+        actor_member_id=principal.member_id,
+    )
+    return workbuddy_envelope(request, _duty_grant_payload(grant))
+
+
+@router.delete("/duties/{duty}/grants", summary="Revoke one tenant duty grant")
+@_store_errors
+async def delete_tenant_duty_grant(
+    request: Request,
+    duty: str,
+    subject_kind: str = Query(pattern="^(tenant|department|member)$"),
+    subject_id: str | None = Query(default=None, max_length=64),
+    principal: WorkBuddyPrincipal = Depends(require_workbuddy_admin()),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Drop the subject's duty; the member keeps every other path to the job."""
+    revoked = WorkBuddyDutyRepo(server.services.db).revoke(
+        _duty_context(principal),
+        duty=duty,
+        subject_kind=subject_kind,
+        subject_id=subject_id,
+    )
+    if not revoked:
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "duty grant not found")
+    return workbuddy_envelope(
+        request,
+        {
+            "duty": validate_duty(duty),
+            "subject_kind": subject_kind,
+            "subject_id": subject_id,
+            "revoked": True,
+        },
+    )
+
+
 __all__ = [
     "WORKBUDDY_PLATFORM_AUDIENCE",
     "WorkBuddyPlatformPrincipal",
     "WorkBuddyPrincipal",
     "require_platform_audience",
     "require_workbuddy_admin",
+    "require_workbuddy_duty",
     "resolve_member_user_id",
     "router",
     "workbuddy_envelope",
