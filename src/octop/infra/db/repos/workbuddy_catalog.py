@@ -32,6 +32,13 @@ from typing import Any, TypeGuard, TypeVar
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import UNSET, DbRow, now_ts, sql_in_placeholders
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext, workbuddy_transaction
+from octop.infra.rbac.subjects import (
+    SUBJECT_DEPARTMENT,
+    SUBJECT_MEMBER,
+    SUBJECT_TENANT,
+    SubjectError,
+    resolve_subject,
+)
 
 __all__ = [
     "CODE_CAPABILITY_NO_FIELDS",
@@ -58,12 +65,6 @@ __all__ = [
     "WorkBuddyCatalogError",
     "CAPABILITY_MODEL",
     "CAPABILITY_TOOL",
-    "CODE_SUBJECT_UNKNOWN",
-    "SUBJECT_DEPARTMENT",
-    "SUBJECT_DEPARTMENT_CHAIN",
-    "SUBJECT_KINDS",
-    "SUBJECT_MEMBER",
-    "SUBJECT_TENANT",
     "WorkBuddyCapabilityGrant",
     "WorkBuddyCatalogRepo",
     "WorkBuddyCredential",
@@ -77,7 +78,6 @@ __all__ = [
     "WorkBuddyRevisionRevoked",
     "WorkBuddyToolRevision",
     "capability_kind",
-    "grant_subject_reach",
 ]
 
 STATUS_ACTIVE = "active"
@@ -122,17 +122,8 @@ _TABLE_MEMBERS = "workbuddy_tenant_members"
 _COL_TOOL_REVISION = "tool_revision_id"
 _COL_MODEL_REVISION = "model_revision_id"
 
-# Grant subjects (§4.6.1 capability governance): one revision reaches the whole
-# tenant, one department, or one member. ``SUBJECT_TENANT`` is the tenant-wide
-# row every grant had before the subject dimension existed.
-SUBJECT_TENANT = "tenant"
-SUBJECT_DEPARTMENT = "department"
-SUBJECT_MEMBER = "member"
-SUBJECT_KINDS = (SUBJECT_TENANT, SUBJECT_DEPARTMENT, SUBJECT_MEMBER)
 CAPABILITY_TOOL = "tool"
 CAPABILITY_MODEL = "model"
-CODE_SUBJECT_UNKNOWN = "WORKBUDDY_GRANT_SUBJECT_UNKNOWN"
-
 _CAPABILITY_TABLES: dict[str, tuple[str, str]] = {
     CAPABILITY_TOOL: (_TABLE_TOOL_GRANTS, _COL_TOOL_REVISION),
     CAPABILITY_MODEL: (_TABLE_MODEL_GRANTS, _COL_MODEL_REVISION),
@@ -141,18 +132,6 @@ _CAPABILITY_REVISIONS: dict[str, str] = {
     CAPABILITY_TOOL: _TABLE_TOOL_REVISIONS,
     CAPABILITY_MODEL: _TABLE_MODEL_REVISIONS,
 }
-
-# The members of a department and of its sub-departments, for a caller whose
-# department grant must also reach them. Parameters: (tenant, user, tenant).
-SUBJECT_DEPARTMENT_CHAIN = (
-    "WITH RECURSIVE wb_subject_departments(department_id) AS ("
-    " SELECT m.department_id FROM workbuddy_tenant_members m"
-    " WHERE m.tenant_id = ? AND m.user_id = ? AND m.department_id IS NOT NULL"
-    " UNION"
-    " SELECT d.parent_department_id FROM workbuddy_departments d"
-    " JOIN wb_subject_departments c ON d.department_id = c.department_id"
-    " WHERE d.tenant_id = ? AND d.parent_department_id IS NOT NULL)"
-)
 
 # A server-generated pointer such as ``vault://tenant/credential/rotation``.
 _EXTERNAL_REF_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://\S{1,400}$")
@@ -1190,21 +1169,6 @@ class WorkBuddyCatalogRepo:
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
-def grant_subject_reach(alias: str = "g") -> str:
-    """Predicate over grant row ``alias``: does its subject reach the calling user?
-
-    The caller binds the user id for the placeholder and supplies the
-    :data:`SUBJECT_DEPARTMENT_CHAIN` CTE, so a department grant also reaches the
-    members of that department's sub-departments.
-    """
-    return (
-        f"({alias}.subject_key = 'tenant'"
-        f" OR ({alias}.user_id IS NOT NULL AND {alias}.user_id = ?)"
-        f" OR ({alias}.department_id IS NOT NULL AND {alias}.department_id IN"
-        " (SELECT department_id FROM wb_subject_departments)))"
-    )
-
-
 def capability_kind(kind: str) -> tuple[str, str]:
     """``(grant table, revision column)`` for one capability family."""
     try:
@@ -1212,7 +1176,7 @@ def capability_kind(kind: str) -> tuple[str, str]:
     except KeyError:
         raise WorkBuddyInvalidInput(
             f"capability kind must be one of {', '.join(_CAPABILITY_TABLES)}",
-            code=CODE_SUBJECT_UNKNOWN,
+            code=CODE_INVALID_INPUT,
         ) from None
 
 
@@ -1321,60 +1285,15 @@ def _subject_columns(
     *,
     require_active: bool = True,
 ) -> tuple[str, int | None, str | None]:
-    """Map an API subject onto a grant row: ``(subject_key, user_id, department_id)``."""
-    if subject_kind == SUBJECT_TENANT:
-        if subject_id not in (None, ""):
-            raise WorkBuddyInvalidInput(
-                "a tenant-wide grant carries no subject_id", code=CODE_SUBJECT_UNKNOWN
-            )
-        return SUBJECT_TENANT, None, None
-    if subject_kind == SUBJECT_DEPARTMENT:
-        department_id = _required_subject_id(subject_kind, subject_id)
-        row = conn.execute(
-            "SELECT 1 FROM workbuddy_departments WHERE tenant_id = ? AND department_id = ?",
-            (tenant_id, department_id),
-        ).fetchone()
-        if row is None:
-            raise WorkBuddyInvalidInput(
-                "department does not belong to this tenant", code=CODE_SUBJECT_UNKNOWN
-            )
-        return f"{SUBJECT_DEPARTMENT}:{department_id}", None, department_id
-    if subject_kind == SUBJECT_MEMBER:
-        raw_user_id = _required_subject_id(subject_kind, subject_id)
-        if not raw_user_id.isdigit():
-            raise WorkBuddyInvalidInput(
-                "a member grant is addressed by user id", code=CODE_SUBJECT_UNKNOWN
-            )
-        user_id = int(raw_user_id)
-        row = conn.execute(
-            f"SELECT 1 FROM {_TABLE_MEMBERS}"
-            " WHERE tenant_id = ? AND user_id = ? AND status = 'active'",
-            (tenant_id, user_id),
-        ).fetchone()
-        if row is None and require_active:
-            raise WorkBuddyMembershipRequired("granted user is not an active member of this tenant")
-        if row is None:
-            row = conn.execute(
-                f"SELECT 1 FROM {_TABLE_MEMBERS} WHERE tenant_id = ? AND user_id = ?",
-                (tenant_id, user_id),
-            ).fetchone()
-        if row is None:
-            raise WorkBuddyInvalidInput(
-                "user is not a member of this tenant", code=CODE_SUBJECT_UNKNOWN
-            )
-        return f"{SUBJECT_MEMBER}:{user_id}", user_id, None
-    raise WorkBuddyInvalidInput(
-        f"subject_kind must be one of {', '.join(SUBJECT_KINDS)}", code=CODE_SUBJECT_UNKNOWN
-    )
-
-
-def _required_subject_id(subject_kind: str, subject_id: str | None) -> str:
-    value = str(subject_id or "").strip()
-    if not value:
-        raise WorkBuddyInvalidInput(
-            f"a {subject_kind} grant needs a subject_id", code=CODE_SUBJECT_UNKNOWN
+    """Map an API subject onto a grant row, in the catalog's own error vocabulary."""
+    try:
+        return resolve_subject(
+            conn, tenant_id, subject_kind, subject_id, require_active=require_active
         )
-    return value
+    except SubjectError as exc:
+        if "not an active member" in exc.message:
+            raise WorkBuddyMembershipRequired(exc.message) from exc
+        raise WorkBuddyInvalidInput(exc.message, code=exc.code) from exc
 
 
 def _is_active_member(conn: Any, tenant_id: str, membership_id: str) -> bool:

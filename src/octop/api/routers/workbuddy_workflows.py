@@ -45,6 +45,7 @@ from octop.infra.db.workbuddy_context import (
     workbuddy_transaction,
 )
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.rbac.duties import DUTY_AUTHOR, DUTY_PUBLISHER, actor_holds_duty
 from octop.infra.rbac.model import RbacActor
 from octop.infra.workbuddy.authoring import UNAVAILABLE_AUTHORING, author_workflow
 from octop.infra.workbuddy.node_metadata import definition_metadata
@@ -211,6 +212,16 @@ def _rbac_actor(principal: WorkBuddyPrincipal) -> RbacActor:
     )
 
 
+def _holds_duty(server: Any | None, principal: WorkBuddyPrincipal, duty: str) -> bool:
+    """True when the caller holds a tenant duty (tenant admins hold every duty)."""
+    if server is None:
+        return False
+    try:
+        return actor_holds_duty(server.services.db, _rbac_actor(principal), duty)
+    except (OctopError, ValueError):
+        return False
+
+
 def _reachable(
     server: Any, principal: WorkBuddyPrincipal, workflow_id: str, permission: str
 ) -> bool:
@@ -269,16 +280,22 @@ def _load_managed_workflow(
     *,
     server: Any | None = None,
     conn: Any | None = None,
+    duty: str | None = None,
 ) -> WorkflowRecord:
-    """Creator, tenant admin, or a holder of write/admin through the permission model.
+    """Creator, tenant admin, a write/admin grant, or a holder of ``duty``.
 
-    Everyone else sees a uniform 404, so an object that is out of reach stays
-    indistinguishable from one that does not exist.
+    The duty arm is the tenant-level job authority (B-05): an ``author`` may save
+    versions and a ``publisher`` may publish them without a per-object grant and
+    without being promoted to tenant admin. Everyone else sees a uniform 404, so
+    an object that is out of reach stays indistinguishable from one that does not
+    exist.
     """
     record = _load_workflow(repo, principal, workflow_id, conn=conn)
     if principal.is_admin or _is_owner(record, principal):
         return record
     if server is not None and _reachable(server, principal, record.workflow_id, "write"):
+        return record
+    if duty is not None and _holds_duty(server, principal, duty):
         return record
     raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, _WORKFLOW_NOT_FOUND)
 
@@ -675,7 +692,9 @@ async def save_workflow_version(
             server.services.db,
             WorkBuddyDbContext.for_tenant(principal.tenant_id, user_id=principal.user_id),
         ) as conn:
-            record = _load_managed_workflow(repo, principal, workflow_id, server=server)
+            record = _load_managed_workflow(
+                repo, principal, workflow_id, server=server, duty=DUTY_AUTHOR
+            )
             _require_if_match(request, record)
             from octop.infra.db.repos.workbuddy_workflows import (
                 PostgresWorkflowSemanticResolver,
@@ -736,7 +755,9 @@ async def activate_workflow_version(
             server.services.db,
             WorkBuddyDbContext.for_tenant(principal.tenant_id, user_id=principal.user_id),
         ) as conn:
-            record = _load_managed_workflow(repo, principal, workflow_id, server=server)
+            record = _load_managed_workflow(
+                repo, principal, workflow_id, server=server, duty=DUTY_PUBLISHER
+            )
             _require_if_match(request, record)
             updated = repo.activate_version(
                 principal.tenant_id,
@@ -774,7 +795,9 @@ async def rollback_workflow_version(
             server.services.db,
             WorkBuddyDbContext.for_tenant(principal.tenant_id, user_id=principal.user_id),
         ) as conn:
-            record = _load_managed_workflow(repo, principal, workflow_id, server=server)
+            record = _load_managed_workflow(
+                repo, principal, workflow_id, server=server, duty=DUTY_PUBLISHER
+            )
             _require_if_match(request, record)
             bundle = repo.rollback_version(
                 principal.tenant_id,
@@ -813,7 +836,9 @@ async def list_workflow_versions(
     """Creator/admin only; members see a uniform 404."""
     repo = _repo(server)
     try:
-        record = _load_managed_workflow(repo, principal, workflow_id, server=server)
+        record = _load_managed_workflow(
+            repo, principal, workflow_id, server=server, duty=DUTY_PUBLISHER
+        )
         versions = repo.list_versions(principal.tenant_id, record.workflow_id)
     except Exception as exc:  # noqa: BLE001
         raise _refusal(exc) from exc
@@ -887,7 +912,9 @@ async def get_workflow_version(
     """The version must belong to the workflow in the path."""
     repo = _repo(server)
     try:
-        record = _load_managed_workflow(repo, principal, workflow_id, server=server)
+        record = _load_managed_workflow(
+            repo, principal, workflow_id, server=server, duty=DUTY_PUBLISHER
+        )
         version = _load_version(repo, principal, record.workflow_id, version_id)
     except OctopError:
         raise

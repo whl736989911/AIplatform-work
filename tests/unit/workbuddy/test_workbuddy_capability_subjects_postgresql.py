@@ -39,9 +39,6 @@ from octop.infra.db.migrate import _ensure_workbuddy_grant_subjects, run_migrati
 from octop.infra.db.pool import PostgresPool
 from octop.infra.db.repos._base import now_ts
 from octop.infra.db.repos.workbuddy_catalog import (
-    SUBJECT_DEPARTMENT,
-    SUBJECT_MEMBER,
-    SUBJECT_TENANT,
     WorkBuddyCatalogError,
     WorkBuddyCatalogRepo,
     WorkBuddyInvalidInput,
@@ -50,6 +47,11 @@ from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
 from octop.infra.db.repos.workbuddy_workflows import PostgresWorkflowSemanticResolver
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext, workbuddy_transaction
 from octop.infra.errors import OctopError
+from octop.infra.rbac.subjects import (
+    SUBJECT_DEPARTMENT,
+    SUBJECT_MEMBER,
+    SUBJECT_TENANT,
+)
 from octop.infra.users.identity import Role, User
 
 pytestmark = [pytest.mark.postgresql, requires_postgresql]
