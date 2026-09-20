@@ -384,15 +384,9 @@ def lower_authoring(document: Mapping[str, Any]) -> dict[str, Any]:
     for step in steps:
         step_id = str(step["id"])
         uses = [str(item) for item in step.get("uses") or ()]
-        nodes.append(
-            {
-                "id": step_id,
-                "type": str(step["kind"]),
-                "name": str(step.get("name") or step.get("purpose") or step_id)[:200],
-                "config": _lower_config(step.get("config") or {}),
-                "save_as": step_id,
-            }
-        )
+        # One node shape for both lowerings: a created step and an edited one
+        # differ only in whether an earlier node's result key is carried over.
+        nodes.append(_node_of(step))
         edges.extend({"from": used, "to": step_id} for used in uses)
 
     trigger = document.get("trigger") or {"type": "manual"}
