@@ -1134,6 +1134,59 @@ class WorkBuddyRuntimeRepo:
             ).fetchall()
         return {str(row["node_id"]): row["output"] for row in rows}
 
+    def execution_metrics(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        user_id: int | None = None,
+        workflow_id: str | None = None,
+        window_start: float | None = None,
+        window_end: float | None = None,
+        limit: int = 20_000,
+        conn: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Settled executions with the time and tokens each one spent.
+
+        The same shape ``canary_metrics`` returns — the point of this method is
+        that tenant-level reporting and the promotion gates count the *same*
+        things the same way, so a number quoted in a report and a number a gate
+        judged on cannot disagree.
+
+        ``user_id`` is how "a member sees their own runs" is expressed: the scope
+        is a filter here rather than a policy applied afterwards, so a member
+        cannot widen it by forgetting an argument.
+        """
+        clauses = [
+            # Only settled executions are samples: a queued or parked one has no
+            # outcome yet, and counting it would flatter every percentage.
+            "status IN ('success', 'failed', 'partial', 'canceled')",
+        ]
+        params: list[Any] = []
+        if user_id is not None:
+            clauses.append("created_by_user_id = ?")
+            params.append(int(user_id))
+        if workflow_id is not None:
+            clauses.append("workflow_id = ?")
+            params.append(workflow_id)
+        if window_start is not None:
+            clauses.append("created_at >= to_timestamp(?)")
+            params.append(float(window_start))
+        if window_end is not None:
+            # Whole seconds, end second included — the same rule canary_metrics uses.
+            clauses.append("created_at < to_timestamp(?)")
+            params.append(float(window_end) + 1.0)
+        params.append(max(1, min(int(limit), 50_000)))
+        with runtime_transaction(self._db, ctx, conn) as c:
+            rows = c.execute(
+                "SELECT workflow_id, status, active_duration_ms, token_usage,"
+                " GREATEST(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000"
+                "          - active_duration_ms, 0) AS wait_ms"
+                f" FROM workbuddy_executions WHERE {' AND '.join(clauses)}"
+                " ORDER BY created_at, id LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def canary_metrics(
         self,
         ctx: WorkBuddyDbContext,

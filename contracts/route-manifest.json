@@ -1014,11 +1014,19 @@
       "success_status": 200,
       "summary": "本租户投递失败（死信）的发件箱事件，含最后一次传输错误，200",
       "authorization": "仅租户 admin；按租户显式过滤（平台上下文读，故不依赖 RLS）"
+    },
+    {
+      "method": "GET",
+      "path": "/execution-metrics",
+      "stage": "A6",
+      "success_status": 200,
+      "summary": "已结算运行的指标（口径与提案门禁同一套）：成员看自己的、管理员看租户的，200",
+      "authorization": "任意登录成员；作用域由查询施加（成员仅自己发起的运行）"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 64,
-    "total": 126
+    "supplemental": 65,
+    "total": 127
   }
 }

@@ -3215,3 +3215,54 @@ async def test_a_dead_lettered_event_is_readable_with_the_error_that_stopped_it(
     async with _client(app, member) as client:
         refused = await client.get("/outbox/dead-letters")
         assert refused.status_code == 403, refused.text
+
+
+async def test_metrics_show_a_member_their_own_runs_and_an_admin_the_tenants(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T45: one口径 over two scopes — 员工看自己, 管理员看租户."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Metrics runtime")
+    owner = _principal(tenant)
+    member = _principal(tenant, role="member", user_id=_seed_user(pool, "rt-metrics-member"))
+
+    # One run started by the member, one by the owner (an admin of this tenant).
+    async with _client(app, member) as client:
+        theirs = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "member"}}
+        )
+        assert theirs.status_code == 202, theirs.text
+        _drain(pool)
+    async with _client(app, owner) as client:
+        ours = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "owner"}}
+        )
+        assert ours.status_code == 202, ours.text
+        _drain(pool)
+
+    async with _client(app, member) as client:
+        mine = await client.get("/execution-metrics")
+        assert mine.status_code == 200, mine.text
+        data = mine.json()["data"]
+        assert data["scope"] == "member", data
+        # Their own run only: the owner's run happened in the same tenant.
+        assert data["settled"]["settled_runs"] == 1, data
+        assert data["settled"]["success_rate"] == 1.0, data
+        assert [row["workflow_id"] for row in data["workflows"]] == [workflow_id], data
+
+    async with _client(app, owner) as client:
+        tenant_wide = await client.get("/execution-metrics")
+        assert tenant_wide.status_code == 200, tenant_wide.text
+        data = tenant_wide.json()["data"]
+        assert data["scope"] == "tenant", data
+        assert data["settled"]["settled_runs"] == 2, data
+        # Same口径: the member's run is a sample here, and it succeeded.
+        assert data["settled"]["success_rate"] == 1.0, data
+
+        # A run that has not settled is not a sample: counting it would flatter
+        # both the rate and the latency while it is still queued.
+        queued = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "queued"}}
+        )
+        assert queued.status_code == 202, queued.text
+        after = await client.get("/execution-metrics")
+        assert after.json()["data"]["settled"]["settled_runs"] == 2, after.text

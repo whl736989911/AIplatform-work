@@ -58,6 +58,11 @@ from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.attribution import CorrectionCluster, attribute_corrections
 from octop.infra.workbuddy.cel_sandbox import CELSandboxError, evaluate_cel
 from octop.infra.workbuddy.log_redaction import register_secret
+from octop.infra.workbuddy.proposals import (
+    ExecutionMetricRow,
+    metrics_payload,
+    phase_metrics,
+)
 from octop.infra.workbuddy.roles import TENANT_ADMIN_ROLES
 from octop.infra.workbuddy.workflow_compiler import (
     ASK_FIELD_TYPES,
@@ -3707,6 +3712,59 @@ class WorkBuddyRuntimeService:
             }
             for row in rows
         ]
+
+    def execution_metrics(
+        self,
+        actor: RuntimeActor,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+        workflow_id: str | None = None,
+        limit: int = 20_000,
+    ) -> dict[str, Any]:
+        """Settled runs, reported with the same口径 the promotion gates use.
+
+        The visibility rule is the whole difference between the two callers: a
+        member sees the runs they started, an admin sees the tenant's, and the
+        numbers are computed identically over each set of rows. Reporting built on
+        a second set of definitions is how a dashboard and a gate end up telling
+        two different stories about the same week.
+        """
+        self._require_postgres()
+        ctx = self._ctx(actor)
+        scope_user = None if actor.is_admin else actor.user_id
+        rows = self._repo.execution_metrics(
+            ctx,
+            user_id=scope_user,
+            workflow_id=workflow_id,
+            window_start=since,
+            window_end=until,
+            limit=limit,
+        )
+        samples = [
+            ExecutionMetricRow(
+                cohort="member" if scope_user is not None else "tenant",
+                success=row["status"] == "success",
+                active_duration_ms=int(row["active_duration_ms"] or 0),
+                wait_ms=int(row["wait_ms"] or 0),
+                tokens=float(_reported_tokens(row["token_usage"])),
+            )
+            for row in rows
+        ]
+        by_workflow: dict[str, list[ExecutionMetricRow]] = {}
+        for row, sample in zip(rows, samples, strict=True):
+            by_workflow.setdefault(str(row["workflow_id"]), []).append(sample)
+        return {
+            "scope": "member" if scope_user is not None else "tenant",
+            "window": {"since": since, "until": until},
+            "settled": metrics_payload(phase_metrics(samples)),
+            "workflows": [
+                {"workflow_id": key, **metrics_payload(phase_metrics(group))}
+                for key, group in sorted(
+                    by_workflow.items(), key=lambda item: (-len(item[1]), item[0])
+                )
+            ],
+        }
 
     def get_execution(self, actor: RuntimeActor, execution_id: str) -> ExecutionView:
         self._require_postgres()
