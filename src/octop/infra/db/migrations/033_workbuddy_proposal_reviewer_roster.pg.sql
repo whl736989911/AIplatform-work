@@ -28,3 +28,5 @@ ALTER TABLE workbuddy_improvement_proposals
 -- an empty roster by the repository, never as a fabricated member.
 COMMENT ON COLUMN workbuddy_improvement_proposals.reviewers IS
   'Current independent reviewer roster: JSON array of {membership_id, user_id}; NULL until a manager staffs the review.';
+
+UPDATE _schema_version SET version = 33;
