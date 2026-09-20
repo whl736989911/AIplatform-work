@@ -20,6 +20,11 @@ Two consequences worth stating plainly:
 References in a document are written ``{{ steps.<id>... }}`` and lowered to the
 definition's own ``{{ nodes.<id>... }}`` namespace: one mechanical translation, so
 the shape the model writes is never the shape the runtime reads.
+
+**Editing** an existing workflow uses the same document with an ``op`` per step
+(``add``/``update``/``remove``) and lowers to a **JSON Patch** against the stored
+definition — which is the language the improvement-proposal chain already speaks,
+so a description-driven edit travels the same review path a person's edit does.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from typing import Any, Protocol
 
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.node_metadata import definition_metadata
+from octop.infra.workbuddy.proposals import apply_patch, parse_patch
 from octop.infra.workbuddy.workflow_compiler import (
     WorkflowCompileError,
     compile_workflow_definition,
@@ -45,6 +51,9 @@ MAX_AUTHORING_ROUNDS = 2
 #: Step ids double as definition node ids, so they must satisfy the schema's
 #: identifier pattern rather than merely being unique.
 STEP_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+
+#: Step operations, so a description can also *edit* a workflow it already has.
+STEP_OPERATIONS = frozenset({"add", "update", "remove"})
 
 #: The reference namespace inside a document.  ``steps`` is written by the author,
 #: ``nodes`` is what the compiler understands; the lowering translates between them.
@@ -98,6 +107,9 @@ class AuthoringOutcome:
     steps: tuple[AuthoringStep, ...]
     rounds: int
     diagnostics: tuple[AuthoringDiagnostic, ...] = ()
+    #: Set when the document edited an existing definition instead of writing a new
+    #: one: the patch the proposal chain applies, in its own RFC 6902 language.
+    patch: tuple[Mapping[str, Any], ...] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -106,6 +118,7 @@ class AuthoringOutcome:
             "steps": [step.to_payload() for step in self.steps],
             "diagnostics": [item.to_payload() for item in self.diagnostics],
             "definition": dict(self.definition) if self.definition is not None else None,
+            "patch": [dict(item) for item in self.patch] if self.patch is not None else None,
         }
 
 
@@ -182,7 +195,10 @@ def _template_references(value: Any) -> list[str]:
 
 
 def validate_authoring(
-    document: Any, *, metadata: Mapping[str, Any] | None = None
+    document: Any,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+    existing: Mapping[str, Any] | None = None,
 ) -> tuple[AuthoringDiagnostic, ...]:
     """Check a document against the derived vocabulary before anything is lowered.
 
@@ -206,6 +222,17 @@ def validate_authoring(
         for item in document.get("inputs") or ()
         if isinstance(item, Mapping) and item.get("key")
     }
+    # In edit mode the document addresses steps that already exist, so an id may
+    # legitimately be "seen" before the document mentions it.
+    existing_ids = (
+        {
+            str(node.get("id"))
+            for node in (existing.get("nodes") or ())
+            if isinstance(node, Mapping) and node.get("id")
+        }
+        if existing is not None
+        else set()
+    )
     seen: list[str] = []
     for index, step in enumerate(steps):
         path = f"/steps/{index}"
@@ -215,6 +242,31 @@ def validate_authoring(
             )
             continue
         step_id = str(step.get("id") or "")
+        operation = str(step.get("op") or ("add" if existing is not None else "add"))
+        if operation not in STEP_OPERATIONS:
+            problems.append(
+                AuthoringDiagnostic(
+                    "AUTHORING_STEP_OP",
+                    f"{operation!r} is not one of {', '.join(sorted(STEP_OPERATIONS))}",
+                    path,
+                    step_id or None,
+                )
+            )
+        elif (
+            operation in {"update", "remove"}
+            and existing is not None
+            and step_id not in existing_ids
+        ):
+            # Editing only makes sense against a step that is really there: an
+            # update of a step nobody has would silently create it instead.
+            problems.append(
+                AuthoringDiagnostic(
+                    "AUTHORING_STEP_MISSING",
+                    f"step {step_id!r} does not exist in this workflow",
+                    path,
+                    step_id or None,
+                )
+            )
         if not STEP_ID_PATTERN.match(step_id):
             problems.append(
                 AuthoringDiagnostic(
@@ -224,6 +276,10 @@ def validate_authoring(
                     step_id or None,
                 )
             )
+        elif operation == "remove":
+            # A removal names a step and nothing else: no kind, config or
+            # dependency to check, and the id is not available to later steps.
+            continue
         elif step_id in seen:
             problems.append(
                 AuthoringDiagnostic("AUTHORING_STEP_ID", "step ids must be unique", path, step_id)
@@ -248,9 +304,11 @@ def validate_authoring(
             )
             uses = []
         for used in uses:
-            if used not in seen:
+            if used not in seen and used not in existing_ids:
                 # Forward references are how a cycle would be expressible, so the
                 # document's own order is the topological order and is enforced.
+                # (In edit mode an existing step is a legitimate target; a cycle
+                # introduced by *updating* one is the compiler's to catch.)
                 problems.append(
                     AuthoringDiagnostic(
                         "AUTHORING_STEP_ORDER",
@@ -288,7 +346,7 @@ def validate_authoring(
                     )
                 )
         for target in _template_references(config):
-            if target not in seen and target not in declared_inputs:
+            if target not in seen and target not in existing_ids and target not in declared_inputs:
                 problems.append(
                     AuthoringDiagnostic(
                         "AUTHORING_REFERENCE",
@@ -362,6 +420,82 @@ def lower_authoring(document: Mapping[str, Any]) -> dict[str, Any]:
     return definition
 
 
+def _node_of(step: Mapping[str, Any], previous: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """One document step as the definition node it stands for.
+
+    ``previous`` is the node this step updates.  Its ``save_as`` is carried over:
+    the result key is how everything downstream and every past run refers to this
+    step's value, and an edit described in prose is not a request to rename it.
+    """
+    return {
+        "id": str(step["id"]),
+        "type": str(step["kind"]),
+        "name": str(step.get("name") or step.get("purpose") or step["id"])[:200],
+        "config": _lower_config(step.get("config") or {}),
+        "save_as": str(previous.get("save_as"))
+        if previous and previous.get("save_as")
+        else step["id"],
+    }
+
+
+def lower_authoring_patch(
+    existing: Mapping[str, Any], document: Mapping[str, Any]
+) -> tuple[Mapping[str, Any], ...]:
+    """A JSON Patch turning an existing definition into what the document asks for.
+
+    Index shifting is the trap in RFC 6902: every removal moves the later indices,
+    so node and edge removals are collected while the document is walked and are
+    emitted at the very end, in descending order. Everything else is emitted as it
+    is read, because appends and replaces do not move anything.
+    """
+    nodes = [dict(node) for node in existing.get("nodes") or ()]
+    edges = [dict(edge) for edge in existing.get("edges") or ()]
+    node_index = {str(node.get("id")): index for index, node in enumerate(nodes)}
+    edge_index = {
+        (str(edge.get("from")), str(edge.get("to"))): index for index, edge in enumerate(edges)
+    }
+    ops: list[Mapping[str, Any]] = []
+    doomed_nodes: set[int] = set()
+    doomed_edges: set[int] = set()
+
+    def drop_incoming(step_id: str) -> None:
+        for (source, target), index in edge_index.items():
+            if target == step_id:
+                doomed_edges.add(index)
+                _ = source
+
+    for step in document.get("steps") or ():
+        step_id = str(step["id"])
+        operation = str(step.get("op") or "add")
+        uses = [str(item) for item in step.get("uses") or ()]
+        if operation == "remove":
+            if step_id in node_index:
+                doomed_nodes.add(node_index[step_id])
+            for (source, target), index in edge_index.items():
+                if target == step_id or source == step_id:
+                    doomed_edges.add(index)
+            continue
+        previous = nodes[node_index[step_id]] if operation == "update" else None
+        node = _node_of(step, previous)
+        if operation == "update":
+            ops.append({"op": "replace", "path": f"/nodes/{node_index[step_id]}", "value": node})
+            # The step's dependencies are part of the change: drop what it had,
+            # then declare what the document says it now needs.
+            drop_incoming(step_id)
+        else:
+            ops.append({"op": "add", "path": "/nodes/-", "value": node})
+            node_index[step_id] = len(nodes)
+            nodes.append(node)
+        for used in uses:
+            ops.append({"op": "add", "path": "/edges/-", "value": {"from": used, "to": step_id}})
+
+    for index in sorted(doomed_edges, reverse=True):
+        ops.append({"op": "remove", "path": f"/edges/{index}"})
+    for index in sorted(doomed_nodes, reverse=True):
+        ops.append({"op": "remove", "path": f"/nodes/{index}"})
+    return tuple(ops)
+
+
 def _steps_of(document: Mapping[str, Any]) -> tuple[AuthoringStep, ...]:
     return tuple(
         AuthoringStep(
@@ -394,10 +528,18 @@ def author_workflow(
     diagnostics: tuple[AuthoringDiagnostic, ...] = ()
     rounds = 1
     while True:
-        problems = validate_authoring(document, metadata=meta)
+        problems = validate_authoring(document, metadata=meta, existing=existing)
         definition: Mapping[str, Any] | None = None
+        patch: tuple[Mapping[str, Any], ...] | None = None
         if not problems:
-            definition = lower_authoring(document)
+            patch = None
+            if existing is None:
+                definition = lower_authoring(document)
+            else:
+                patch = lower_authoring_patch(existing, document)
+                # The proposal chain's own patch applier builds the candidate, so a
+                # document that compiles here is one the chain can really apply.
+                definition = apply_patch(existing, parse_patch(patch))
             try:
                 # What is returned is the compiler's own normalization: the thing it
                 # accepted is the thing that gets stored, never the pre-compile draft.
@@ -418,6 +560,7 @@ def author_workflow(
                     definition=accepted.definition,
                     steps=_steps_of(document),
                     rounds=rounds,
+                    patch=patch,
                 )
         else:
             diagnostics = problems
@@ -437,6 +580,7 @@ __all__ = [
     "MAX_AUTHORING_ROUNDS",
     "UNAVAILABLE_AUTHORING",
     "STEP_ID_PATTERN",
+    "STEP_OPERATIONS",
     "AuthoringDiagnostic",
     "AuthoringOutcome",
     "AuthoringSource",
@@ -444,5 +588,6 @@ __all__ = [
     "UnavailableAuthoringSource",
     "author_workflow",
     "lower_authoring",
+    "lower_authoring_patch",
     "validate_authoring",
 ]

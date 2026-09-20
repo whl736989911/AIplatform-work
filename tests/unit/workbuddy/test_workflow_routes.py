@@ -29,6 +29,7 @@ _OTHER_MODULE_SUFFIXES = (
     "/execute",
     "/improvement-proposals",
     "/improvement-analysis",
+    "/authoring-proposals",
     "/trigger-registrations",
     "/attribution",
 )

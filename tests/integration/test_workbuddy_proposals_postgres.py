@@ -1011,3 +1011,112 @@ async def test_a_single_correction_is_reported_as_skipped_and_not_analysed(
         data = analysed.json()["data"]
         assert data["created"] == [] and data["rejected"] == [], data
         assert [item["reason"] for item in data["skipped"]] == ["insufficient_evidence"], data
+
+
+class _RenamingAuthor:
+    """A wired author whose answer is an edit to the step that is already there."""
+
+    def __init__(self) -> None:
+        self.saw_existing = False
+
+    def draft(self, *, request: str, metadata: Any, existing: Any) -> dict[str, Any]:
+        # The author must be handed the live definition: a patch is written
+        # against what exists, not against what the model imagines exists.
+        assert existing is not None, "editing requires the current definition"
+        self.saw_existing = True
+        return {
+            "steps": [
+                {
+                    "op": "update",
+                    "id": "hello",
+                    "kind": "transform",
+                    "purpose": "把问候写得更正式一些",
+                    "config": {
+                        "input": {"greeting": "hello {{ inputs.who }}"},
+                        "expression": "input",
+                    },
+                }
+            ]
+        }
+
+    def revise(self, **_: Any) -> dict[str, Any]:
+        raise AssertionError("a correct edit must not need a second round")
+
+
+class _StubbornAuthor:
+    """Never writes anything the compiler can accept.
+
+    Deleting the only step is straightforwardly invalid — a workflow with no steps
+    is not a workflow — which is what makes it a good stand-in for an edit that
+    must be refused rather than stored.
+    """
+
+    def draft(self, *, request: str, metadata: Any, existing: Any) -> dict[str, Any]:
+        return {"steps": [{"op": "remove", "id": "hello"}]}
+
+    def revise(self, **_: Any) -> dict[str, Any]:
+        return self.draft(request="", metadata=None, existing={})
+
+
+def _wire_authoring(app: FastAPI, pool: Any, source: Any) -> None:
+    from octop.api.deps import get_server
+
+    app.dependency_overrides[get_server] = lambda: SimpleNamespace(
+        services=SimpleNamespace(db=pool, workbuddy_authoring_source=source)
+    )
+
+
+async def test_a_described_change_becomes_a_proposal_not_a_write(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """A-15: a described edit travels the review chain, and changes nothing yet."""
+    workflow = _publish(pool, tenant, "Authoring edit")
+    author = _RenamingAuthor()
+    async with _client(app, _principal(tenant)) as client:
+        _wire_authoring(app, pool, author)
+        proposed = await client.post(
+            f"/workflows/{workflow['workflow_id']}/authoring-proposals",
+            json={"request": "把这步的说法改正式一点"},
+        )
+        assert proposed.status_code == 202, proposed.text
+        data = proposed.json()["data"]
+        assert author.saw_existing, "the author was not given the live definition"
+        assert data["status"] == "pending", data
+        assert data["risk_level"] == "low", data
+        assert data["authoring"]["rounds"] == 1, data
+        assert data["authoring"]["steps"][0]["purpose"] == "把问候写得更正式一些", data
+        assert data["job_id"], data
+
+        # A proposal, not a write: the change lives in a *candidate* version, and
+        # the live workflow keeps the version it had until somebody promotes it.
+        detail = await client.get(f"/improvement-proposals/{data['proposal_id']}")
+        body = detail.json()["data"]
+        assert body["status"] == "pending", body
+        assert body["candidate_version_id"] != body["base_version_id"], body
+        listed = await client.get(
+            "/improvement-proposals", params={"workflow_id": workflow["workflow_id"]}
+        )
+        ids = [item["proposal_id"] for item in listed.json()["data"]["items"]]
+        assert data["proposal_id"] in ids, listed.text
+
+
+async def test_a_described_change_that_does_not_compile_is_refused(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """A description that breaks the graph is reported, and nothing is proposed."""
+    workflow = _publish(pool, tenant, "Authoring broken edit")
+    broken = _StubbornAuthor()
+    async with _client(app, _principal(tenant)) as client:
+        _wire_authoring(app, pool, broken)
+        refused = await client.post(
+            f"/workflows/{workflow['workflow_id']}/authoring-proposals",
+            json={"request": "改坏它"},
+        )
+        assert refused.status_code == 400, refused.text
+        error = refused.json()["error"]
+        assert error["code"] == ErrorCode.WORKBUDDY_VALIDATION_FAILED.value, error
+        assert error["details"]["diagnostics"], error
+        listed = await client.get(
+            "/improvement-proposals", params={"workflow_id": workflow["workflow_id"]}
+        )
+        assert listed.json()["data"]["items"] == [], listed.text

@@ -998,11 +998,19 @@
       "success_status": 201,
       "summary": "用一句自然语言描述生成工作流草稿（受限 DSL + 至多两轮编译闭环），201",
       "authorization": "与创建工作流同权；未接线作者模型时 503；两轮仍未编译通过时 400 并带回编译诊断"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows/{workflow_id}/authoring-proposals",
+      "stage": "A5",
+      "success_status": 202,
+      "summary": "用一句描述修改既有工作流：生成 JSON Patch 并走既有提案链，202",
+      "authorization": "与创建提案同权；未接线作者模型时 503；改动无法编译时 400 并带回编译器诊断"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 62,
-    "total": 124
+    "supplemental": 63,
+    "total": 125
   }
 }

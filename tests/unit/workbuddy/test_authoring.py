@@ -226,3 +226,232 @@ def test_lowering_is_total_and_translates_references_everywhere() -> None:
     # Nested values are translated too, not just top-level strings.
     assert "{{ nodes.fetch.output }}" in ask["config"]["prompt"], ask
     assert "{{ steps." not in str(lowered), lowered
+
+
+def _base_definition() -> dict[str, Any]:
+    """A valid starting point, built the same way a create-mode document is."""
+    return lower_authoring(
+        _document(
+            steps=[
+                {
+                    "id": "greet",
+                    "kind": "transform",
+                    "purpose": "把输入包成一句问候",
+                    "config": {"input": {"who": "{{ inputs.who }}"}, "expression": "input"},
+                },
+                {
+                    "id": "polish",
+                    "kind": "llm",
+                    "purpose": "把问候润色得更自然",
+                    "uses": ["greet"],
+                    "config": {"prompt": "润色：{{ steps.greet.output }}"},
+                },
+            ]
+        )
+    )
+
+
+def _edit(**step: Any) -> dict[str, Any]:
+    return {"steps": [step]}
+
+
+def test_editing_a_step_lowers_to_a_patch_the_chain_can_apply() -> None:
+    base = _base_definition()
+    source = ScriptedSource(
+        [
+            _edit(
+                op="update",
+                id="polish",
+                kind="llm",
+                purpose="重写润色这一步",
+                uses=["greet"],
+                config={"prompt": "更简短地润色：{{ steps.greet.output }}"},
+            )
+        ]
+    )
+    outcome = author_workflow(request="润色那步太啰嗦了", source=source, existing=base)
+    assert outcome.ok, outcome.to_payload()
+    assert outcome.patch is not None, outcome.to_payload()
+    # The promise that matters: what compiled is what the chain will apply.
+    from octop.infra.workbuddy.proposals import apply_patch, parse_patch
+
+    candidate = apply_patch(base, parse_patch(outcome.patch))
+    # The chain applies the patch, then the compiler normalizes the result: those
+    # two steps together must land on exactly the definition the loop accepted.
+    assert compile_workflow_definition(candidate).definition == outcome.definition, candidate
+    by_id = {node["id"]: node for node in candidate["nodes"]}
+    assert by_id["polish"]["config"]["prompt"] == "更简短地润色：{{ nodes.greet.output }}", (
+        candidate
+    )
+
+
+def test_adding_a_step_appends_it_and_wires_its_edge() -> None:
+    base = _base_definition()
+    source = ScriptedSource(
+        [
+            _edit(
+                op="add",
+                id="notify",
+                kind="transform",
+                purpose="把结果发出去",
+                uses=["polish"],
+                config={"input": "{{ steps.polish.output }}", "expression": "input"},
+            )
+        ]
+    )
+    outcome = author_workflow(request="最后加一步通知", source=source, existing=base)
+    assert outcome.ok, outcome.to_payload()
+    assert outcome.definition is not None
+    # Node order in the stored definition is the compiler's normalization, not the
+    # patch's: what matters is that the step is there and its edge is wired.
+    assert {node["id"] for node in outcome.definition["nodes"]} == {"greet", "polish", "notify"}
+    assert {"from": "polish", "to": "notify"} in outcome.definition["edges"], outcome.definition
+
+
+def test_removing_steps_removes_their_edges_despite_index_shifts() -> None:
+    base = _base_definition()
+    # Two removals in one document: an ascending patch would delete the wrong node
+    # after the first removal moved the array, so this is the shift trap itself.
+    source = ScriptedSource(
+        [
+            {
+                "steps": [
+                    {"op": "remove", "id": "greet"},
+                    {"op": "remove", "id": "polish"},
+                    {
+                        "op": "add",
+                        "id": "single",
+                        "kind": "transform",
+                        "purpose": "一步到位",
+                        "config": {"input": {"who": "{{ inputs.who }}"}, "expression": "input"},
+                    },
+                ]
+            }
+        ]
+    )
+    outcome = author_workflow(request="全部重来", source=source, existing=base)
+    assert outcome.ok, outcome.to_payload()
+    assert outcome.definition is not None
+    assert {node["id"] for node in outcome.definition["nodes"]} == {"single"}, outcome.definition
+    # ``greet`` fed ``polish``; both of those edges had to go with the nodes.
+    assert outcome.definition["edges"] == [], outcome.definition
+
+
+def test_updating_a_step_that_is_not_there_is_refused() -> None:
+    problems = validate_authoring(
+        _edit(
+            op="update",
+            id="ghost",
+            kind="llm",
+            purpose="改一个不存在的步骤",
+            config={"prompt": "x"},
+        ),
+        existing=_base_definition(),
+    )
+    assert [item.code for item in problems] == ["AUTHORING_STEP_MISSING"], problems
+
+
+def test_an_unknown_operation_is_refused() -> None:
+    problems = validate_authoring(
+        _edit(op="rename", id="polish", kind="llm", purpose="没这个操作", config={"prompt": "x"}),
+        existing=_base_definition(),
+    )
+    assert [item.code for item in problems] == ["AUTHORING_STEP_OP"], problems
+
+
+def _three_step_definition() -> dict[str, Any]:
+    return lower_authoring(
+        _document(
+            steps=[
+                {
+                    "id": "greet",
+                    "kind": "transform",
+                    "purpose": "把输入包成一句问候",
+                    "config": {"input": {"who": "{{ inputs.who }}"}, "expression": "input"},
+                },
+                {
+                    "id": "polish",
+                    "kind": "transform",
+                    "purpose": "把问候润色",
+                    "uses": ["greet"],
+                    "config": {"input": "{{ steps.greet.output }}", "expression": "input"},
+                },
+                {
+                    "id": "notify",
+                    "kind": "transform",
+                    "purpose": "把结果发出去",
+                    "uses": ["polish"],
+                    "config": {"input": "{{ steps.polish.output }}", "expression": "input"},
+                },
+            ]
+        )
+    )
+
+
+def test_an_update_replaces_the_dependencies_it_declares() -> None:
+    base = _three_step_definition()
+    source = ScriptedSource(
+        [
+            _edit(
+                op="update",
+                id="notify",
+                kind="transform",
+                purpose="直接基于最初那一步",
+                uses=["greet"],
+                config={"input": "{{ steps.greet.output }}", "expression": "input"},
+            )
+        ]
+    )
+    outcome = author_workflow(request="通知改成基于第一步", source=source, existing=base)
+    assert outcome.ok, outcome.to_payload()
+    assert outcome.definition is not None
+    edges = {tuple(sorted(edge.items())) for edge in outcome.definition["edges"]}
+    # Dependencies belong to the step, so the old one went with the change.
+    assert {"from": "greet", "to": "notify"} in outcome.definition["edges"], outcome.definition
+    assert {"from": "polish", "to": "notify"} not in outcome.definition["edges"], edges
+
+
+def test_an_update_keeps_the_result_key_the_step_already_had() -> None:
+    """A prose edit is not a rename: downstream and past runs know the old key."""
+    base = _base_definition()
+    base["nodes"][0]["save_as"] = "greeting"
+    source = ScriptedSource(
+        [
+            _edit(
+                op="update",
+                id="greet",
+                kind="transform",
+                purpose="把问候说得更正式",
+                config={"input": {"who": "{{ inputs.who }}"}, "expression": "input"},
+            )
+        ]
+    )
+    outcome = author_workflow(request="这步换个说法", source=source, existing=base)
+    assert outcome.ok, outcome.to_payload()
+    assert outcome.definition is not None
+    by_id = {node["id"]: node for node in outcome.definition["nodes"]}
+    assert by_id["greet"]["save_as"] == "greeting", by_id["greet"]
+    assert by_id["greet"]["name"] == "把问候说得更正式", by_id["greet"]
+
+
+def test_an_edit_that_would_leave_two_starts_is_refused() -> None:
+    """Dropping the only dependency makes a second start, and a workflow has one."""
+    base = _base_definition()
+    orphan = _edit(
+        op="update",
+        id="polish",
+        kind="transform",
+        purpose="不再依赖上一步",
+        uses=[],
+        config={"input": {"who": "{{ inputs.who }}"}, "expression": "input"},
+    )
+    outcome = author_workflow(
+        request="这步自己拿输入", source=ScriptedSource([orphan, orphan]), existing=base
+    )
+    assert outcome.ok is False, outcome.to_payload()
+    assert outcome.patch is None, outcome.to_payload()
+    # The refusal is the compiler's, not this module's: the graph is what is wrong.
+    assert outcome.diagnostics, outcome.to_payload()
+    assert all(item.code.startswith("WORKFLOW_") for item in outcome.diagnostics), (
+        outcome.diagnostics
+    )
