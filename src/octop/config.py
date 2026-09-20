@@ -127,6 +127,8 @@ class OctopConfig:
     port: int = 8088
     log_level: str = "info"
     access_token_ttl_seconds: int = 86400
+    # 空闲后仍能免密回来：refresh token 每次轮换都重新计时，闲置超过该时长即失效。
+    refresh_token_ttl_seconds: int = 2592000  # 30 天；每次轮换重新计时（闲置超期即失效）
     login_max_attempts: int = 5
     login_lockout_seconds: int = 900
     cors_origins: list[str] = field(default_factory=list)
@@ -594,6 +596,7 @@ def load_config(path: Path) -> OctopConfig:
         port=int(merged["port"]),
         log_level=merged["log_level"],
         access_token_ttl_seconds=int(merged["access_token_ttl_seconds"]),
+        refresh_token_ttl_seconds=int(merged.get("refresh_token_ttl_seconds", 2592000)),
         login_max_attempts=int(merged.get("login_max_attempts", 5)),
         login_lockout_seconds=int(merged.get("login_lockout_seconds", 900)),
         cors_origins=list(merged.get("cors_origins") or []),

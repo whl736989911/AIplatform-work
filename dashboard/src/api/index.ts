@@ -5,6 +5,8 @@ export {
   setAuthToken,
   getAuthToken,
   clearAuthToken,
+  setRefreshToken,
+  getRefreshToken,
   markSetupRequired,
   clearSetupRequired,
   isSetupRequiredKnown,

@@ -8,6 +8,13 @@
 
 ### 新增
 
+- **会话续期（A-18）**：登录与续期现在同时签发**刷新令牌**（响应新增 `refresh_token` 与 `refresh_expires_in`，默认 30 天；访问令牌仍是 24 小时，并由既有的滑动续期在活跃期自动延长）。`POST /api/auth/refresh` 用它换一对新令牌：**每次使用都轮换**、库里只存 sha256、一次登录等于一个"家族"；再次提交已轮换的令牌只可能是重放 → **整个家族被撤销**并要求重新登录（两个请求抢跑同样按重放处理）。`POST /api/auth/logout` 可带上刷新令牌以**真正结束该会话**——此前登出只写审计事件，无状态 JWT 无法撤销。于是"安静超过访问令牌有效期再回来"的客户端不必重登，而登出第一次有了实际效果。表由核心迁移 `036_session_refresh_tokens` 建立（PostgreSQL 与 SQLite 两侧都真建表）。
+- WorkBuddy **运行中向人提问**（A-08）：新增 `ask` 节点——运行到某一步缺少只有人能给的事实时（发票号、两个账户选哪个），执行**停在原地等回答**，而不是取消重跑（后者会丢掉已完成的工作与图上的位置）。节点在权威 schema 里声明 `prompt`、`fields`（名字/标签/类型/是否必填/占位/选项）与 `assignee_user_ids`；编译器校验字段名在同一节点内**唯一**（字段名就是提交结果的键）、`select` 必须给 `options`、受派人须是租户内**当前可见**成员——与审批同一条规则：只有"没人能答"才拦发布，已离职的受派人在运行时表现为该步失败（`ASK_NO_VALID_ASSIGNEE`），不会让本来健全的工作流发布不了。执行状态新增 `waiting_input`，与 `waiting_approval` 同类：停放时不占运行槽，回答后重新排队、由 Worker 再次接纳。
+- 提问落库为 `workbuddy_input_requests`（问题、表单与表单摘要、锁定版本 id/hash、截止时间、答案与答案摘要、作答人/时间）与 `workbuddy_input_assignees`（谁该答、是否已回答），两张表 ENABLE + FORCE RLS 并配租户内复合外键；`workbuddy_step_runs.status` 同步接纳 `waiting_input`。**问题文案在开单时渲染**（`{{ … }}` 按本次运行的实际输入与已结算输出渲染），受派人拿到的是一句关于这次运行的话，而不是模板原文。
+- 新增三个端点：`GET /executions/{id}/input-requests`（某次执行提出的问题，含表单与受派人）、`POST /executions/{id}/input-requests/{rid}/answer`（提交答案；未声明的键、类型不符、选项外、必填缺失一律 400 `WORKBUDDY_VALIDATION_FAILED` 且**不改动任何状态**；CAS 保证一个问题只被回答一次，重复提交冲突）、`GET /input-requests`（本人待填队列；admin 的 `scope=tenant` 需有管理目的并审计）。**非受派人一律 404**，与审批一致，不泄漏问题是否存在。运行详情新增等待原因 `input`（`wait_reasons`/`waiting_steps`），前端据此给出答题入口；`input.requested` 通知与 `workbuddy.input_request.created` 发件箱事件与审批同构。
+- WorkBuddy **运行产出审核**（A-09，**事后只追加、绝不阻断**）：`POST /executions/{id}/output-review` 让人审阅某次运行的产出（仅对**已结算**的执行，一次执行至多一条审核）——执行保持原状、产出照旧，审核是**新的只追加记录**（复制产出并记 `produced_sha256`，附受指派审核人）。决定三选一（`POST …/output-review/decisions`）：`accept` 确认产出原样；`correct` 记录**修正后的值**（只允许替换运行**实际产出**的键——修正不是发明结果的地方）；`rerun` 启动一次**新执行**并把 id 回链到审核上，于是"用修正值重跑"成为**两次运行之间**的事实，而不是改写其中一次。重跑还要求被审运行的锁定版本仍是当前版本，否则拒绝（改版后拿同一份修正去跑另一个版本会答非所问）。审核对**非受指派者一律 404**（与审批、提问一致）；`GET /output-reviews` 给出本人待审队列（admin 的 `scope=tenant` 需管理目的并审计）；请求与决定各发通知与发件箱事件，并写审计（`output_review.request` / `output_review.decide`，含被修正的键列表）。
+- WorkBuddy **超时与升级（SLA）**（A-10）：`ask` 节点的 `timeout_hours` 此前只是落库的字段，逾期没有任何后果——运行会永远等下去。现在逾期未答的问题会被**原子置为 `expired`**（平台上下文清理，`SKIP LOCKED` + UPDATE 即 CAS，两个清理者不会重复处理同一条），随即**升级**：通知受派人与租户管理员（`input.expired`）、写 `workbuddy.input_request.expired` 发件箱事件、写审计（`action=input.expire`，含通知人数），并把执行重新排队，使下一次引擎尝试以 `INPUT_REQUEST_EXPIRED` **失败该节点**而不是再次停放同一问题。Worker 在每次领取前先结算截止时间，因此即使租户没有别的工作，逾期问题也会被处理。
+- WorkBuddy **待我填写**界面（A-08/A-11 前端）：收件箱新增「待我填写」面板（问题、来自哪次执行、截止时间、空态与失败重试），回答抽屉按 `form.fields` 逐类型渲染输入（文本/多行/整数/数字/布尔/日期/下拉），必填缺失在提交前拦下、后端错误原样展示；运行详情在等 `input` 时给出同一抽屉的入口。收件箱三合一中的「待我审核」随 A-09 落地，本轮不放假数据。
 - WorkBuddy **创建向导**（A-06）：面向非技术员工的四步引导——① 输入（声明工作流输入）② 步骤（选类型，字段**由 `GET /workflow-definitions/metadata` 驱动**渲染该类型的必填/可选/枚举/范围，向导里没有任何硬编码的字段清单）③ 数据（为每步设置结果名并列出可引用写法）④ 输出。能否放行"下一步"由**服务端校验**决定：定义变化后防抖调用 `POST /workflow-definitions/validate`，回来的诊断按 `path`/`node_id` 归到所在页面，当前页有错就不放行——而不是等到保存时才被编译器拒绝。保存按 建草稿 → 存版本 → 发布 走既有路由，发布后可直接**试运行**；原自由 JSON 编辑器保留为进阶路径，两条路并存。
 - WorkBuddy 节点集**显式化**（A-07）：新增三类节点——`input`（把某个已声明的输入接入图）、`knowledge`（检索成为独立一步）、`output`（显式声明运行结果）。三者同时进入权威 schema（`contracts/workflow-v1.schema.json` 的节点枚举与 `allOf` 分支）与编译器校验（输入节点必须指向**已声明**输入；输出节点**唯一且必须为终态**；知识库节点按调用者可达性校验），并**自动出现在 `GET /workflow-definitions/metadata`**（元数据从 schema 同源导出，不手写副本）。
 - 运行时执行三类新节点：`input`/`output` **本地执行**（读声明输入 / 渲染运行结果，不离开进程）；`knowledge` 走**可注入的检索端口**（与工具、模型适配器同类）；未接线时该步 **fail-closed**（明确报依赖不可用），而不是静默返回"没有检索结果"而看起来像空答案。
@@ -42,6 +49,9 @@
 ### 修复
 
 - 修复**无源点的环导致编译崩溃**：拓扑检查先取入口节点、之后才找环，于是「每个节点都有入边」这种没有源点的纯环定义会以 `IndexError` 中断编译，`POST /workflow-definitions/validate` 返回 503 而不是调用方要用来修定义的环诊断。现在没有源点时直接交由环检查报出节点列表（422 + `WORKFLOW_CYCLE`），并补上这条此前缺失的用例——它是由 CI 的 live-PostgreSQL 用例发现的：该用例带 PG 标记，本地只跑了定向用例。
+- 修复阶段遗漏的**步骤节点类型约束**：迁移 018 建表时把 `workbuddy_step_runs.node_type` 限定为当时存在的五类（`tool`/`llm`/`condition`/`approval`/`transform`），此后新增的 `input`/`knowledge`/`output`（A-07）与本次的 `ask` 都不在其中——**任何含这些节点的工作流一旦真正运行，第一步落库就会以 check 违例整次失败**；而 A-07 的验证只到单元层（不写数据库），所以没有暴露。迁移 034 把该词表扩到与编译器节点集一致的九类。这个缺陷是批次 4 的端到端用例（真实 PostgreSQL 上跑停放 → 作答 → 恢复）第一次执行就抓到的——它也是"单元测试全绿不等于功能可用"的实例。
+- 修复**停在表单上的运行取消不掉**：`request_cancel` 的状态白名单只有 `queued`/`waiting_approval`，漏了新增的 `waiting_input`，于是员工在「等待填写」的执行上点取消不会有任何效果（接口既不改状态也不报错）。补入后取消会立即结算该执行——停在任何人工等待上的运行都必须能直接取消，因为它已经没有在途调用需要等。该修复由端到端用例（停放 → 取消 → 状态为 `canceled`）证明。
+- 修复 `workbuddy_executions` 写入方法 `insert_execution` 的**绑参缺列**：列清单已含迁移 024/025 加入的路由列（`proposal_id`/`cohort`/`bucket`/`route_canary_percent`/`subject`），绑定值却只有 12 个，调用即报占位符数量不符。该方法当前无调用方（运行时走 `insert_execution_if_absent`），属潜伏缺陷而非线上故障。现两者列集与绑参完全一致，并以真实 PG 探针逐字段回读证明同一入参写出同样形状的行（含 5 个路由列非空回读）。
 - 企业治理面板把租户角色判定写死为 `admin`，而后端 `TENANT_ADMIN_ROLES` 与租户创建流程都以 **owner** 作为首位治理者：结果是每个租户的第一位用户在企业治理页只看到只读的「企业成员」视图，成员、邀请、配额、凭据、能力许可五个管理页签全部不可见，尽管接口本会放行。现改为共享的 `utils/tenantRole.ts`，并新增一条读取后端 `roles.py` 的一致性测试，防止两侧角色集合再次漂移。
 - 生产 Worker 容器启动即失败：`deploy/scripts/app-entrypoint.sh` 执行的是 `octop workbuddy-worker`，而命令行只提供 `octop workbuddy worker`（组 + 子命令），容器会以「No such command」退出。同步修正 `docs/architecture.md`、`.env.example` 与 CHANGELOG 中的同一处写法，并新增 `tests/unit/test_deploy_cli_commands.py`：解析 `deploy/scripts/*.sh` 中所有 `octop …` 调用并与真实命令行注册表比对，防止部署脚本与命令面再次漂移。
 - WorkBuddy 作业状态：此前没有任何路径把作业从 `queued` 置为 `running`，正在执行的作业对客户端仍显示 `queued`；新增 `start_job`（同时写入 `started_at`）。
@@ -57,7 +67,7 @@
 
 ### 文档
 
-- README（中英双份）新增 WorkBuddy 章节：能力清单（租户治理、工作流编译与版本、执行 Worker、审批、工具治理、知识库、触发器、改进闭环、模板市场、作业与事件）、`/api/v1` 接口速查、`octop workbuddy` 命令行、部署前提（PostgreSQL 必需、`vector` 扩展为前置条件、Redis 承载限流、Worker 层级开关）与验证命令；同时写明当前边界：连接器/模型网关适配器与触发器投递执行属部署方接线，outbox 需先接发布端口，租户级指标口径与生产注销合规签署属产品决策。
+- **README 改为描述本仓库自身**（`README.md` 与 `README_CN.md`）：此前的两份 README 是上游 Octop 的产品介绍（上游 banner、Trendshift 徽章、"自托管 AI 助手"定位、上游的安装形态与功能巡礼），读者会把另一个产品当成这个仓库——这正是"误导其他用户"的来源。现在开头先声明本仓库与上游的关系（以 Octop（MIT）为**基座**、产品方向是**多租户企业工作流平台**、上游 README 不代表本仓库），随后给出「这个仓库是什么 / 不是什么」、本仓库实际交付的能力（WorkBuddy 为主，继承基座单独标注并注明不属于本仓库方向）、快速开始、命令行、接口速查（并指向 `contracts/route-manifest.json` 作为权威清单）、验证（`make lint/typecheck/test` + PG/Redis 标记用例 + 前端命令，并说明 CI 中唯一覆盖迁移与 RLS 的是 live database 作业）、部署要点（迁移时机、RLS、运行角色属部署方、Worker 必需）、当前边界、仓库结构与许可归属。文中引用的路径、端点与命令逐条对照代码核实（20 个端点、11 个路径、4 个 Makefile 目标）。
 
 ## [1.0.1] - 2026-09-18
 

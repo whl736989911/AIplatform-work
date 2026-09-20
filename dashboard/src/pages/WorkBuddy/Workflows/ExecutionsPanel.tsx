@@ -201,7 +201,7 @@ export default function ExecutionsPanel({
       render: (value: ExecutionStatus) => (
         <Tag
           color={
-            value === "succeeded"
+            value === "success"
               ? "green"
               : value === "failed"
               ? "red"

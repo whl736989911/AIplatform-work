@@ -61,6 +61,9 @@ export interface LoginResponse {
   access_token: string;
   token_type: string;
   expires_in: number;
+  /** Present on the login paths that issue a renewable session. */
+  refresh_token?: string;
+  refresh_expires_in?: number;
   user: OctopUser;
   /** Legacy alias for ``access_token`` so old callers using ``.token`` keep working. */
   token: string;
@@ -105,6 +108,8 @@ interface RawLoginResponse {
   access_token: string;
   token_type: string;
   expires_in: number;
+  refresh_token?: string;
+  refresh_expires_in?: number;
   user: OctopUser;
 }
 
@@ -231,9 +236,17 @@ export const authApi = {
     return { ...raw, token: raw.access_token };
   },
 
-  /** Server-side logout (best-effort; client clears token regardless). */
-  logout: () =>
-    request<void>("/auth/logout", { method: "POST" }).catch(() => undefined),
+  /**
+   * Server-side logout (best-effort; client clears token regardless).
+   *
+   * Handing back the refresh token is what actually ends the session: the access
+   * token is stateless and simply expires, while the refresh family can be revoked.
+   */
+  logout: (refreshToken?: string) =>
+    request<void>("/auth/logout", {
+      method: "POST",
+      body: JSON.stringify(refreshToken ? { refresh_token: refreshToken } : {}),
+    }).catch(() => undefined),
 
   /** Get the current authenticated user. */
   me: () => request<OctopUser>("/auth/me"),

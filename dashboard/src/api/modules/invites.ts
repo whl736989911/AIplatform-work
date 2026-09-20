@@ -34,6 +34,9 @@ export interface InviteRedeemResponse {
   access_token: string;
   token_type: string;
   expires_in: number;
+  /** Present once the redeem path issues a renewable session. */
+  refresh_token?: string;
+  refresh_expires_in?: number;
   user: {
     id: number;
     username: string;

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -9,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from octop.api.deps import current_user, get_server, sign_token
 from octop.infra.auth.captcha import current_env, ensure_captcha, load_effective, public_config
+from octop.infra.db.repos._base import now_ts
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.users.permissions import effective_permissions
 from octop.infra.utils.locale import normalize_locale
@@ -26,6 +29,65 @@ def _user_json(user: Any, *, locale: str | None = None) -> dict[str, Any]:
         "locale": loc,
         "permissions": effective_permissions(user),
     }
+
+
+# --------------------------------------------------------------------------- #
+# session renewal (refresh tokens)
+# --------------------------------------------------------------------------- #
+#
+# An access token is short-lived and stateless, and ``maybe_sliding_renew_token``
+# already extends it for a client that keeps talking to us.  What that cannot
+# cover is a client that goes quiet for longer than the access TTL: it has nothing
+# left to present, so today it has to sign in again.  A refresh token closes that
+# gap, and because it is stored — hashed — a sign-out can finally mean something.
+#
+# Only the hash is persisted and every use rotates it.  Presenting a token that was
+# already rotated is the signature of a copy being replayed, so the whole family
+# (one family == one sign-in) is revoked rather than quietly issuing another.
+
+_REFRESH_TOKEN_BYTES = 32
+
+
+def _refresh_token_hash(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def issue_session(server: Any, user: Any, *, family_id: str | None = None) -> dict[str, Any]:
+    """The token pair a sign-in (or a renewal) hands out.
+
+    The plaintext refresh token leaves here and is never stored; only its hash is,
+    together with the family it belongs to.  A renewal keeps the family, so a
+    replayed ancestor can still revoke every token that grew out of the same
+    sign-in.
+    """
+    secret = server.services.secret_repo.get("jwt")
+    ttl = int(server.services.config.access_token_ttl_seconds)
+    refresh_ttl = int(server.services.config.refresh_token_ttl_seconds)
+    access = sign_token(
+        secret, sub=user.id, uname=user.username, role=user.role.value, ttl_seconds=ttl
+    )
+    refresh = secrets.token_urlsafe(_REFRESH_TOKEN_BYTES)
+    server.services.refresh_token_repo.create(
+        user_id=user.id,
+        token_hash=_refresh_token_hash(refresh),
+        family_id=family_id or secrets.token_hex(16),
+        expires_at=now_ts() + refresh_ttl,
+    )
+    return {
+        "access_token": access,
+        "token_type": "Bearer",
+        "expires_in": ttl,
+        "refresh_token": refresh,
+        "refresh_expires_in": refresh_ttl,
+    }
+
+
+class RefreshBody(BaseModel):
+    refresh_token: str = Field(min_length=16, max_length=512)
+
+
+class LogoutBody(BaseModel):
+    refresh_token: str | None = Field(default=None, max_length=512)
 
 
 def me_payload(user: Any, server: Any) -> dict[str, Any]:
@@ -106,22 +168,54 @@ async def login(
     user = await server.user_manager.authenticate(body.username, body.password)
     if user is None:
         raise OctopError(ErrorCode.AUTH_FAILED, "invalid credentials")
-    secret = server.services.secret_repo.get("jwt")
-    ttl = server.services.config.access_token_ttl_seconds
-    token = sign_token(
-        secret, sub=user.id, uname=user.username, role=user.role.value, ttl_seconds=ttl
-    )
-    return {
-        "access_token": token,
-        "token_type": "Bearer",
-        "expires_in": ttl,
-        "user": _user_json(user, locale=user.locale),
-    }
+    session = issue_session(server, user)
+    return {**session, "user": _user_json(user, locale=user.locale)}
+
+
+@router.post("/refresh", summary="Exchange a refresh token for a new session")
+async def refresh(body: RefreshBody, server: Any = Depends(get_server)) -> dict[str, Any]:
+    """Rotate the refresh token and hand back a fresh pair.
+
+    Exactly one use per token.  A token that was already rotated can only be a
+    replay, so the family is revoked and the caller signs in again — that is the
+    whole point of rotating: a stolen copy is worth one attempt, not a session.
+    """
+    repo = server.services.refresh_token_repo
+    row = repo.get_by_hash(_refresh_token_hash(body.refresh_token))
+    now = now_ts()
+    if row is None or row.revoked_at is not None or row.expires_at <= now:
+        raise OctopError(ErrorCode.AUTH_FAILED, "refresh token is not valid")
+    if row.rotated_at is not None or not repo.rotate(row.id):
+        # Either this token was already spent, or two requests raced for it: both
+        # mean a copy is in play, so the family goes rather than a fresh session.
+        repo.revoke_family(row.family_id)
+        raise OctopError(ErrorCode.AUTH_FAILED, "refresh token was already used; sign in again")
+    user = server.user_manager.get_by_id(row.user_id)
+    if user is None:
+        repo.revoke_family(row.family_id)
+        raise OctopError(ErrorCode.USER_DISABLED, "user not active")
+    session = issue_session(server, user, family_id=row.family_id)
+    return {**session, "user": _user_json(user, locale=user.locale)}
 
 
 @router.post("/logout", status_code=204, summary="Sign out")
-async def logout(user: Any = Depends(current_user), server: Any = Depends(get_server)) -> Response:
-    """Record an audit event for the current session. JWTs are stateless and not revoked server-side."""
+async def logout(
+    body: LogoutBody | None = None,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> Response:
+    """End the session: revoke its refresh family, then record the audit event.
+
+    The access token itself stays stateless (it expires on its own within its TTL),
+    but a caller that hands back its refresh token ends the *session*: no later
+    renewal can grow another access token out of it.
+    """
+    if body is not None and body.refresh_token:
+        row = server.services.refresh_token_repo.get_by_hash(
+            _refresh_token_hash(body.refresh_token)
+        )
+        if row is not None:
+            server.services.refresh_token_repo.revoke_family(row.family_id)
     server.services.audit_repo.write(actor=user.username, action="auth.logout")
     return Response(status_code=204)
 

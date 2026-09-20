@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { authApi } from "../../../api/modules/auth";
-import { setAuthToken } from "../../../api/request";
+import { setAuthToken, setRefreshToken } from "../../../api/request";
 import { refreshServerLabels } from "../../../i18n";
 import { applyUserLocale } from "../../../utils/locale";
 import {
@@ -58,6 +58,7 @@ export default function FinishStep({ adminCreds, providerDraft }: Props) {
       try {
         const r = await authApi.login(adminCreds.username, adminCreds.password);
         setAuthToken(r.access_token);
+        setRefreshToken(r.refresh_token ?? null);
         await applyUserLocale(r.user.locale);
         void refreshServerLabels(r.user.locale);
       } catch (e) {

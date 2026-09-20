@@ -527,6 +527,481 @@ async def test_zero_valid_approvers_fails_the_node(
 
 
 # --------------------------------------------------------------------------- #
+# a run that stops to ask a person (A-08)
+# --------------------------------------------------------------------------- #
+
+
+def question_definition(assignee_membership_ids: list[str]) -> dict[str, Any]:
+    """A report that cannot finish without a fact only a person has."""
+    definition = hello_definition()
+    definition["nodes"] = [
+        *definition["nodes"],
+        {
+            "id": "ask",
+            "type": "ask",
+            "name": "Ask for the invoice number",
+            "config": {
+                "prompt": "Post {{ nodes.hello.output }} against which invoice?",
+                "assignee_user_ids": assignee_membership_ids,
+                "fields": [
+                    {"name": "invoice", "label": "Invoice", "type": "string"},
+                    {"name": "amount", "label": "Amount", "type": "number", "required": False},
+                ],
+                "timeout_hours": 24,
+            },
+            "save_as": "answer",
+        },
+    ]
+    definition["edges"] = [{"from": "hello", "to": "ask"}]
+    return definition
+
+
+async def test_an_ask_node_parks_then_an_answer_resumes_the_run(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T30: a run waits for a person, and one answer carries it to completion."""
+    definition = question_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Question runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "runtime"}}
+        )
+        assert accepted.status_code == 202, accepted.text
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+
+        waiting = await client.get(f"/executions/{execution_id}")
+        assert waiting.status_code == 200, waiting.text
+        data = waiting.json()["data"]
+        assert data["status"] == "waiting_input", data
+        # The detail says what the run is waiting for, which is how a client
+        # decides to offer the form instead of a retry or a cancel.
+        assert data["wait_reasons"] == ["input"], data
+        assert data["waiting_steps"] == ["ask"], data
+
+        questions = await client.get(f"/executions/{execution_id}/input-requests")
+        assert questions.status_code == 200, questions.text
+        items = questions.json()["data"]["items"]
+        assert len(items) == 1, items
+        question = items[0]
+        assert question["status"] == "open", question
+        assert question["values"] is None, question
+        # The question is rendered for this run, not stored as the template.
+        assert "{{" not in question["prompt"], question
+        assert "hello runtime" in question["prompt"], question
+        assert [field["name"] for field in question["form"]["fields"]] == ["invoice", "amount"]
+        assert [item["user_id"] for item in question["assignees"]], question
+
+        answered = await client.post(
+            f"/executions/{execution_id}/input-requests/{question['id']}/answer",
+            json={"values": {"invoice": "INV-2026-7", "amount": 1200}},
+        )
+        assert answered.status_code == 200, answered.text
+        # The answer re-queues the run: a parked execution holds no running slot,
+        # so the worker admits it again exactly like the first attempt.
+        assert answered.json()["data"]["status"] == "queued", answered.text
+        _drain(pool)
+
+        settled = await client.get(f"/executions/{execution_id}")
+        assert settled.json()["data"]["status"] == "success", settled.text
+        outputs = settled.json()["data"]["outputs"]
+        assert outputs["answer"] == {"invoice": "INV-2026-7", "amount": 1200}, outputs
+
+        replay = await client.post(
+            f"/executions/{execution_id}/input-requests/{question['id']}/answer",
+            json={"values": {"invoice": "INV-2026-8"}},
+        )
+        assert replay.status_code >= 400, replay.text
+
+        inbox = await client.get("/input-requests")
+        assert inbox.status_code == 200, inbox.text
+        answered_now = [item for item in inbox.json()["data"]["items"] if item["status"] == "open"]
+        assert not answered_now, inbox.text
+
+
+async def test_an_answer_that_does_not_fit_the_question_is_refused(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T31: the submitted values must match the form the run asked with."""
+    definition = question_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Question validation")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        listed = await client.get(f"/executions/{execution_id}/input-requests")
+        question_id = listed.json()["data"]["items"][0]["id"]
+
+        unasked = await client.post(
+            f"/executions/{execution_id}/input-requests/{question_id}/answer",
+            json={"values": {"invoice": "INV-1", "who_else": "x"}},
+        )
+        assert unasked.status_code == 400, unasked.text
+        assert unasked.json()["error"]["code"] == ErrorCode.WORKBUDDY_VALIDATION_FAILED.value
+
+        missing = await client.post(
+            f"/executions/{execution_id}/input-requests/{question_id}/answer",
+            json={"values": {"amount": 1}},
+        )
+        assert missing.status_code == 400, missing.text
+
+        wrong_type = await client.post(
+            f"/executions/{execution_id}/input-requests/{question_id}/answer",
+            json={"values": {"invoice": "INV-1", "amount": "1200"}},
+        )
+        assert wrong_type.status_code == 400, wrong_type.text
+
+        # A refused answer changes nothing: the question is still open and the
+        # run is still parked on it.
+        still_open = await client.get(f"/executions/{execution_id}/input-requests")
+        assert still_open.json()["data"]["items"][0]["status"] == "open", still_open.text
+        still_waiting = await client.get(f"/executions/{execution_id}")
+        assert still_waiting.json()["data"]["status"] == "waiting_input", still_waiting.text
+
+
+async def test_only_an_assignee_can_read_or_answer_the_question(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T32: a member who is not assigned the question learns nothing about it."""
+    definition = question_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Question assignment")
+    owner = _principal(tenant)
+    async with _client(app, owner) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        listed = await client.get(f"/executions/{execution_id}/input-requests")
+        question_id = listed.json()["data"]["items"][0]["id"]
+
+    reviewer = _principal(
+        tenant,
+        role="member",
+        user_id=tenant["reviewer_user_id"],
+        member_id=tenant["reviewer_member_id"],
+    )
+    async with _client(app, reviewer) as client:
+        inbox = await client.get("/input-requests")
+        assert inbox.status_code == 200, inbox.text
+        assert inbox.json()["data"]["items"] == [], inbox.text
+
+        # 404, not 403: whether the question exists is itself not disclosed.
+        hidden = await client.get(f"/executions/{execution_id}/input-requests")
+        assert hidden.status_code == 404, hidden.text
+        refused = await client.post(
+            f"/executions/{execution_id}/input-requests/{question_id}/answer",
+            json={"values": {"invoice": "INV-1"}},
+        )
+        assert refused.status_code == 404, refused.text
+
+    async with _client(app, owner) as client:
+        still_open = await client.get(f"/executions/{execution_id}/input-requests")
+        assert still_open.json()["data"]["items"][0]["status"] == "open", still_open.text
+
+
+async def test_a_run_parked_on_a_question_can_be_cancelled(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T33: a run waiting for an answer is not stranded: cancel settles it."""
+    definition = question_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Question cancel")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        parked = await client.get(f"/executions/{execution_id}")
+        assert parked.json()["data"]["status"] == "waiting_input", parked.text
+
+        cancelled = await client.post(
+            f"/executions/{execution_id}/cancel", json={"reason": "no longer needed"}
+        )
+        assert cancelled.status_code == 202, cancelled.text
+        fetched = await client.get(f"/executions/{execution_id}")
+        assert fetched.json()["data"]["status"] == "canceled", fetched.text
+
+
+# --------------------------------------------------------------------------- #
+# output reviews (A-09: after the fact, never blocking)
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_output_review_accepts_a_settled_run_without_touching_it(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T36: reviewing a run is a second, append-only account of its result."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Review runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "runtime"}}
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        settled = await client.get(f"/executions/{execution_id}")
+        produced = settled.json()["data"]["outputs"]
+        assert settled.json()["data"]["status"] == "success", settled.text
+
+        requested = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert requested.status_code == 201, requested.text
+        review = requested.json()["data"]
+        # The review copies what the run produced; the run's own payloads stay the
+        # source of truth.
+        assert review["produced"] == produced, review
+        assert review["status"] == "open", review
+        assert review["corrected"] is None, review
+        assert [item["user_id"] for item in review["reviewers"]], review
+
+        inbox = await client.get("/output-reviews")
+        assert inbox.status_code == 200, inbox.text
+        assert [item["id"] for item in inbox.json()["data"]["items"]] == [review["id"]]
+
+        decided = await client.post(
+            f"/executions/{execution_id}/output-review/decisions", json={"decision": "accept"}
+        )
+        assert decided.status_code == 200, decided.text
+        assert decided.json()["data"]["status"] == "accepted", decided.text
+        assert decided.json()["data"]["decided_at"], decided.text
+
+        # A review never holds a run back: the execution is exactly what it was.
+        after = await client.get(f"/executions/{execution_id}")
+        assert after.json()["data"]["status"] == "success", after.text
+        assert after.json()["data"]["outputs"] == produced, after.text
+
+        # One review per run, and one decision per review.
+        again = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert again.status_code == 409, again.text
+        replay = await client.post(
+            f"/executions/{execution_id}/output-review/decisions", json={"decision": "accept"}
+        )
+        assert replay.status_code == 409, replay.text
+
+
+async def test_a_correction_may_only_replace_what_the_run_produced(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T37: a correction fixes values; it cannot invent a result."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Correction runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "runtime"}}
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        requested = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert requested.status_code == 201, requested.text
+        keys = sorted(requested.json()["data"]["produced"])
+        assert keys, requested.text
+
+        invented = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {**dict.fromkeys(keys, "x"), "bogus": 1}},
+        )
+        assert invented.status_code == 400, invented.text
+        assert invented.json()["error"]["code"] == ErrorCode.WORKBUDDY_VALIDATION_FAILED.value
+
+        nothing = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {}},
+        )
+        assert nothing.status_code == 400, nothing.text
+
+        fixed = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {keys[0]: {"greeting": "hello corrected"}}},
+        )
+        assert fixed.status_code == 200, fixed.text
+        data = fixed.json()["data"]
+        assert data["status"] == "corrected", data
+        assert data["corrected"] == {keys[0]: {"greeting": "hello corrected"}}, data
+        # The correction is recorded beside the produced output, not instead of it.
+        assert data["produced"], data
+
+
+async def test_a_review_is_invisible_to_everyone_else(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T38: a member who was not asked to review learns nothing about the review."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Review visibility")
+    owner = _principal(tenant)
+    async with _client(app, owner) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        requested = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert requested.status_code == 201, requested.text
+
+    reviewer = _principal(
+        tenant,
+        role="member",
+        user_id=tenant["reviewer_user_id"],
+        member_id=tenant["reviewer_member_id"],
+    )
+    async with _client(app, reviewer) as client:
+        inbox = await client.get("/output-reviews")
+        assert inbox.status_code == 200, inbox.text
+        assert inbox.json()["data"]["items"] == [], inbox.text
+        hidden = await client.get(f"/executions/{execution_id}/output-review")
+        assert hidden.status_code == 404, hidden.text
+        refused = await client.post(
+            f"/executions/{execution_id}/output-review/decisions", json={"decision": "accept"}
+        )
+        assert refused.status_code == 404, refused.text
+
+
+async def test_an_unsettled_run_cannot_be_reviewed(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T39: a review is about a settled result, not about a run still going."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Unsettled review")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        # No drain: the execution is still queued.
+        refused = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["error"]["code"] == ErrorCode.STATE_CONFLICT.value
+
+
+async def test_a_rerun_starts_a_linked_execution(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T40: "run it again" is a fact about two runs, never a rewrite of one."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Rerun runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "first"}}
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        first = await client.get(f"/executions/{execution_id}")
+        assert first.json()["data"]["status"] == "success", first.text
+
+        requested = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert requested.status_code == 201, requested.text
+
+        rerun = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "rerun", "inputs": {"who": "second"}},
+        )
+        assert rerun.status_code == 200, rerun.text
+        data = rerun.json()["data"]
+        assert data["status"] == "rerun", data
+        new_execution_id = data["rerun_execution_id"]
+        assert new_execution_id and new_execution_id != execution_id, data
+
+        # The original run is untouched and the new one is a real execution that
+        # runs the inputs the reviewer asked for.
+        again = await client.get(f"/executions/{execution_id}")
+        assert again.json()["data"]["status"] == "success", again.text
+        fresh = await client.get(f"/executions/{new_execution_id}")
+        assert fresh.json()["data"]["status"] == "queued", fresh.text
+        assert fresh.json()["data"]["inputs"] == {"who": "second"}, fresh.text
+        _drain(pool)
+        settled = await client.get(f"/executions/{new_execution_id}")
+        assert settled.json()["data"]["status"] == "success", settled.text
+
+
+async def test_an_overdue_question_fails_the_run_and_escalates(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T35: a question past its deadline settles the run and tells the tenant."""
+    definition = question_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Question deadline")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        parked = await client.get(f"/executions/{execution_id}")
+        assert parked.json()["data"]["status"] == "waiting_input", parked.text
+
+        # A deadline is a fact about wall-clock time, so the test makes the
+        # question overdue instead of waiting out its 24 hours.
+        with pool.connect() as conn:
+            conn.execute(
+                "UPDATE workbuddy_input_requests SET expires_at = now() - interval '1 hour'"
+                " WHERE execution_id = ?",
+                (execution_id,),
+            )
+
+        # The worker settles deadlines before each claim, so this run also picks
+        # up the re-queued execution the expiration produced.
+        _drain(pool)
+
+        expired = await client.get(f"/executions/{execution_id}/input-requests")
+        items = expired.json()["data"]["items"]
+        assert [item["status"] for item in items] == ["expired"], items
+
+        settled = await client.get(f"/executions/{execution_id}")
+        data = settled.json()["data"]
+        assert data["status"] == "failed", data
+        assert data["error_code"] == ErrorCode.INPUT_REQUEST_EXPIRED.value, data
+        # The detail keeps every attempt of a node: the first is the park that
+        # waited, the second is the attempt the sweep produced, and that is the one
+        # that failed.
+        asks = [step for step in data["steps"] if step["node_id"] == "ask"]
+        latest = max(asks, key=lambda step: step["attempt"])
+        assert latest["attempt"] == 2, asks
+        assert latest["status"] == "failed", latest
+        assert latest["error_code"] == ErrorCode.INPUT_REQUEST_EXPIRED.value, latest
+
+        # The escalation is auditable and visible to the people who could act.
+        audit = await client.get("/audit-logs", params={"action": "input.expire"})
+        assert audit.status_code == 200, audit.text
+        assert audit.json()["data"]["items"], audit.text
+        notifications = await client.get("/notifications")
+        kinds = {item["kind"] for item in notifications.json()["data"]["items"]}
+        assert "input.expired" in kinds, notifications.text
+
+
+async def test_a_question_nobody_can_answer_fails_the_node(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T34: no eligible assignee means the node fails instead of waiting forever."""
+    definition = question_definition([str(uuid.uuid4())])
+    workflow_id = _publish(pool, tenant, definition, "No assignee runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        fetched = await client.get(f"/executions/{execution_id}")
+        data = fetched.json()["data"]
+        questions = await client.get(f"/executions/{execution_id}/input-requests")
+
+    assert data["status"] == "failed", data
+    assert data["error_code"] == ErrorCode.ASK_NO_VALID_ASSIGNEE.value, data
+    step = next(step for step in data["steps"] if step["node_id"] == "ask")
+    assert step["status"] == "failed", step
+    assert step["error_code"] == ErrorCode.ASK_NO_VALID_ASSIGNEE.value, step
+    # Nobody can answer, so no question is left behind for the tenant to chase.
+    assert questions.json()["data"]["items"] == [], questions.text
+
+
+# --------------------------------------------------------------------------- #
 # unknown external writes (contract 5.1.6 / T13)
 # --------------------------------------------------------------------------- #
 

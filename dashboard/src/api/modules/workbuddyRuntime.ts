@@ -9,15 +9,25 @@
  *   GET  /v1/executions/{id}/reconciliations
  *   GET  /v1/approval-requests             GET /v1/approval-requests/{id}
  *   POST /v1/approval-requests/{id}/challenge
+ *   GET  /v1/input-requests                GET /v1/executions/{id}/input-requests
+ *   POST /v1/executions/{id}/input-requests/{input_request_id}/answer
+ *   POST /v1/executions/{id}/output-review GET  /v1/executions/{id}/output-review
+ *   POST /v1/executions/{id}/output-review/decisions
+ *   GET  /v1/output-reviews
  *   GET  /v1/notifications                 POST /v1/notifications/{id}/read
  *
- * Two invariants this module never breaks:
+ * Three invariants this module never breaks:
  *  - A resumed execution is a decision on a *pending* approval and is guarded by
  *    a two-minute one-time challenge. ``challengeApprovalRequest`` returns that
  *    token exactly once (the server keeps only its hash); it lives in the
  *    caller's modal state, is never persisted and is never logged.
  *  - The challenge response is the one body whose token sits *beside* ``data``
  *    rather than inside it, so it is unwrapped explicitly here.
+ *  - A reviewed run is a *settled* run: a review is an append-only account of
+ *    what a person said about the result, so nothing here can pause, resume or
+ *    rewrite an execution. ``correct`` and ``rerun`` record a second fact — the
+ *    values a reviewer replaced, the id of the execution that re-ran the work —
+ *    beside the original output, never over it.
  */
 
 import { request } from "../request";
@@ -65,21 +75,37 @@ function withQuery(
 // --- vocabularies (mirror the PostgreSQL CHECK constraints) ----------------
 
 export const EXECUTION_STATUSES = [
-  "pending",
+  "queued",
   "running",
   "waiting_approval",
-  "succeeded",
+  "waiting_input",
+  // Parked on an unknown external write until an operator records evidence.
+  "waiting_reconciliation",
+  "success",
   "failed",
   "partial",
-  "cancelled",
+  "canceled",
 ] as const;
 export type ExecutionStatus = (typeof EXECUTION_STATUSES)[number];
 
 /** Statuses the server still accepts a cancel for. */
 export const CANCELLABLE_EXECUTION_STATUSES: readonly ExecutionStatus[] = [
-  "pending",
+  "queued",
   "running",
   "waiting_approval",
+  "waiting_input",
+];
+
+/**
+ * Statuses a run has settled in — the only ones a review may be opened for.
+ * Requesting or deciding a review of a run that can still move is refused with
+ * ``STATE_CONFLICT``.
+ */
+export const TERMINAL_EXECUTION_STATUSES: readonly ExecutionStatus[] = [
+  "success",
+  "failed",
+  "partial",
+  "canceled",
 ];
 
 export const EXECUTION_TRIGGER_TYPES = [
@@ -342,6 +368,176 @@ export interface ApprovalChallenge {
   expires_in: number;
 }
 
+// --- input requests --------------------------------------------------------
+
+export const INPUT_REQUEST_STATUSES = [
+  "open",
+  "submitted",
+  "expired",
+  "invalidated",
+] as const;
+export type InputRequestStatus = (typeof INPUT_REQUEST_STATUSES)[number];
+
+/** The kinds of answer a question may declare (mirrors ``ASK_FIELD_TYPES``). */
+export const INPUT_FIELD_TYPES = [
+  "string",
+  "text",
+  "integer",
+  "number",
+  "boolean",
+  "date",
+  "select",
+] as const;
+export type InputFieldType = (typeof INPUT_FIELD_TYPES)[number];
+
+export const INPUT_ASSIGNEE_STATUSES = [
+  "pending",
+  "answered",
+  "abstained",
+  "invalidated",
+] as const;
+export type InputAssigneeStatus = (typeof INPUT_ASSIGNEE_STATUSES)[number];
+
+/** One field of a question: what to render, and what the answer must satisfy. */
+export interface InputField {
+  name: string;
+  label: string;
+  type: InputFieldType;
+  /** Absent means required — the server applies ``required: true`` by default. */
+  required?: boolean;
+  placeholder?: string;
+  /** The only values a ``select`` accepts. */
+  options?: string[];
+}
+
+/**
+ * The form a question was asked with, stored beside the asking node's own
+ * snapshot (node name, assignees, timeout). ``fields`` is the part an answer is
+ * checked against; the other keys are that node's context.
+ */
+export interface InputForm {
+  fields: InputField[];
+}
+
+/** Who may answer a question, and whether they already did. */
+export interface InputAssignee {
+  user_id: number;
+  department_id: string | null;
+  status: InputAssigneeStatus;
+  submitted_at: string | null;
+}
+
+/** One question a run is parked on, as both list routes answer it. */
+export interface InputRequest {
+  id: string;
+  execution_id: string;
+  node_id: string;
+  status: InputRequestStatus;
+  prompt: string;
+  form: InputForm;
+  /** The answer that was submitted; ``null`` while the question is open. */
+  values: JsonObject | null;
+  expires_at: string | null;
+  submitted_by_user_id: number | null;
+  submitted_at: string | null;
+  created_at: string;
+  assignees: InputAssignee[];
+}
+
+/**
+ * An answer to one question: exactly the form's declared field names. A key the
+ * form does not declare is refused, so the UI sends only what it rendered.
+ */
+export interface InputAnswerRequest {
+  values: JsonObject;
+}
+
+// --- output reviews --------------------------------------------------------
+
+/**
+ * A review's own lifecycle: ``open`` until one reviewer settles it, then the
+ * decision it settled with. ``open`` is a state, not a fourth decision.
+ */
+export const OUTPUT_REVIEW_STATUSES = [
+  "open",
+  "accepted",
+  "corrected",
+  "rerun",
+] as const;
+export type OutputReviewStatus = (typeof OUTPUT_REVIEW_STATUSES)[number];
+
+/** What each person the review was asked of has done so far. */
+export const OUTPUT_REVIEW_REVIEWER_STATUSES = [
+  "pending",
+  "accepted",
+  "corrected",
+  "rerun",
+  "abstained",
+  "invalidated",
+] as const;
+export type OutputReviewReviewerStatus =
+  (typeof OUTPUT_REVIEW_REVIEWER_STATUSES)[number];
+
+/**
+ * The three ways a review is settled — the words the console offers, in the
+ * order an operator meets them: the output stands as produced, a person fixed
+ * it, or the work is repeated as a new execution.
+ */
+export const OUTPUT_REVIEW_DECISIONS = ["accept", "correct", "rerun"] as const;
+export type OutputReviewDecision = (typeof OUTPUT_REVIEW_DECISIONS)[number];
+
+/** Who was asked to look at the output, and whether they already did. */
+export interface OutputReviewReviewer {
+  user_id: number;
+  department_id: string | null;
+  status: OutputReviewReviewerStatus;
+  decided_at: string | null;
+}
+
+/**
+ * The review of one settled execution, as both the per-execution route and the
+ * queue answer it. ``produced`` and ``corrected`` travel together because a
+ * reviewer decides by comparing them, and ``produced_sha256`` is the digest of
+ * exactly the bytes under review — the run's own outputs stay the source of
+ * truth for what the workflow produced.
+ *
+ * The queue route returns rows without their reviewers, so ``reviewers`` is
+ * empty there: "this list did not disclose them", never "nobody was asked".
+ */
+export interface OutputReview {
+  id: string;
+  execution_id: string;
+  status: OutputReviewStatus;
+  produced: JsonObject;
+  produced_sha256: string;
+  /** The replacement values a reviewer recorded; ``null`` until ``corrected``. */
+  corrected: JsonObject | null;
+  requested_by_user_id: number | null;
+  decided_by_user_id: number | null;
+  decided_at: string | null;
+  /** The execution a ``rerun`` decision started, linked beside the original. */
+  rerun_execution_id: string | null;
+  created_at: string;
+  reviewers: OutputReviewReviewer[];
+}
+
+/** Ask people to look at what a settled run produced; the run is untouched. */
+export interface OutputReviewRequest {
+  /** Tenant membership ids the server resolves to the members who may review. */
+  reviewer_user_ids: string[];
+}
+
+/**
+ * One decision. ``corrected`` carries only keys the run produced — the server
+ * refuses an invented one — and only the keys a reviewer changed. ``inputs``
+ * belongs to ``rerun`` and defaults to the reviewed run's own inputs.
+ */
+export interface OutputReviewDecisionRequest {
+  decision: OutputReviewDecision;
+  corrected?: JsonObject;
+  inputs?: JsonObject;
+}
+
 // --- notifications ---------------------------------------------------------
 
 export interface WorkBuddyNotification {
@@ -373,6 +569,18 @@ export interface ApprovalListQuery {
 
 export interface NotificationListQuery {
   unread_only?: boolean;
+  limit?: number;
+}
+
+export interface InputRequestListQuery {
+  scope?: WorkBuddyScope;
+  status?: InputRequestStatus | "";
+  limit?: number;
+}
+
+export interface OutputReviewListQuery {
+  scope?: WorkBuddyScope;
+  status?: OutputReviewStatus | "";
   limit?: number;
 }
 
@@ -446,6 +654,62 @@ export const workbuddyRuntimeApi = {
       expires_in: body.expires_in,
     };
   },
+
+  // Input requests — the questions a run asked, and the answers to them. Both
+  // list routes answer with the form, because a client that shows a question
+  // has to render the fields its answer will be checked against.
+  listInputRequests: (query: InputRequestListQuery = {}) =>
+    unwrapItems<InputRequest>(
+      withQuery(`${BASE}/input-requests`, {
+        scope: query.scope,
+        status: query.status,
+        limit: query.limit,
+      }),
+    ),
+  listExecutionInputRequests: (executionId: string) =>
+    unwrapItems<InputRequest>(
+      `${BASE}/executions/${encodeURIComponent(executionId)}/input-requests`,
+    ),
+  answerInputRequest: (
+    executionId: string,
+    inputRequestId: string,
+    body: InputAnswerRequest,
+  ) =>
+    unwrap<Execution>(
+      `${BASE}/executions/${encodeURIComponent(executionId)}/input-requests/${encodeURIComponent(inputRequestId)}/answer`,
+      jsonInit("POST", body),
+    ),
+
+  // Output reviews — the review of one settled run, and the queue of them. The
+  // run keeps its own result: a decision adds a second, append-only account of
+  // what a person said about it (and, for a rerun, the new execution's id).
+  requestOutputReview: (executionId: string, body: OutputReviewRequest) =>
+    unwrap<OutputReview>(
+      `${BASE}/executions/${encodeURIComponent(executionId)}/output-review`,
+      jsonInit("POST", body),
+    ),
+  getOutputReview: (executionId: string) =>
+    unwrap<OutputReview>(
+      `${BASE}/executions/${encodeURIComponent(executionId)}/output-review`,
+    ),
+  decideOutputReview: (
+    executionId: string,
+    body: OutputReviewDecisionRequest,
+  ) =>
+    unwrap<OutputReview>(
+      `${BASE}/executions/${encodeURIComponent(
+        executionId,
+      )}/output-review/decisions`,
+      jsonInit("POST", body),
+    ),
+  listOutputReviews: (query: OutputReviewListQuery = {}) =>
+    unwrapItems<OutputReview>(
+      withQuery(`${BASE}/output-reviews`, {
+        scope: query.scope,
+        status: query.status,
+        limit: query.limit,
+      }),
+    ),
 
   // Notifications — the caller's own rows only.
   listNotifications: (query: NotificationListQuery = {}) =>

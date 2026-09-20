@@ -902,11 +902,75 @@
       "success_status": 200,
       "summary": "即时签发导出兑换挑战",
       "authorization": "原申请 admin 且仍有权限；no-store；不延长72小时"
+    },
+    {
+      "method": "GET",
+      "path": "/executions/{execution_id}/input-requests",
+      "stage": "A4",
+      "success_status": 200,
+      "summary": "某次执行提出的问题列表，200",
+      "authorization": "发起者或受控 admin（先校验执行可见性）；仅返回该执行的问题与受派人"
+    },
+    {
+      "method": "POST",
+      "path": "/executions/{execution_id}/input-requests/{input_request_id}/answer",
+      "stage": "A4",
+      "success_status": 200,
+      "summary": "提交问题答案，200",
+      "authorization": "该请求的受派人或受控 admin；值须匹配表单声明；CAS，重复提交 409；非受派人 404 防存在性泄露"
+    },
+    {
+      "method": "GET",
+      "path": "/input-requests",
+      "stage": "A4",
+      "success_status": 200,
+      "summary": "本人待填问题队列，200",
+      "authorization": "范围默认本人；admin 的 scope=tenant 须有管理目的并审计"
+    },
+    {
+      "method": "GET",
+      "path": "/executions/{execution_id}/reconciliations",
+      "stage": "A3",
+      "success_status": 200,
+      "summary": "列出对账证据，200",
+      "authorization": "发起者或受控 admin；只对该执行的对账记录"
+    },
+    {
+      "method": "POST",
+      "path": "/executions/{execution_id}/output-review",
+      "stage": "A4",
+      "success_status": 201,
+      "summary": "请求审核某次运行的产出，201",
+      "authorization": "发起者或受控 admin；仅对已结算的执行；执行已有审核则冲突（运行本身不受影响）"
+    },
+    {
+      "method": "GET",
+      "path": "/executions/{execution_id}/output-review",
+      "stage": "A4",
+      "success_status": 200,
+      "summary": "读取某次执行的产出审核，200",
+      "authorization": "受指派的审核人、请求者或受控 admin；其余 404 防存在性泄露"
+    },
+    {
+      "method": "POST",
+      "path": "/executions/{execution_id}/output-review/decisions",
+      "stage": "A4",
+      "success_status": 200,
+      "summary": "采纳 / 修正后确认 / 重跑，200",
+      "authorization": "受指派的审核人或受控 admin；修正值只能替换运行实际产出的键；CAS 一次决定；重跑要求锁定版本仍是当前版本"
+    },
+    {
+      "method": "GET",
+      "path": "/output-reviews",
+      "stage": "A4",
+      "success_status": 200,
+      "summary": "本人待审产出队列，200",
+      "authorization": "范围默认本人；admin 的 scope=tenant 须有管理目的并审计"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 50,
-    "total": 112
+    "supplemental": 58,
+    "total": 120
   }
 }

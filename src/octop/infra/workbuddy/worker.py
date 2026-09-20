@@ -82,6 +82,11 @@ class WorkBuddyExecutionWorker:
 
     def run_once(self) -> str | None:
         """Run one claimable execution, or return None when there is no work."""
+        # Deadlines are settled before new work is claimed: a question whose
+        # deadline has passed must fail its run (and escalate) even in a tenant
+        # that has no other work to trigger a claim, and the sweep is a no-op
+        # when nothing is overdue.
+        self._service.expire_overdue_input_requests()
         claim = self._repo.claim_execution(
             worker_id=self.worker_id,
             lease_ttl_seconds=self._lease_ttl_seconds,

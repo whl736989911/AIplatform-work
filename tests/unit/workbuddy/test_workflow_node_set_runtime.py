@@ -10,7 +10,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from octop.infra.workbuddy.runtime import graph_from_compiled, run_graph
+import pytest
+
+from octop.infra.errors import OctopError
+from octop.infra.workbuddy.runtime import (
+    graph_from_compiled,
+    run_graph,
+    validate_answers,
+)
 from octop.infra.workbuddy.workflow_compiler import (
     SemanticDecision,
     compile_workflow_definition,
@@ -134,3 +141,144 @@ def test_an_output_node_renders_the_run_result() -> None:
     assert last.node_id == "answer"
     # ``{{ nodes.lookup.output }}`` is the whole retrieved list, not a scalar.
     assert last.output == ["the answer"]
+
+
+# --------------------------------------------------------------------------- #
+# ask: a run that stops to ask a person (A-08)
+# --------------------------------------------------------------------------- #
+
+MEMBER = "11111111-1111-1111-1111-111111111111"
+
+
+def _ask_form() -> list[dict[str, Any]]:
+    return [
+        {"name": "account", "label": "Account", "type": "select", "options": ["A", "B"]},
+        {"name": "amount", "label": "Amount", "type": "number"},
+        {"name": "note", "label": "Note", "type": "text", "required": False},
+    ]
+
+
+def _ask(*, with_downstream: bool = False) -> dict[str, Any]:
+    nodes: list[dict[str, Any]] = [
+        {
+            "id": "collect",
+            "type": "ask",
+            "name": "Ask the requester",
+            "config": {
+                "prompt": "Which account should this post to?",
+                "assignee_user_ids": [MEMBER],
+                "fields": _ask_form(),
+            },
+            "save_as": "answer",
+        }
+    ]
+    edges: list[dict[str, Any]] = []
+    if with_downstream:
+        nodes.append(
+            {
+                "id": "post",
+                "type": "output",
+                "name": "Publish what was collected",
+                "config": {"value": "{{ nodes.collect.output }}"},
+            }
+        )
+        edges.append({"from": "collect", "to": "post"})
+    return {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {},
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def test_an_ask_node_parks_the_run_for_an_answer() -> None:
+    run = run_graph(_graph(_ask()), inputs={}, resolve_assignees=lambda node: [(7, None)])
+    assert run.status == "waiting_input", run
+    assert run.waiting_input_node_id == "collect"
+    # The assignees travel with the park so the caller can open the question for
+    # exactly the people who may answer it.
+    assert run.input_assignees["collect"] == ((7, None),)
+    assert run.steps[-1].status == "waiting_input"
+
+
+def test_an_ask_node_without_an_eligible_assignee_fails_in_place() -> None:
+    run = run_graph(_graph(_ask()), inputs={}, resolve_assignees=lambda node: [])
+    # Nobody can answer, so parking would strand the run: the node fails where it
+    # stands instead of waiting forever.
+    assert run.status == "failed", run
+    failing = [step for step in run.steps if step.status == "failed"]
+    assert failing and failing[0].error_code == "ASK_NO_VALID_ASSIGNEE"
+
+
+def test_an_ask_node_without_a_resolver_still_parks() -> None:
+    # A deployment that wired no membership resolver cannot prove nobody is
+    # eligible, so the run parks rather than inventing a failure.
+    run = run_graph(_graph(_ask()), inputs={})
+    assert run.status == "waiting_input", run
+    assert run.input_assignees == {}
+
+
+def test_a_recorded_answer_settles_the_node_and_flows_downstream() -> None:
+    def never_called(node: Any) -> list[tuple[int, str | None]]:
+        raise AssertionError("an answered ask node must not resolve assignees")
+
+    run = run_graph(
+        _graph(_ask(with_downstream=True)),
+        inputs={},
+        answers={"collect": {"account": "A", "amount": 1200}},
+        resolve_assignees=never_called,
+    )
+    assert run.status == "success", run
+    collected = run.steps[0]
+    assert collected.status == "success"
+    assert collected.output == {"account": "A", "amount": 1200}
+    # The answer is the node's output, so ``{{ nodes.collect.output }}`` is what
+    # the rest of the graph reads: the question's fields become the run's data.
+    assert run.steps[-1].output == {"account": "A", "amount": 1200}
+
+
+def test_an_expired_question_fails_the_node_instead_of_parking() -> None:
+    def never_called(node: Any) -> list[tuple[int, str | None]]:
+        raise AssertionError("an expired question must not be asked again")
+
+    run = run_graph(
+        _graph(_ask()),
+        inputs={},
+        expired_questions=["collect"],
+        resolve_assignees=never_called,
+    )
+    assert run.status == "failed", run
+    failing = [step for step in run.steps if step.status == "failed"]
+    assert failing and failing[0].error_code == "INPUT_REQUEST_EXPIRED"
+
+
+def test_the_answer_validator_keeps_the_declared_values() -> None:
+    cleaned = validate_answers({"fields": _ask_form()}, {"account": "B", "amount": 1200})
+    # ``note`` is optional and therefore absent, not stored as null.
+    assert cleaned == {"account": "B", "amount": 1200}
+
+
+@pytest.mark.parametrize(
+    ("values", "reason"),
+    [
+        ({"account": "A"}, "is required"),
+        ({"account": "C", "amount": 1}, "must be one of"),
+        ({"account": "A", "amount": "many"}, "must be a number"),
+        ({"account": "A", "amount": True}, "must be a number"),
+        ({"account": "A", "amount": 1, "extra": 2}, "does not declare"),
+    ],
+)
+def test_the_answer_validator_refuses_what_the_form_does_not_allow(
+    values: dict[str, Any], reason: str
+) -> None:
+    with pytest.raises(OctopError) as excinfo:
+        validate_answers({"fields": _ask_form()}, values)
+    assert reason in excinfo.value.message, excinfo.value.message
+
+
+def test_the_answer_validator_refuses_a_field_type_the_schema_does_not_define() -> None:
+    form = {"fields": [{"name": "odd", "label": "Odd", "type": "quantum"}]}
+    with pytest.raises(OctopError) as excinfo:
+        validate_answers(form, {"odd": "anything"})
+    assert "unsupported type" in excinfo.value.message

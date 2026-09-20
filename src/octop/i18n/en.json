@@ -476,6 +476,7 @@
     "APPROVAL_BINDING_CHANGED": "The approved target or parameters changed; approve again.",
     "APPROVAL_EXPIRED": "This approval has expired.",
     "APPROVAL_NO_VALID_APPROVER": "No declared approver is currently effective.",
+    "ASK_NO_VALID_ASSIGNEE": "No declared assignee for this question is currently effective.",
     "RECONCILIATION_EVIDENCE_INVALID": "The reconciliation evidence is missing or not verifiable.",
     "WORKBUDDY_IDEMPOTENCY_CONFLICT": "The idempotency key was used with a different request.",
     "WORKBUDDY_EXECUTION_NOT_CANCELLABLE": "The execution can no longer be canceled.",
@@ -515,7 +516,8 @@
     "WORKSPACE_ROOT_CONTAINER_UNSUPPORTED": "Allowed storage root cannot be set while Octop is running in a container.",
     "CAPTCHA_REQUIRED": "This server requires a captcha token to sign in.",
     "CAPTCHA_FAILED": "Captcha verification failed. Try again.",
-    "CONFIG_FILE_CORRUPT": "Cannot update {path}: the file is not valid JSON ({detail}). Fix the syntax and retry — no settings were changed."
+    "CONFIG_FILE_CORRUPT": "Cannot update {path}: the file is not valid JSON ({detail}). Fix the syntax and retry — no settings were changed.",
+    "INPUT_REQUEST_EXPIRED": "The question passed its deadline; the run was settled by the timeout rule."
   },
   "desktop": {
     "install_log_deps": "Installing Python dependencies…",

@@ -56,7 +56,7 @@ MAX_DIAGNOSTICS = 20
 DIAGNOSTIC_HINT_PREFIX = "workflowDiagnostics"
 
 NODE_TYPES = frozenset(
-    {"tool", "llm", "condition", "approval", "transform", "input", "knowledge", "output"}
+    {"tool", "llm", "condition", "approval", "ask", "transform", "input", "knowledge", "output"}
 )
 ACTIVATABLE_VERSION_ORIGINS = frozenset({"save", "rollback", "promotion", "import"})
 CANDIDATE_VERSION_ORIGINS = frozenset({"proposal"})
@@ -88,6 +88,7 @@ WORKFLOW_CEL_INVALID = "WORKFLOW_CEL_INVALID"
 WORKFLOW_TOOL_UNAVAILABLE = "WORKFLOW_TOOL_UNAVAILABLE"
 WORKFLOW_KNOWLEDGE_BASE_UNKNOWN = "WORKFLOW_KNOWLEDGE_BASE_UNKNOWN"
 WORKFLOW_APPROVER_INVALID = "WORKFLOW_APPROVER_INVALID"
+WORKFLOW_ASK_FIELDS_DUPLICATE = "WORKFLOW_ASK_FIELDS_DUPLICATE"
 WORKFLOW_INPUT_NODE_UNKNOWN = "WORKFLOW_INPUT_NODE_UNKNOWN"
 WORKFLOW_OUTPUT_NOT_TERMINAL = "WORKFLOW_OUTPUT_NOT_TERMINAL"
 WORKFLOW_OUTPUT_DUPLICATE = "WORKFLOW_OUTPUT_DUPLICATE"
@@ -157,9 +158,18 @@ TEMPLATE_FIELD_PATHS: Mapping[str, str] = {
     "llm": "prompt",
     "transform": "input",
     "approval": "approval_message",
+    "ask": "prompt",
     "knowledge": "query",
     "output": "value",
 }
+
+#: The field types an ask node's form may declare, and the JSON value each one
+#: stores.  The schema enumerates the same set; a validator that accepts a value
+#: for a type the schema does not define would let a caller store something no
+#: step can read back the same way twice.
+ASK_FIELD_TYPES: frozenset[str] = frozenset(
+    {"string", "text", "integer", "number", "boolean", "date", "select"}
+)
 
 
 _NODE_PATH_RE = re.compile(r"^nodes\.([^.[\]]+)")
@@ -797,7 +807,32 @@ class _Compiler:
             self.output_key_to_node[output_key] = node_id
             if save_as is not None:
                 self.save_as_by_node[node_id] = str(save_as)
+            if str(node.get("type")) == "ask":
+                self._check_ask_fields(collector, node_id, node)
         collector.raise_if_any("identity")
+
+    def _check_ask_fields(
+        self, collector: _DiagnosticCollector, node_id: str, node: Mapping[str, Any]
+    ) -> None:
+        """An ask node's field names are the keys of the submitted mapping.
+
+        Two fields sharing a name would collide there and the later one would
+        silently win, so the names must be unique inside one node.  The schema
+        constrains one field at a time and cannot state this.
+        """
+        config = node.get("config") or {}
+        seen: set[str] = set()
+        for index, field in enumerate(config.get("fields") or ()):
+            if not isinstance(field, Mapping):
+                continue
+            name = str(field.get("name"))
+            if name in seen:
+                collector.refuse(
+                    WORKFLOW_ASK_FIELDS_DUPLICATE,
+                    f"ask node {node_id!r} declares field {name!r} twice",
+                    path=f"nodes.{node_id}.config.fields[{index}].name",
+                )
+            seen.add(name)
 
     def _approval_target(self, node: Mapping[str, Any]) -> str | None:
         config = node.get("config") or {}
@@ -1138,7 +1173,8 @@ class _Compiler:
         require_semantic_resolution: bool,
     ) -> str:
         needed = any(
-            str(node.get("type")) in {"tool", "llm", "approval", "knowledge"} for node in self.nodes
+            str(node.get("type")) in {"tool", "llm", "approval", "ask", "knowledge"}
+            for node in self.nodes
         )
         if not needed:
             return "not_required"
@@ -1205,6 +1241,23 @@ class _Compiler:
                         ErrorCode.APPROVAL_NO_VALID_APPROVER.value,
                         f"approval node {node_id!r} has no valid approver in this tenant",
                         path=f"nodes.{node_id}.config.approver_user_ids",
+                    )
+            elif node_type == "ask":
+                # The same rule the approval applies: only "nobody can answer"
+                # blocks a publish.  An assignee who has since left is tolerated
+                # here and surfaces at run time as a node failure
+                # (ASK_NO_VALID_ASSIGNEE), so an unrelated departure cannot make
+                # an otherwise sound workflow unpublishable.
+                answerable = 0
+                for assignee in config.get("assignee_user_ids") or []:
+                    decision = resolver.check_approver(str(assignee))
+                    if decision is None or decision.ok:
+                        answerable += 1
+                if not answerable:
+                    collector.refuse(
+                        ErrorCode.ASK_NO_VALID_ASSIGNEE.value,
+                        f"ask node {node_id!r} has no valid assignee in this tenant",
+                        path=f"nodes.{node_id}.config.assignee_user_ids",
                     )
         collector.raise_if_any("semantics")
         return "passed"
@@ -1384,6 +1437,7 @@ def compile_stored_definition(
 
 __all__ = [
     "ACTIVATABLE_VERSION_ORIGINS",
+    "ASK_FIELD_TYPES",
     "CANDIDATE_VERSION_ORIGINS",
     "CEL_REFERENCE_NAMESPACES",
     "CompiledEdge",

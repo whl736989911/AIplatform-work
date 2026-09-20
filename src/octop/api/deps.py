@@ -113,7 +113,9 @@ _JWT_EXEMPT_PREFIXES = (
 _JWT_EXEMPT_EXACT = (
     "/api/health",
     "/api/auth/login",
+    "/api/auth/refresh",
     "/api/v1/auth/login",
+    "/api/v1/auth/refresh",
     "/api/v1/auth/register",
     "/api/auth/captcha",
     "/api/auth/oidc/status",

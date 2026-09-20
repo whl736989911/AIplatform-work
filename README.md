@@ -1,635 +1,172 @@
-<p align="center">
-  <img src="docs/assets/readme-banner.png" alt="Octop Banner" width="600" />
-</p>
+# WorkBuddy — a multi-tenant enterprise AI workflow platform built on Octop
 
-<p align="center">
-  <strong>A smarter, self-hosted AI assistant — multi-user, multi-agent.</strong>
-</p>
+> **Read this first.** This repository is **not** a release branch of upstream [Octop](https://github.com/TencentCloud/Octop), and this is
+> **not** its product documentation. It uses Octop (MIT, see `LICENSE`) as a **substrate**, but its product direction is a
+> **multi-tenant enterprise workflow platform**: employees build workflows, run them, and keep improving them — with human steps
+> (approval, asking a question, reviewing an output) inside the workflow rather than bolted onto it.
+> Upstream's README describes a different product (a self-hosted personal/team AI assistant, channels, FnOS packaging, remote phone,
+> desktop installers, its plugin and expert marketplace). **Do not judge this repository by it.** If you are looking for upstream,
+> go to its repository; if you want to know what this one delivers, read "What is delivered" below and `docs/plan/`.
 
-<p align="center">
-  <a href="https://trendshift.io/repositories/95504?utm_source=repository-badge&utm_medium=badge&utm_campaign=badge-repository-95504" target="_blank" rel="noopener noreferrer">
-    <img src="https://trendshift.io/api/badge/repositories/95504" alt="TencentCloud/Octop | Trendshift" width="250" height="55" />
-  </a>
-</p>
+## What this repository is
 
-<p align="center">
-  <a href="https://www.python.org/downloads/"><img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" /></a>
-  <a href="https://github.com/TencentCloud/Octop/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <a href="https://github.com/TencentCloud/Octop/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.0.1-orange" /></a>
-  <a href="https://pypi.org/project/octop/"><img src="https://img.shields.io/pypi/v/octop" alt="PyPI" /></a>
-  <a href="https://github.com/astral-sh/ruff"><img alt="Code Style: Ruff" src="https://img.shields.io/badge/code%20style-ruff-000000?logo=ruff&logoColor=white" /></a>
-  <a href="https://github.com/TencentCloud/Octop"><img alt="GitHub stars" src="https://img.shields.io/github/stars/TencentCloud/Octop?style=social" /></a>
-  <a href="https://github.com/TencentCloud/Octop/fork"><img alt="GitHub forks" src="https://img.shields.io/github/forks/TencentCloud/Octop?style=social" /></a>
-  <a href="https://discord.gg/jPas5J8Ua"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&logoColor=white" /></a>
-</p>
+- A **multi-tenant platform**: tenants, departments, members and roles; four-level object permissions (company / department / personal / explicit
+  grant); cross-tenant isolation enforced by PostgreSQL row-level security (RLS).
+- A **workflow platform**: definition → compile (reporting several diagnostics at once) → immutable versions → activate / roll back →
+  execution worker → per-node triage and version diff.
+- A **human-in-the-loop platform**: approvals (authorising an external write or a general review), **asking a person a question mid-run**
+  (the run parks where it is instead of being cancelled and restarted), and **output review** (after the fact and append-only: accept,
+  correct, or re-run).
+- A platform that **improves itself**: correction capture → attribution → analyser proposals → shadow / canary evaluation → promotion;
+  plus a template marketplace.
+- An **operable service**: migrations (PostgreSQL and SQLite control planes), jobs and audit, an outbox with a dispatcher, rate limiting,
+  quotas, leases and fencing tokens.
 
-<p align="center">
-  <a href="#-highlights">Highlights</a> ·
-  <a href="#-overview">Overview</a> ·
-  <a href="#-core-technology">Core Technology</a> ·
-  <a href="#-features">Features</a> ·
-  <a href="#-workbuddy">WorkBuddy</a> ·
-  <a href="#-roadmap">Roadmap</a> ·
-  <a href="#-quick-start">Quick Start</a> ·
-  <a href="#-contents">Contents</a>
-</p>
+## What this repository is not
 
-<p align="center">
-  <b>English</b> · <a href="README_CN.md">中文</a>
-</p>
+- Not a mirror or release channel of upstream Octop; upstream's README, badges and screenshots belong to upstream.
+- Not defined as a "personal assistant / chatbot" — the chat and agent substrate is still in the tree (see below), but it is not what this
+  repository delivers.
+- It makes no promise about upstream's personal- and NAS-oriented packaging or installation forms.
+- It is **not** production-ready for third parties today: connector / model-gateway adapters and trigger delivery are **deployment wiring**,
+  the outbox needs a publisher port, and tenant-level metrics plus production deregistration compliance are **product decisions**
+  (see "Current boundaries").
 
----
+## What is delivered
 
-**Octop** is an open-source, self-hosted AI assistant. It's not just a tool — it's a digital life form that can operate in parallel. Through its multi-agent architecture, it builds an intelligent environment that is both independent and collaborative for teams, families, and individuals. Best of all, it runs entirely on your machine — the fully self-hosted design means privacy is never a compromise, while single-process startup makes the powerful web console, CLI, and IM integrations readily accessible.
+### WorkBuddy (this repository's direction)
 
-Chat through the Web Dashboard, Feishu, DingTalk, QQ, Discord, WeCom, or programmatic HTTP/SSE/WebSocket. Extend capabilities with the **expert library**, **Connectors** (OAuth + MCP), and **ACP** integration for IDE workflows.
+| Capability | What it means |
+|---|---|
+| Tenancy and identity | Tenants, departments, members, roles; member and tenant status are read from the fact store, not from the token |
+| Workflows | Authoritative schema (`contracts/workflow-v1.schema.json`), a compiler that aggregates diagnostics, immutable versions with ETags, explicit activate / rollback / archive |
+| Execution | Acceptance only queues; a worker claims atomically (locks the tenant row, takes a running slot, holds a lease with a monotonic fence) and the next worker takes over after a crash |
+| Human in the loop | Approvals (one-time challenge token, candidate approvers), **questions** (`waiting_input`, the run continues after the answer), **output reviews** (after the fact, append-only) |
+| Governance | Tool / model / knowledge-base / approver reachability resolved **per caller**; capability grants to departments and members; four-level object permissions |
+| Knowledge base | Documents indexed as real jobs; a text-only migration channel (personal installs keep chunk text and vectors, not originals) |
+| Improvement loop | Correction capture → attribution → proposals → shadow replay → canary evaluation → promotion, with independently assigned reviewers |
+| Platform services | Jobs, notifications, audit, outbox + dispatcher, rate limiting, quotas (monthly execution reservation and concurrency slot), platform tool registry |
 
-## ✨ Highlights
+### The Octop substrate (still in the tree, but not this repository's direction)
 
-| | Feature | Description |
-|---|---------|-------------|
-| 👥 | **Multi-user expert team** | One admin, shared household; built-in expert library — switch specialists per scenario |
-| 🎭 | **MBTI personas** | 16 personality templates plus an interactive quiz — give each agent a distinct character |
-| 🔒 | **Security built-in** | JWT multi-user isolation, tool approval, shell command guardrails, and PII redaction — data stays local |
-| 🔌 | **Connector ecosystem** | Tencent suite (Docs, Weibo trends, News, …); OAuth and MCP gateway extend resource boundaries |
-| 💾 | **Pluggable backends** | Local disk, Docker containers, PostgreSQL, or COS/S3 — AI operates inside isolated boundaries |
-| 🧠 | **Portable memory** | Powered by harness-memory; memory migrates with the workspace |
-| 📚 | **Knowledge base** | RAG over your documents; semantic retrieval grounds agent answers in your private corpus |
-| 🧩 | **Plugins** | Extend Octop with third-party plugins; bundled plugins are seeded and toggled on demand |
-| ↔️ | **ACP bidirectional** | `octop acp` for IDE/terminal AI; delegate to OpenCode / Claude Code with permission gates |
-| 💻 | **Terminal AI+** | Interactive shell in the browser — AI-assisted command execution and troubleshooting |
-| 🌐 | **Browser AI+** | Headless Chromium sessions for web automation, screenshots, and remote browsing |
-| 🖥️ | **Remote desktop** | Live screen and input from the dashboard on Linux, Windows, and macOS — remote office work and GUI apps; one-click isolated desktop on headless Linux |
-| 🏢 | **WorkBuddy enterprise workflows** | Multi-tenant tenants/departments/roles, versioned workflows, approvals, knowledge bases, triggers, and a template marketplace — opt-in on PostgreSQL |
-| ⚙️ | **Durable execution tier** | Accepted runs are claimed from PostgreSQL by a worker: leases with monotonic fences, per-tenant concurrency ceilings, retry budgets bounded by each tool's declared effect, and an outbox for at-least-once events |
-| 🏠 | **Self-hosted** | Dashboard, CLI, IM channels, and cron in one `octop run` — all data under `~/.octop/` |
+Chat and agents, skills / subagents, the knowledge-base UI, the connector gateway, channels (Feishu / DingTalk / WeCom and others), the
+dashboard, the CLI, desktop shells and packaging scripts. They build and parts of them are reused by WorkBuddy (the console, auth, the
+database layer), but **do not** read upstream's productised descriptions of these as promises of this repository.
 
-## 📌 Overview
+## Getting started
 
-Octop is a self-hosted AI assistant platform for households and small teams. It runs a single process that serves a web dashboard, a CLI, IM channels (Feishu, DingTalk, QQ, Discord, WeCom, and more), and cron automation — all sharing one control-plane database under `~/.octop/` (SQLite by default; PostgreSQL optional).
+### Requirements
 
-> Octop's design goal: keep every conversation, workspace, and credential on your own machine, while giving each user a personal team of specialized agents they can switch between per task.
+- Python **≥ 3.12** with [`uv`](https://docs.astral.sh/uv/) (every Makefile target runs through `uv run`).
+- **PostgreSQL is required** (WorkBuddy tenant workflows need it) together with the `vector` extension, installed as a prerequisite.
+- **Redis** backs rate limiting. In production, run the worker tier as well, or let a single-process install host it.
 
-<details>
-<summary>🐾 What can you do with Octop</summary>
-
-- **Personal assistant** — let a dedicated agent write weekly reports, organize notes, and manage your schedule; memory persists with the workspace.
-- **Family sharing** — one admin account, the whole household; assign different agents and experts per member.
-- **Team helper** — multiple agents collaborate in parallel, bridging Feishu / DingTalk / WeCom to route tasks into group chats.
-- **Developer boost** — delegate coding tasks to OpenCode / Claude Code via ACP, or troubleshoot from the terminal with AI assistance.
-- **Web automation** — use Browser AI+ to fill forms, capture screenshots, and gather public info.
-- **Scheduled tasks** — configure cron in natural language so the agent pushes or runs jobs on time every day.
-
-</details>
-
-## 🧠 Core Technology
-
-| Layer | Technology |
-|-------|-----------|
-| **Language** | Python 3.12+ |
-| **Web framework** | FastAPI + uvicorn |
-| **Agent runtime** | harness-agent |
-| **Gateway** | harness-gateway |
-| **Control plane DB** | SQLite (WAL, default) or PostgreSQL (optional) |
-| **Frontend** | React 18 + TypeScript + Vite + Ant Design |
-| **Scheduling** | APScheduler |
-| **ACP** | agent-client-protocol |
-| **Build / quality** | hatchling · ruff · mypy · pytest |
-
-Octop is built on the Harness stack — a set of focused runtimes that Octop composes into one process:
-
-- **harness-agent** — Agent runtime: model routing, tools, skills, and conversation checkpointing.
-- **harness-gateway** — multi-platform IM channel bridge that normalizes incoming messages into a single processing pipeline.
-- **harness-memory** — hierarchical recall with full-text search, so an agent's memory travels with its workspace.
-- **harness-browser** — CDP-based browser automation with persistent profiles for web tasks.
-
-Instead of an external queue or message broker, Octop routes every surface — Web UI, IM, and cron — through one in-process `HarnessProcessor`. The result is a single, restart-safe process whose entire state is rebuilt from the control-plane database on boot (local SQLite by default; PostgreSQL optional).
-
-## 🤔 Features
-
-### Server & auth
-- Multi-user JWT authentication with admin role
-- First-run setup wizard (`octop init`)
-- Interactive API docs at `/api/docs` (off by default — set `"enable_api_docs": true` in `config.json` to enable)
-
-### Agents
-- Multiple agents per user; each has its own workspace, providers, channels, and cron
-- 16 MBTI persona templates + custom system prompt
-- Expert library scanned at boot (`infra/agents/experts/library/`)
-- Workspace backends: local disk, COS, S3, and other remote stores
-
-### Channels & automation
-- IM channels: Feishu, DingTalk, QQ, Discord, WeCom, and more
-- Proactive cron jobs with natural-language and slash-command triggers
-- Unified message processing across Web UI, IM, and cron surfaces
-
-### Surfaces
-- **Web dashboard** — chat, agents, connectors, channels, cron, settings
-- **CLI** — `octop run`, `octop chat`, `octop acp`, admin commands
-- **HTTP/SSE/WebSocket API** — full programmatic access
-
-### Knowledge & plugins
-- **Knowledge base** — RAG over your documents; upload files and let semantic retrieval ground agent answers in your private corpus
-- **Plugins** — install and manage third-party plugins (`octop plugin`); bundled plugins are seeded and toggled on demand from the dashboard
-
-### WorkBuddy (multi-tenant workflows)
-
-An opt-in enterprise surface on the same process: many tenants in one deployment, each with its own people, credentials, workflows, and data boundaries. It needs the PostgreSQL control plane; a single-node install hosts the execution worker in-process, and a split topology runs it as its own tier.
-
-- **Tenancy & governance** — tenants, departments, memberships, roles, invitations, capability and quota settings; every tenant-scoped table is isolated by row-level security, and the API verifies the caller's current role from the database on each request
-- **Workflow authoring** — a JSON definition is compiled to a canonical form (boundaries, tool grants, knowledge references and schemas are checked), published as an immutable version, and activated per rollout bucket with a revision compare-and-swap
-- **Durable runtime** — accepting an execution only records `queued`; a worker claims it in one transaction (tenant row lock → concurrency ceiling → running slot → lease with a monotonic fence → `running`), so replicas need no coordination and a crashed worker is recovered when its lease expires
-- **Approvals** — a node can require named approvers; the decision is a one-time token, so a retried or replayed request cannot approve twice
-- **Tool governance** — the platform tool registry declares each tool's effect (`read_only` / `external_write`), idempotency and result-lookup support, sandbox verification, and input/output JSON Schemas (Draft 7), and the engine consults the tenant's granted revision before it retries or trusts a result
-- **Knowledge** — knowledge bases pin an embedding model, accept uploads, index documents into atomic generations, and answer retrieval queries; indexing runs as a tracked job
-- **Triggers** — webhook and cron registrations with signed raw bodies, tolerance windows and persisted dedupe keys
-- **Improvement loop** — proposals carry generated patches, risk classes and approval arithmetic; shadow runs replay real recordings and canary gates judge them on the executions that actually ran before a promotion applies
-- **Marketplace** — publish, review, install and upgrade workflow templates
-- **Jobs & events** — client-visible operations are recorded in one jobs table (kind, status, attempt, result) so a lost response can be recovered; committed facts are published at least once through a transport-agnostic outbox dispatcher
-
-Full API and CLI surface: see [WorkBuddy](#-workbuddy) below.
-
-### ACP (Agent Client Protocol)
-
-Octop supports ACP in two directions:
-
-1. **Inbound** — external tools use **your** Octop agent
-   ```bash
-   octop acp --agent main   # stdio ACP server for Zed, OpenCode, …
-   ```
-
-2. **Outbound** — Octop delegates to external coding agents
-   - Dashboard → **ACP** (`/acp`): configure runners (global per user)
-   - Enable **acp_runner** per agent, then delegate in chat
-
-Built-in outbound runners include OpenCode, CodeBuddy, Claude Code, and Codex.
-
-Full setup: **[docs/acp.md](docs/acp.md)**.
-
-## 🏢 WorkBuddy
-
-WorkBuddy is the enterprise tier of Octop: a multi-tenant workflow platform that runs inside the same process and the same control plane, and turns Octop from a personal assistant into a governed system that a company can deploy. It is **opt-in** — the personal product keeps working without it.
-
-### What it is made of
-
-| Tier | Where | Responsibility |
-|------|-------|----------------|
-| API | `src/octop/api/routers/workbuddy_*.py` | `/api/v1` endpoints for tenants, workflows, executions, approvals, knowledge, proposals, marketplace, lifecycle |
-| Domain | `src/octop/infra/workbuddy/` | compiler, policy, runtime, worker, outbox dispatcher, knowledge, proposals, marketplace, lifecycle, CEL sandbox |
-| Data | `src/octop/infra/db/migrations/015…029` | tenant-scoped schema with `ENABLE`/`FORCE ROW LEVEL SECURITY`, immutable versions, leases and fences, jobs, outbox |
-| Worker | `octop workbuddy worker` | claims accepted executions and runs them; the API tier holds no queue and no in-process execution state |
-
-### API surface
-
-All enterprise endpoints sit under `/api/v1`, alongside the personal API:
+### Install and initialise
 
 ```bash
-GET  /api/v1/tenants                       # tenancy, members, invitations, departments
-POST /api/v1/workflow-definitions/validate # compile a definition before it is stored
-POST /api/v1/workflows/{id}/execute        # accept a run: 202 + execution id
-POST /api/v1/workflows/{id}/activate       # activate a version in a rollout bucket
-POST /api/v1/workflows/{id}/rollback
-GET  /api/v1/executions/{id}               # step-level state, token usage, dispatch intent
-POST /api/v1/executions/{id}/cancel
-GET  /api/v1/approval-requests/{id}
-POST /api/v1/knowledge-bases/{id}/documents
-GET  /api/v1/knowledge-bases/{id}/search
-POST /api/v1/improvement-proposals         # compiled change + risk class + approvals
-POST /api/v1/improvement-proposals/{id}/promote
-POST /api/v1/marketplace/templates/{id}/install
-GET  /api/v1/jobs/{job_id}                 # the job a request started, recoverable after a lost response
-GET  /api/v1/audit-logs
+uv sync                       # Python dependencies
+uv run octop init             # initialise the local control plane (runs migrations)
+
+cd dashboard && npm install   # console dependencies
 ```
 
-### CLI
+### Run
 
 ```bash
-octop workbuddy cel -e 'execution.status == "success"' --context '{"execution": {"status": "success"}}'
-octop workbuddy worker          # run the execution tier (needs PostgreSQL)
-octop workbuddy dependencies    # probe locked components and configured dependencies (0 ok / 2 failed / 3 blocked)
+uv run octop run              # API + web console (foreground)
+make dev                      # backend and console dev servers together
+cd dashboard && npm run dev    # console only (vite --host)
 ```
 
-### Deployment
-
-- **Database**: PostgreSQL is mandatory for WorkBuddy (the personal surface still defaults to SQLite); knowledge vectors need the `vector` extension, which the migrations never create themselves — it is a control-plane prerequisite
-- **Broker**: Redis backs the API rate limiter (`REDIS_URL`); the execution queue itself is PostgreSQL, so a Redis outage cannot lose an accepted run
-- **Worker tier**: a single-node install hosts the worker in-process (`OCTOP_WORKBUDDY_WORKER=on`, the default); a scaled deployment sets `OCTOP_WORKBUDDY_WORKER=off` on the API and runs the `worker` service from `deploy/compose.production.yml` instead
-- **Migrations**: `015_workbuddy_*` … `029_workbuddy_*` create the enterprise schema, and they are applied when the control plane is opened; the production topology runs the `migrate` job from `deploy/scripts/migrate.sh` first, which re-verifies fail-closed that the backend really is PostgreSQL, that `vector` is installed, and that every tenant-scoped table has row-level security enabled and forced
-
-### Verification
-
-The WorkBuddy surface is covered by contract-driven tests that run against a live PostgreSQL (and a live Redis for the limiter):
+### Docker
 
 ```bash
-pytest tests/unit/workbuddy tests/integration/test_workbuddy_runtime_postgres.py \
-       tests/integration/test_workbuddy_proposals_postgres.py \
-       tests/integration/test_workbuddy_business_smoke.py
+docker compose -f deploy/compose.production.yml up -d --build
 ```
 
-### Current limits
+The production compose file runs the execution worker as its own tier. A single-process install hosts it inside `octop run`;
+`OCTOP_WORKBUDDY_WORKER=off` disables that.
 
-- Connector adapters, model-gateway adapters and trigger delivery execution are the deployment's own wiring; the engine side (declarations, retry policy, dispatch intent, reconciliation) is in place
-- The outbox dispatcher needs a publisher to be wired before events leave the database; without one it refuses to run and leaves them pending rather than reporting delivery
-- Per-tenant metric exposure and the final compliance sign-off for production deletion are product decisions, not code defaults
-
-## 🧭 Roadmap
-
-Here are our mid-to-long term plans:
-
-- [ ] **Shared resource pool** — a central pool of skills and sub-agents that any user can drop into a new expert without rebuilding from scratch.
-- [ ] **Expert sharing** — publish your experts to other users in the same deployment, so good configurations are reused instead of recreated.
-- [ ] **Browser & terminal polishing** — browser skill *recording* (capture a workflow and replay it as a skill) and a more capable terminal AI assistant.
-- [ ] **AgentTeams** — let one coordinator autonomously schedule and orchestrate multiple experts to tackle multi-step tasks.
-- [ ] **Self-evolution** — automatically distill everyday conversations into reusable skills, so the assistant grows with you.
-- [ ] **PC / mobile clients** — native desktop and mobile apps alongside the web dashboard and IM channels.
-
-This roadmap may shift as the community grows; treat it as indicative only.
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- **macOS / Linux / Windows**
-- No pre-installed Python required — the installer uses [uv](https://docs.astral.sh/uv/) to provision Python 3.12 in an isolated venv under `~/.octop/`
-- A modern multi-core CPU with a few GB of RAM for the process plus model/embedding caches; enough disk for the database, agent workspaces, and document corpora
-
-### 1. Install
-
-**macOS / Linux** — one-line installer (recommended):
+## Command line
 
 ```bash
-curl -fsSL https://finnie-1258344699.cos.ap-guangzhou.myqcloud.com/octop/install.sh | bash
+uv run octop init                       # control plane + migrations
+uv run octop run                        # API and console
+uv run octop workbuddy worker            # execution worker tier (needs PostgreSQL; migrates on start)
+uv run octop workbuddy cel -e '1 + 1'    # evaluate one expression in the bounded CEL sandbox (contract probe, no server)
 ```
 
-**Windows (PowerShell)**:
+## API at a glance
 
-```powershell
-irm https://finnie-1258344699.cos.ap-guangzhou.myqcloud.com/octop/install.ps1 | iex
-```
+Every business endpoint lives under `/api/v1`. The **authoritative list** is `contracts/route-manifest.json`, which carries each route's
+origin, success status and authorization requirement (`counts.source` is the upstream contract document's route count; the rest were added
+during implementation). The frequent entry points:
 
-**Windows (cmd)** — download and run, or from a cloned repo:
+| Area | Entry points |
+|---|---|
+| Workflows | `POST /workflows`, `POST /workflows/{id}/activate`, `POST /workflows/{id}/execute`, `GET /workflow-definitions/metadata` |
+| Executions | `GET /executions`, `GET /executions/{id}` (per-node triage and wait reasons), `POST /executions/{id}/cancel` |
+| Approvals | `GET /approval-requests`, `POST /approval-requests/{id}/challenge`, `POST /executions/{id}/resume` |
+| Questions (human in the loop) | `GET /executions/{id}/input-requests`, `POST /executions/{id}/input-requests/{rid}/answer`, `GET /input-requests` |
+| Output reviews | `POST /executions/{id}/output-review`, `GET /executions/{id}/output-review`, `POST /executions/{id}/output-review/decisions`, `GET /output-reviews` |
+| Governance and operations | `GET /tenant-capabilities`, `GET /jobs`, `GET /notifications`, `GET /audit-logs`, `GET /usage` |
 
-```bat
-curl -fsSL https://finnie-1258344699.cos.ap-guangzhou.myqcloud.com/octop/install.bat -o install.bat
-install.bat
-```
-
-After installation, open a **new terminal** or reload your shell:
+## Verifying
 
 ```bash
-source ~/.zshrc   # Zsh
-# or
-source ~/.bashrc  # Bash
+make lint          # ruff check + ruff format --check (src and tests)
+make typecheck     # mypy src/octop
+make test          # pytest -n N -m "not live" (everything that needs no external credentials)
+
+# Tests that need real PostgreSQL / Redis (the same set as CI's Live database tests job)
+OCTOP_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/octop_test \
+OCTOP_TEST_REDIS_URL=redis://127.0.0.1:6379/0 \
+uv run pytest -m "postgresql or redis"
+
+cd dashboard && npx tsc -b && npx vitest run && npx eslint .
 ```
 
-The installer places `octop` on your PATH via `~/.octop/bin`. Optional extras:
+CI runs `Python 3.12`, `Windows / Python 3.12`, `Live tests (real credentials)`, `Dashboard` and `CodeQL`. The live database job is the
+**only** one that covers migrations, RLS and real database behaviour — unit tests alone are not enough to call a change usable.
 
-```bash
-# Browser automation (Playwright Chromium)
-curl -fsSL https://finnie-1258344699.cos.ap-guangzhou.myqcloud.com/octop/install.sh | bash -s -- --extras browser
+## Deployment notes
 
-# Feishu channel support
-curl -fsSL https://finnie-1258344699.cos.ap-guangzhou.myqcloud.com/octop/install.sh | bash -s -- --extras channels-feishu
-```
+- **Migrations**: `octop init` (and `octop workbuddy worker`, backup and admin commands) apply them. The version watermark stays monotonic on
+  both control planes; WorkBuddy's tables and execution facts exist in PostgreSQL only, so SQLite advances the watermark and fails closed.
+- **RLS**: every WorkBuddy business table is `ENABLE` + `FORCE ROW LEVEL SECURITY` with a policy on the transaction-local `app.tenant_id`.
+  Platform-wide operations use an explicit platform context instead of relaxing a policy.
+- **Roles**: this repository creates no runtime roles and grants nothing implicitly. Migrations only `REVOKE ALL ... FROM PUBLIC`;
+  creating the runtime role is the deployment's job.
+- **Worker**: execution, outbox dispatch and deadline settlement all need a worker running. Each is idempotent and re-entrant.
 
-See [scripts/README.md](scripts/README.md) for all install options (`--version`, `--from-source`, `--mirror`, Windows flags).
+## Current boundaries
 
-**Desktop app** (GUI, no terminal) — grab the artifact for your platform from [GitHub Releases](https://github.com/TencentCloud/Octop/releases/latest):
+1. Connector / model-gateway adapters and trigger delivery are **deployment wiring**: without them the affected step fails closed with a
+   dependency-unavailable error instead of quietly producing an empty result.
+2. The outbox only writes: inject a publisher port and the dispatcher starts delivering. Without one it refuses to run rather than mark an
+   event nobody received as delivered.
+3. Tenant-level metric definitions and production deregistration / compliance sign-off are **product decisions**; do not promise them yet.
+4. Batch progress, contract divergences and integration verdicts live in `docs/plan/` (`two-machine-workstreams.md` is the plan, `ledger/`
+   holds the two machines' and the integrator's state).
 
-| Platform | Artifact |
-|----------|----------|
-| Windows | `Octop-desktop-windows-amd64-<version>.exe` (64-bit) / `Octop-desktop-windows-arm64-<version>.exe` (ARM64) — NSIS installer |
-| macOS | `Octop-desktop-darwin-arm64-<version>.dmg` (Apple Silicon) / `Octop-desktop-darwin-amd64-<version>.dmg` (Intel) |
-| Linux | `Octop-desktop-linux-amd64-<version>.tar.gz` / `Octop-desktop-linux-arm64-<version>.tar.gz` |
-| FnOS NAS | `Octop-fnos-docker-<version>.fpk` (Docker-backed) / `Octop-fnos-native-<version>.fpk` (no Docker) — install via App Center |
-
-See [desktop/README.md](desktop/README.md) for the desktop shell and [fnos/README.md](fnos/README.md) for the FnOS packaging guide.
-
-**Alternative — PyPI** (if you already manage Python yourself):
-
-```bash
-pip install octop
-# optional: pip install "octop[browser]"
-# optional local ONNX embedding model cache (Models → Local): pip install "octop[local-embedding]"
-# Downloads catalog weights under ~/.octop/embedding_models; not chat, not Memory.
-```
-
-From a source checkout with uv:
-
-```bash
-uv sync --extra local-embedding
-```
-
-### 2. Initialize
-
-```bash
-octop init
-```
-
-The interactive wizard creates the SQLite database, JWT secret, and first admin account under `~/.octop/`.
-
-### 3. Run
-
-```bash
-# Foreground (API + Web dashboard)
-octop run
-
-# Custom host / port
-octop run --host 0.0.0.0 --port 8088
-
-# Register as a system service (systemd / launchd / Windows service)
-octop service start
-```
-
-Open **http://127.0.0.1:8088**. With Docker, the first init generates a random admin password (written to `/data/.octop/credential.txt`) unless `OCTOP_DEFAULT_PASSWORD` is set. Interactive `octop init` / the setup wizard asks you to choose a password (≥8 characters, letters and digits).
-
-### Docker (recommended for production)
-
-```bash
-# Build and start
-docker compose -f docker/docker-compose.yml up -d
-
-# Or build manually
-bash docker/docker_build.sh
-docker run -d \
-  -p 8088:8088 \
-  -v octop-data:/data/.octop \
-  -e HOME=/data \
-  -e OCTOP_DEFAULT_PASSWORD="<strong-password-or-omit-for-random>" \
-  octop:latest
-```
-
-Open `http://localhost:8088`. First boot creates the admin account and writes the credentials to `/data/.octop/credential.txt` in the container. With `OCTOP_DEFAULT_PASSWORD` unset a strong random password is generated; a password you set must be ≥8 characters with letters and digits (weak/common passwords are rejected by the app password policy and fall back to a random one). Override the username via `OCTOP_ADMIN_USERNAME`.
-
-> **Password policy:** at least 8 characters with letters and digits.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OCTOP_PORT` | `8088` | HTTP listen port |
-| `OCTOP_DEFAULT_PASSWORD` | _(unset)_ | First-run admin password (Docker bootstrap). Unset = random password written to `credential.txt` |
-| `OCTOP_ADMIN_USERNAME` | `admin` | First-run admin username |
-| `OCTOP_DATA` | `~/.octop` | Host data directory (compose bind mount) |
-
-See [`.env.example`](.env.example) for the full list.
-
-## 📑 Contents
-
-- [Highlights](#-highlights)
-- [Overview](#-overview)
-- [Core Technology](#-core-technology)
-- [Features](#-features)
-- [WorkBuddy](#-workbuddy)
-- [Roadmap](#-roadmap)
-- [Quick Start](#-quick-start)
-- **Deploy & Use**
-  - [Install options](#-install-options)
-  - [Configuration](#-configuration)
-  - [CLI reference](#-cli-reference)
-  - [Web dashboard](#-web-dashboard)
-  - [Data directory](#-data-directory)
-- **Architecture & Dev**
-  - [Architecture](#-architecture)
-  - [Project layout](#-project-layout)
-  - [Development](#-development)
-- **Project Info**
-  - [Security & privacy](#-security--privacy)
-  - [Contributing](#-contributing)
-  - [Changelog](#-changelog)
-  - [Related projects](#-related-projects)
-  - [WeCom customer group](#-wecom-customer-group-cn)
-  - [License](#-license)
-
-## 📦 Install options
-
-| Method | Platform | Description |
-|--------|----------|-------------|
-| Remote one-liner | macOS / Linux | `curl …/octop/install.sh \| bash` |
-| Remote one-liner | Windows | `irm …/octop/install.ps1 \| iex` or `install.bat` |
-| Local script | macOS / Linux | `bash scripts/install.sh` |
-| Local script | Windows | `scripts\install.bat` or `install.ps1` |
-| PyPI | Any | `pip install octop` or `pip install "octop[browser]"` |
-| Docker | Any | `docker/docker-compose.yml` |
-
-All install scripts provision an isolated environment at `~/.octop/venv` and a `~/.octop/bin/octop` wrapper — they do not touch system Python.
-
-### Upgrade
-
-`octop update` replaces only the wheel/binary — your `~/.octop/` database, workspaces, secrets, and `config.json` are preserved:
-
-```bash
-octop update          # fetch and install the latest octop, then restart the service if one is registered
-```
-
-The schema migrates automatically on next boot; run `octop init` only if the setup wizard prompts for a migration. Always back up first (`octop backup`) before a cross-version upgrade.
-
-## ⚙️ Configuration
-
-All runtime state lives in `~/.octop/`. Manage it via CLI or edit files directly.
-
-```bash
-# LLM providers and models
-octop models
-octop provider list
-
-# IM channels
-octop channel list
-octop channel install
-
-# Skills (per agent)
-octop skills list --agent main
-
-# Cron jobs
-octop cron list
-octop cron create --help
-
-# Users (admin)
-octop user list
-```
-
-### Supported LLM providers
-
-OpenAI-compatible APIs, DashScope (Qwen), Ollama, and other presets — configure per agent in the dashboard or via `octop provider`.
-
-### Supported channels
-
-| Channel | Credentials |
-|---------|-------------|
-| **Feishu** | App ID, App Secret |
-| **DingTalk** | App Key, App Secret |
-| **QQ** | Bot AppID, Token |
-| **Discord** | Bot Token |
-| **WeCom** | Corp ID, Agent Secret |
-| **Web Dashboard** | Enabled by default |
-
-## 📖 CLI reference
-
-| Command | Description |
-|---------|-------------|
-| `octop init` | Bootstrap `~/.octop/` (DB, admin, JWT secret) |
-| `octop run` | Start Octop in the foreground |
-| `octop service start` | Install and start as a system service |
-| `octop service stop` | Stop the system service |
-| `octop agent` | Create, list, start/stop agents |
-| `octop channel` | Install and manage IM channels |
-| `octop chats` | REPL and session management |
-| `octop acp` | Stdio ACP server for IDE integration |
-| `octop cron` | Manage scheduled tasks |
-| `octop models` | Provider presets and model resolution |
-| `octop skills` | Enable/disable per-agent skills |
-| `octop plugin` | Install and manage third-party plugins |
-| `octop backup` | Export / restore backups |
-| `octop clean` | Remove CLI state or wipe `~/.octop/` |
-| `octop update` | Check for and install updates |
-
-Full reference: **[docs/cli.md](docs/cli.md)**.
-
-## 🖥️ Web dashboard
-
-After `octop run`, open **http://127.0.0.1:8088**.
-
-<p align="center">
-  <img src="docs/assets/readme-chat.png" alt="Octop Web Dashboard" width="800" />
-</p>
-
-- **Chat** — real-time conversation with agents
-- **Agents** — create agents, pick experts / MBTI personas, configure providers
-- **Connectors** — OAuth apps and MCP gateways
-- **Channels** — IM platform setup
-- **Cron** — visual cron job management
-- **Knowledge base** — manage document corpora and semantic retrieval
-- **Plugins** — install, enable, and configure plugins
-- **ACP** — configure outbound coding-agent runners
-- **Settings** — users, security, TLS, system
-
-Interactive API docs: **http://127.0.0.1:8088/api/docs** (disabled by default — enable by setting `"enable_api_docs": true` in `config.json`)
-
-## 📁 Data directory
-
-```
-~/.octop/                          ← install & data root
-├── config.json                    # process config (optional database section)
-├── octop.db                       # SQLite — users, agents, channels, cron, …
-├── secrets/                       # JWT secret, channel tokens
-├── agents/<agent_id>/             # per-agent workspace (SOUL.md, skills, …)
-├── security/tool_guard/           # shell command allow/deny rules
-├── logs/                          # runtime logs
-├── venv/                          # uv-managed Python (installer layout)
-└── bin/octop                      # PATH wrapper → venv/bin/octop
-```
-
-The control plane can also use PostgreSQL — set `database` in `config.json`, or `OCTOP_DATABASE_*` / the first-run wizard. With PostgreSQL, agent memory reuses the same DSN by default (per-agent schema); to keep file-based memory, set `"memory": { "backend": { "type": "sqlite" } }` in the agent config. See [docs/configuration.md](docs/configuration.md) and [docs/adr/002-database-backends.md](docs/adr/002-database-backends.md).
-
-See [docs/configuration.md](docs/configuration.md) for env vars and `config.json`.
-
-## 🏗️ Architecture
-
-```
-OctopServer
- ├─ DatabasePool            SQLite (WAL) or PostgreSQL
- ├─ SharedServices       DI root — every repo + config
- ├─ ExpertCatalog        scans agents/experts/library/ at boot
- ├─ UserManager
- │   └─ HarnessAgentManager (per user)
- │       └─ AgentRuntime (per agent)
- │           ├─ HarnessAgent      Agent runtime (harness-agent)
- │           ├─ HarnessProcessor  IM / UI / cron entry point
- │           ├─ ChannelManager    IM connections (harness-gateway)
- │           └─ CronManager       APScheduler
- └─ FastAPI app (uvicorn)
-```
-
-Single process. Restart rebuilds state from the control-plane database (local SQLite by default; PostgreSQL optional).
-
-See [docs/architecture.md](docs/architecture.md), [docs/adr/001-single-process-model.md](docs/adr/001-single-process-model.md), and [docs/adr/002-database-backends.md](docs/adr/002-database-backends.md).
-
-## 📁 Project layout
+## Repository layout
 
 ```
 src/octop/
-  config.py    env-var config
-  launch.py    OctopServer boot + uvicorn
-  infra/       business core (agents, gateway, cron, db, users, …)
-  api/         HTTP layer — FastAPI app, routers, JWT, SSE
-  cli/         CLI layer — Click commands
-  dashboard/   built React SPA (wheel artifact)
-
-dashboard/     frontend source (Vite) — edit here, run make build-frontend
-
-docker/        Docker Compose, entrypoint, build & deploy scripts
-tests/         unit/ + integration/
+  api/routers/            HTTP layer (workbuddy_*.py are WorkBuddy's endpoints)
+  infra/workbuddy/        workflow compiler / runtime / approvals / knowledge / proposals / marketplace / worker
+  infra/db/               data access and migrations (migrations/ carries both PostgreSQL and SQLite sides)
+  infra/rbac/             object-permission skeleton (four scopes plus explicit grants)
+  cli/                    command line (including octop workbuddy …)
+contracts/                authoritative contracts: workflow-v1.schema.json, route-manifest.json
+dashboard/                console (React + Vite + antd)
+docs/                     architecture, API, CLI, configuration and ADRs
+tests/                    unit / integration (PG- and Redis-marked cases need real dependencies)
+docs/plan/                delivery plan, ledgers and integration verdicts
 ```
 
-## 🛠️ Development
+## Licence and upstream
 
-**Prerequisites:** Python 3.12+, Node 18+, [uv](https://docs.astral.sh/uv/)
-
-```bash
-# Backend
-make install          # pip install -e ".[dev]"
-make all              # format-all + lint + typecheck + test (ship bar)
-
-# Frontend (separate terminal)
-make dev-frontend     # Vite dev server on :5173 (override with VITE_DEV_PORT)
-make build-frontend   # production build → src/octop/dashboard/
-cd dashboard && npx tsc -b
-```
-
-Individual targets: `make test`, `make lint`, `make typecheck`, `make format`.
-
-## 🔒 Security & privacy
-
-- **Local-first**: Config, chats, workspaces, and credentials live under `~/.octop/` on your machine.
-- **Multi-user isolation**: JWT auth with per-user agents and workspaces.
-- **PII redaction & tool approval**: sensitive data is redacted before it leaves the workspace, and risky tools or shell commands require explicit approval under the guardrail rules.
-- **Tool guardrails**: User-editable shell command rules under `~/.octop/security/tool_guard/`.
-- **No vendor lock-in**: Swap LLM providers, storage backends, and channels without rewriting agents.
-
-## 🤝 Contributing
-
-Contributions are welcome:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Run `make all` (backend) or `make check-all` (full stack) before submitting
-4. Open a Pull Request
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide. Security issues: [SECURITY.md](SECURITY.md).
-
-Module boundaries and coding conventions: [AGENTS.md](AGENTS.md).
-
-## 📋 Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for release history.
-
-## 🔗 Related projects
-
-| Project | Description |
-|---------|-------------|
-| harness-agent | Agent runtime — model routing, tools, skills, checkpointing |
-| harness-gateway | Multi-platform IM channel bridge |
-| harness-memory | Hierarchical recall and FTS search |
-| harness-browser | CDP browser automation with persistent profiles |
-
-> These `harness-*` projects are being prepared for open-sourcing; repository links will be added once they are published.
-
-## 💬 WeCom Customer Group (CN)
-
-For the customer WeCom support group, scan:
-
-<p align="center">
-  <img src="docs/assets/qrcode.png" alt="WeCom customer group QR code" width="220" />
-</p>
-
-> Please scan the QR code to join the group. For any questions or assistance, please contact the group admin directly.
-
-## 📄 License
-
-This project is licensed under the [MIT License](LICENSE).
-
-## ✨ Contributors
-
-Thanks to all contributors:
-
-<a href="https://github.com/tencentcloud/octop/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=tencentcloud/octop" />
-</a>
+- This repository is **MIT** (`LICENSE`, copyright Octop). Changes made here are offered under the same licence.
+- Upstream: [TencentCloud/Octop](https://github.com/TencentCloud/Octop). This repository does **not** share its product direction; the parts
+  it reuses remain bound by upstream's licence and copyright.

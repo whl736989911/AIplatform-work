@@ -17,7 +17,7 @@ from octop.api.common.sso_cookie import (
     delete_sso_state_cookie,
     set_sso_state_cookie,
 )
-from octop.api.deps import get_server, require_permission, sign_token
+from octop.api.deps import get_server, require_permission
 from octop.api.routers.auth import _user_json
 from octop.infra.auth.sso.service import SsoService
 from octop.infra.errors import ErrorCode, OctopError
@@ -66,16 +66,10 @@ async def exchange_login_code_response(code: str, server: Any) -> dict[str, Any]
         user = await _service(server).exchange_login_code(code)
     except ValueError as exc:
         raise _bad_request(exc) from exc
-    secret = server.services.secret_repo.get("jwt")
-    ttl = server.services.config.access_token_ttl_seconds
-    return {
-        "access_token": sign_token(
-            secret, sub=user.id, uname=user.username, role=user.role.value, ttl_seconds=ttl
-        ),
-        "token_type": "Bearer",
-        "expires_in": ttl,
-        "user": _user_json(user, locale=user.locale),
-    }
+    # Same session as a password sign-in: an SSO user renews without re-login too.
+    from octop.api.routers.auth import issue_session
+
+    return {**issue_session(server, user), "user": _user_json(user, locale=user.locale)}
 
 
 @router.get("/oidc/status", summary="OIDC login button status")

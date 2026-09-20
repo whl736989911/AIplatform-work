@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-20T03:23:42Z",
+  "updated": "2026-09-20T04:39:17Z",
   "batches": {
     "1": {
       "state": "done",
@@ -54,7 +54,7 @@
       "notes": "本批次已 rebase 到含「A 线批次 2 + B 线批次 2」的 main。未包含项：knowledge 检索端口未接线（部署方接线，未接线即 fail-closed）；向导按线性步骤链生成边；试运行不在向导内展示逐节点结果；三类新节点暂无专门图标。"
     },
     "4": {
-      "state": "pending",
+      "state": "in_progress",
       "tasks": [
         "A-08",
         "A-09",
@@ -62,10 +62,23 @@
         "A-11",
         "A-18"
       ],
-      "pr": null,
-      "commits": [],
-      "evidence": "",
-      "notes": "（批次 4 任务集更正：补入漏排的 A-10 超时与升级、A-18 会话续期）"
+      "pr": 37,
+      "commits": [
+        "717889a0 A-08 后端（ask 节点 + waiting_input + 输入请求表/端点 + 迁移 034 + 两处缺陷修复）",
+        "940793d1 A-10 超时与升级（SLA）",
+        "6d9f9ae4 A-08/A-11 前端（待我填写面板 + 回答抽屉）"
+      ],
+      "evidence": "A-08：真实 PG 端到端 5 条（停放→作答→恢复→成功；非法答案 400 且状态不变；非受派人 404；停放可取消；无人可答就地失败）；A-10：端到端 1 条（逾期→expired→升级通知+审计→重排队→第 2 次尝试以 INPUT_REQUEST_EXPIRED 失败并结算）；单元 29 条（编译期 13 + 引擎/校验器 16）；整条运行时 PG 文件 44 条 + 两个节点集单测 30 条全绿；前端 tsc exit 0 / vitest 19+25 例 / eslint 干净；i18n 完整性 69 条。 ｜ A-09：真实 PG 端到端 5 条（采纳后运行保持 success 且产出不变、修正只允许产出键、非受指派者 404、未结算运行不可审、重跑产生被回链的新执行并跑通）+ 单元 4 条；整条运行时 PG 文件 49 条全绿。 ｜ A-18：新增 5 条端到端（签发一对、轮换后旧令牌重放→家族整体失效、未知令牌 401、登出结束会话、两个登录互不牵连）+ 既有 auth 流程 9 条与 JWT 中间件 7 条全绿；仓储经 SQLite 与 PG 双探针；迁移 036 经真实 runner 全链（PG 与 SQLite 均到 v51、重复应用 no-op）；前端 tsc/eslint 干净、新增 4 条续期测试（含「多个请求共用一次刷新」与「刷新被拒不再重试」）。",
+      "notes": "契约偏差（记录以免后续误判）：① 新增执行状态 waiting_input —— 源文档的状态表（约 1482 行）尚未列出，本状态由已批准的批次任务 A-08 引入，属**契约扩展**而非偏离；② 三个输入请求端点（GET /executions/{id}/input-requests、POST …/answer、GET /input-requests）在源文档路由表中不存在，故在 contracts/route-manifest.json 标为 supplemental（计数 62/54/116）；③ 计划的 §4.0.2 提到 octop_app / workbuddy_auth 两个角色，本仓库从不创建它们（018/019/031/050 只 REVOKE FROM PUBLIC），迁移里**不得**对它们 GRANT（会因角色不存在而中止），角色创建属部署方（D 批次）；④ 迁移 034 顺带修复 workbuddy_step_runs.node_type 词表（018 的 5 类 → 编译器当前的 9 类）：新增节点类型必须同时扩该约束，否则含新节点的工作流一运行就整次失败（A-07 曾潜伏此缺陷）；⑤ 顺带修复 request_cancel 漏 waiting_input、insert_execution 绑参缺 5 个路由列。批次 4 的 PR #37 堆叠在批次 3 的 #35 之上；#35 合入后 GitHub 会自动把 #37 的基座改指 main。A-09 语义由用户定调（2026-09-20：「尽量避免阻断式」）：事后只追加，不阻断运行。 A-18 事实澄清：访问令牌的滑动续期早已存在（maybe_sliding_renew_token + 响应头），所以缺口只是「安静超过访问令牌有效期再回来」的客户端；本轮补的是刷新令牌（轮换 + 重放即撤销家族），并让 logout 第一次能真正结束会话。另：前端「待我审核」落地时发现前端状态词表仍残留 succeeded/cancelled，已一并对齐到迁移 023 的词表。",
+      "tasks_done": [
+        "A-08",
+        "A-09",
+        "A-10",
+        "A-11",
+        "A-18"
+      ],
+      "tasks_partial": {},
+      "tasks_pending": []
     },
     "5": {
       "state": "pending",

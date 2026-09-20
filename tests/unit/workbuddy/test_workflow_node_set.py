@@ -14,11 +14,13 @@ from __future__ import annotations
 import pytest
 
 from octop.infra.workbuddy.workflow_compiler import (
+    WORKFLOW_ASK_FIELDS_DUPLICATE,
     WORKFLOW_ENTRY_COUNT,
     WORKFLOW_INPUT_NODE_UNKNOWN,
     WORKFLOW_KNOWLEDGE_BASE_UNKNOWN,
     WORKFLOW_OUTPUT_DUPLICATE,
     WORKFLOW_OUTPUT_NOT_TERMINAL,
+    WORKFLOW_SCHEMA_INVALID,
     SemanticDecision,
     WorkflowCompileError,
     compile_workflow_definition,
@@ -207,3 +209,122 @@ def test_the_template_fields_of_the_new_nodes_are_checked() -> None:
         compile_workflow_definition(definition, resolver=Resolver())
     assert caught.value.code == "WORKFLOW_REFERENCE_UNKNOWN"
     assert caught.value.path == "nodes.answer.config.value"
+
+
+# --------------------------------------------------------------------------- #
+# ask: a node that stops the run to ask a person (A-08)
+# --------------------------------------------------------------------------- #
+
+MEMBER = "11111111-1111-1111-1111-111111111111"
+OTHER_MEMBER = "22222222-2222-2222-2222-222222222222"
+
+
+def ask_definition(*, fields: list[dict] | None = None, assignees: list[str] | None = None) -> dict:
+    """One ``ask`` node, which is entry and terminal at once."""
+    return {
+        "schema_version": 1,
+        "trigger": manual_trigger(),
+        "inputs": {},
+        "nodes": [
+            {
+                "id": "collect",
+                "type": "ask",
+                "name": "Ask the requester",
+                "config": {
+                    "prompt": "Which account should this post to?",
+                    "assignee_user_ids": assignees if assignees is not None else [MEMBER],
+                    "fields": fields
+                    if fields is not None
+                    else [
+                        {
+                            "name": "account",
+                            "label": "Account",
+                            "type": "select",
+                            "options": ["A", "B"],
+                        }
+                    ],
+                },
+            }
+        ],
+        "edges": [],
+    }
+
+
+def test_an_ask_node_compiles_with_its_form() -> None:
+    compiled = compile_workflow_definition(ask_definition(), resolver=Resolver())
+    assert compiled.node_by_id["collect"].node_type == "ask"
+
+
+def test_an_ask_node_refuses_two_fields_with_the_same_name() -> None:
+    definition = ask_definition(
+        fields=[
+            {"name": "amount", "label": "Amount", "type": "number"},
+            {"name": "amount", "label": "Amount again", "type": "number"},
+        ]
+    )
+    with pytest.raises(WorkflowCompileError) as caught:
+        compile_workflow_definition(definition, resolver=Resolver())
+    # Field names are the keys of the submitted mapping, so a duplicate would let
+    # the later field silently win.
+    assert caught.value.code == WORKFLOW_ASK_FIELDS_DUPLICATE
+    assert caught.value.path == "nodes.collect.config.fields[1].name"
+
+
+def test_an_ask_node_refuses_a_select_without_options() -> None:
+    definition = ask_definition(fields=[{"name": "account", "label": "Account", "type": "select"}])
+    with pytest.raises(WorkflowCompileError) as caught:
+        compile_workflow_definition(definition, resolver=Resolver())
+    assert caught.value.code == WORKFLOW_SCHEMA_INVALID
+
+
+def test_an_ask_node_cannot_declare_an_approval_target() -> None:
+    definition = ask_definition()
+    definition["nodes"][0]["config"]["target_node_id"] = "collect"
+    with pytest.raises(WorkflowCompileError) as caught:
+        compile_workflow_definition(definition, resolver=Resolver())
+    # An ask node's config is closed: targeting another node's output is an
+    # authority an approval carries and a question does not.
+    assert caught.value.code == WORKFLOW_SCHEMA_INVALID
+
+
+def test_an_ask_node_needs_one_assignee_the_tenant_can_still_see() -> None:
+    class Nobody:
+        """Every declared assignee has left the tenant."""
+
+        def check_tool(self, tool_name, parameters):
+            return SemanticDecision.allowed()
+
+        def check_model(self, model):
+            return SemanticDecision.allowed()
+
+        def check_knowledge_base(self, knowledge_base_id):
+            return SemanticDecision.allowed()
+
+        def check_approver(self, user_id):
+            return SemanticDecision.refused("MEMBER_GONE", "member left the tenant")
+
+    with pytest.raises(WorkflowCompileError) as caught:
+        compile_workflow_definition(ask_definition(), resolver=Nobody())
+    assert caught.value.code == "ASK_NO_VALID_ASSIGNEE"
+    assert caught.value.path == "nodes.collect.config.assignee_user_ids"
+
+    class SecondOnly:
+        def check_tool(self, tool_name, parameters):
+            return SemanticDecision.allowed()
+
+        def check_model(self, model):
+            return SemanticDecision.allowed()
+
+        def check_knowledge_base(self, knowledge_base_id):
+            return SemanticDecision.allowed()
+
+        def check_approver(self, user_id):
+            if user_id == OTHER_MEMBER:
+                return SemanticDecision.allowed()
+            return SemanticDecision.refused("MEMBER_GONE", "member left the tenant")
+
+    # One reachable assignee is enough to publish, exactly as one valid approver
+    # is: a departure must not make an otherwise sound workflow unpublishable.
+    compile_workflow_definition(
+        ask_definition(assignees=[MEMBER, OTHER_MEMBER]), resolver=SecondOnly()
+    )

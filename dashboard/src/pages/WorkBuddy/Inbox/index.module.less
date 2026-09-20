@@ -31,3 +31,23 @@
 .selectedRow {
   background: var(--fn-bg-elevated, rgba(22, 119, 255, 0.06));
 }
+
+/* A question's prompt is free text the node authored: keep its own line breaks. */
+.promptText {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* JSON payloads a reviewer types (corrections, re-run inputs) line up with the
+   previews they were read from. */
+.jsonEditor {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+
+.blockHint {
+  display: block;
+  margin: 6px 0 10px;
+  font-size: 12px;
+}
