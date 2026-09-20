@@ -27,6 +27,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 
 from octop.infra.db.pool import DatabasePool
+from octop.infra.db.repos.workbuddy_execution_feedback import (
+    ExecutionFeedbackRepo,
+    ExecutionFeedbackRow,
+)
 from octop.infra.db.repos.workbuddy_runtime import (
     ApprovalCandidateRow,
     ApprovalRequestRow,
@@ -2038,6 +2042,30 @@ def output_review_payload(
     }
 
 
+def feedback_payload(row: ExecutionFeedbackRow) -> dict[str, Any]:
+    """One feedback record as the API needs it.
+
+    ``before`` and ``after`` travel together because a correction is only readable
+    as a pair: the value the workflow produced and the value a person said it
+    should have been.
+    """
+    return {
+        "id": row.id,
+        "execution_id": row.execution_id,
+        "workflow_id": row.workflow_id,
+        "workflow_version_id": row.workflow_version_id,
+        "node_id": row.node_id,
+        "output_key": row.output_key,
+        "kind": row.kind,
+        "source": row.source,
+        "source_id": row.source_id,
+        "before": row.before,
+        "after": row.after,
+        "created_by_user_id": row.created_by_user_id,
+        "created_at": _iso(row.created_at),
+    }
+
+
 def input_request_payload(
     row: InputRequestRow, assignees: Sequence[InputAssigneeRow] = ()
 ) -> dict[str, Any]:
@@ -2463,9 +2491,13 @@ class WorkBuddyRuntimeService:
         member_resolver: Any | None = None,
         canary: CanaryDirectory | None = None,
         tool_declarations: Any | None = None,
+        feedback: ExecutionFeedbackRepo | None = None,
     ) -> None:
         self._db = db
         self._repo = repo or WorkBuddyRuntimeRepo(db)
+        # The improvement loop's raw material: what a person changed, and what the
+        # workflow version was when they changed it (A-12).
+        self._feedback = feedback or ExecutionFeedbackRepo(db)
         self._versions = versions or WorkflowCatalogVersions(db)
         self._effects = effects or UNAVAILABLE_SIDE_EFFECTS
         self._member_resolver = (
@@ -3983,6 +4015,24 @@ class WorkBuddyRuntimeService:
                 user_id=actor.acting_user_id,
                 conn=conn,
             )
+            # The answer is the improvement loop's other kind of raw material: a
+            # fact a person supplied, recorded with the run and version it belongs
+            # to so the analyser can tell it apart from a correction (A-12).
+            self._feedback.insert_execution_feedback(
+                ctx,
+                tenant_id=actor.tenant_id,
+                execution_id=execution_id,
+                workflow_id=execution.workflow_id,
+                workflow_version_id=execution.workflow_version_id,
+                workflow_version_hash=execution.workflow_version_hash,
+                kind="supplied_fact",
+                source="ask",
+                source_id=input_request_id,
+                node_id=request.node_id,
+                after=cleaned,
+                created_by_user_id=actor.acting_user_id,
+                conn=conn,
+            )
             self._repo.requeue_execution(
                 ctx,
                 execution_id,
@@ -4326,6 +4376,26 @@ class WorkBuddyRuntimeService:
                 decision=settled_status,
                 conn=conn,
             )
+            # One structured row per corrected key, bound to the version that
+            # produced it: that binding is what lets the improvement loop say
+            # "this workflow, at this version, was wrong here" (A-12).
+            for corrected_key, corrected_value in sorted((values or {}).items()):
+                self._feedback.insert_execution_feedback(
+                    ctx,
+                    tenant_id=actor.tenant_id,
+                    execution_id=execution_id,
+                    workflow_id=execution.workflow_id,
+                    workflow_version_id=execution.workflow_version_id,
+                    workflow_version_hash=execution.workflow_version_hash,
+                    kind="correction",
+                    source="output_review",
+                    source_id=review.id,
+                    output_key=corrected_key,
+                    before=dict(review.produced).get(corrected_key),
+                    after=corrected_value,
+                    created_by_user_id=actor.acting_user_id,
+                    conn=conn,
+                )
             if review.requested_by_user_id is not None:
                 self._repo.insert_notification(
                     ctx,
@@ -4414,6 +4484,21 @@ class WorkBuddyRuntimeService:
                 details={"count": len(rows)},
             )
         return [output_review_payload(row) for row in rows]
+
+    def list_execution_feedback(
+        self, actor: RuntimeActor, execution_id: str
+    ) -> list[dict[str, Any]]:
+        """What people changed or supplied for one run, oldest first.
+
+        Read by the run's creator or an admin, exactly like the run itself: a
+        correction is part of that run's history, not a separate tenant-wide feed.
+        The analyser reads the workflow-level slice internally, through the repo.
+        """
+        self._require_postgres()
+        ctx = self._ctx(actor)
+        execution = self._load_execution(actor, execution_id)
+        rows = self._feedback.list_execution_feedback_for_execution(ctx, execution.id)
+        return [feedback_payload(row) for row in rows]
 
     def _recorded_expired(self, ctx: WorkBuddyDbContext, execution: ExecutionRow) -> frozenset[str]:
         """Nodes of this execution whose question passed its deadline unanswered.

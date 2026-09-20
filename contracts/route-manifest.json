@@ -966,11 +966,19 @@
       "success_status": 200,
       "summary": "本人待审产出队列，200",
       "authorization": "范围默认本人；admin 的 scope=tenant 须有管理目的并审计"
+    },
+    {
+      "method": "GET",
+      "path": "/executions/{execution_id}/feedback",
+      "stage": "A5",
+      "success_status": 200,
+      "summary": "某次执行的纠正与补充事实记录，200",
+      "authorization": "发起者或受控 admin（与运行本身同一判定，读不到即 404）"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 58,
-    "total": 120
+    "supplemental": 59,
+    "total": 121
   }
 }

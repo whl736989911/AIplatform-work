@@ -429,6 +429,23 @@ async def list_output_reviews(
     return workbuddy_envelope(request, {"items": items})
 
 
+@router.get(
+    "/executions/{execution_id}/feedback",
+    summary="List what people changed or supplied for one execution",
+)
+async def list_execution_feedback(
+    execution_id: str,
+    request: Request,
+    principal: _Principal,
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """The corrections and supplied facts recorded against this run, oldest first."""
+    items = _service(server).list_execution_feedback(
+        _actor(principal), _uuid(execution_id, field="execution")
+    )
+    return workbuddy_envelope(request, {"items": items})
+
+
 @router.post("/executions/{execution_id}/reconciliations", summary="Record external-write evidence")
 async def record_reconciliation(
     execution_id: str,
