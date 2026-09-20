@@ -178,7 +178,9 @@ export default function CreateWizard({ open, onClose, onCreated }: Props) {
     };
   }, [open, metadata]);
 
-  const inputTypes = metadata?.inputs.types ?? ["string"];
+  // Stable identity: `addInput` depends on it, and a fresh array every render
+  // would rebuild that callback for no reason.
+  const inputTypes = useMemo(() => metadata?.inputs.types ?? ["string"], [metadata]);
 
   const definition = useMemo(
     () => ({
