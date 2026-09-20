@@ -6334,7 +6334,9 @@
         "closeWarning": "关闭将丢弃当前的校验结果。",
         "jsonObjectRequired": "定义必须是 JSON 对象。",
         "diagnosticCount": "共 {{count}} 条问题",
-        "diagnosticNode": "节点"
+        "diagnosticNode": "节点",
+        "viewJson": "JSON",
+        "viewCanvas": "画布"
       },
       "versions": {
         "title": "版本历史",

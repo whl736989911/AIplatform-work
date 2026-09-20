@@ -6195,7 +6195,9 @@
         "closeWarning": "Closing discards the current validation result.",
         "jsonObjectRequired": "The definition must be a JSON object.",
         "diagnosticCount": "{{count}} problem(s)",
-        "diagnosticNode": "Node"
+        "diagnosticNode": "Node",
+        "viewJson": "JSON",
+        "viewCanvas": "Canvas"
       },
       "versions": {
         "title": "Version history",

@@ -9,8 +9,17 @@
  * never retried blindly.
  */
 
-import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Form, Input, Modal, Space, Typography } from "antd";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Alert,
+  Button,
+  Form,
+  Input,
+  Modal,
+  Segmented,
+  Space,
+  Typography,
+} from "antd";
 import { message } from "@/utils/antdMessage";
 import { CheckCircle2, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -26,6 +35,8 @@ import {
   type WorkflowVersion,
   type WorkflowWithVersion,
 } from "../../../api/modules/workbuddyWorkflows";
+import DefinitionCanvas from "./DefinitionCanvas";
+import type { GraphDefinition } from "./definitionGraph";
 import styles from "./index.module.less";
 
 const { Text } = Typography;
@@ -115,6 +126,20 @@ export default function DefinitionEditorModal({
   const { t } = useTranslation();
   const [form] = Form.useForm<EditorFormValues>();
   const [definition, setDefinition] = useState("");
+  const [view, setView] = useState<"json" | "canvas">("json");
+  // The canvas draws a definition, so it is only offered when the text parses:
+  // silently showing a stale graph while the JSON is mid-edit would be worse
+  // than making the reader fix the JSON first.
+  const parsed = useMemo<GraphDefinition | null>(() => {
+    try {
+      const value: unknown = JSON.parse(definition);
+      return value !== null && typeof value === "object"
+        ? (value as GraphDefinition)
+        : null;
+    } catch {
+      return null;
+    }
+  }, [definition]);
   const [validation, setValidation] = useState<DefinitionValidation | null>(
     null,
   );
@@ -320,17 +345,51 @@ export default function DefinitionEditorModal({
           label={t("workbuddy.workflows.editor.definition")}
           extra={t("workbuddy.workflows.editor.definitionHint")}
         >
-          <Input.TextArea
-            value={definition}
-            onChange={(event) => {
-              setDefinition(event.target.value);
-              setValidation(null);
-              setValidationError(null);
-            }}
-            autoSize={{ minRows: 12, maxRows: 22 }}
-            spellCheck={false}
-            className={styles.jsonEditor}
+          <Segmented
+            size="small"
+            style={{ marginBottom: 8 }}
+            value={view}
+            onChange={(value) =>
+              setView(value === "canvas" ? "canvas" : "json")
+            }
+            options={[
+              {
+                label: t("workbuddy.workflows.editor.viewJson"),
+                value: "json",
+              },
+              {
+                label: t("workbuddy.workflows.editor.viewCanvas"),
+                value: "canvas",
+                disabled: parsed === null,
+              },
+            ]}
           />
+          {view === "canvas" && parsed !== null ? (
+            <DefinitionCanvas
+              definition={parsed}
+              layoutKey={target?.mode === "edit" ? target.workflow.id : "draft"}
+              onChange={(next) => {
+                // The one structural edit the canvas makes: connections. It is
+                // written straight back into the JSON, which stays the source of
+                // truth the routes receive.
+                setDefinition(JSON.stringify(next, null, 2));
+                setValidation(null);
+                setValidationError(null);
+              }}
+            />
+          ) : (
+            <Input.TextArea
+              value={definition}
+              onChange={(event) => {
+                setDefinition(event.target.value);
+                setValidation(null);
+                setValidationError(null);
+              }}
+              autoSize={{ minRows: 12, maxRows: 22 }}
+              spellCheck={false}
+              className={styles.jsonEditor}
+            />
+          )}
         </Form.Item>
         {editing === null && (
           <Text type="secondary" className={styles.hint}>
