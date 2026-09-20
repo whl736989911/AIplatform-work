@@ -1070,11 +1070,27 @@
       "success_status": 200,
       "summary": "把文档移入文件夹或移回根目录",
       "authorization": "具备该库写权限"
+    },
+    {
+      "method": "GET",
+      "path": "/knowledge-bases/default-open",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "列出当前成员默认打开的知识库",
+      "authorization": "具备该库读权限"
+    },
+    {
+      "method": "PUT",
+      "path": "/knowledge-bases/{id}/default-open",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "为当前成员打开或关闭某个知识库（每成员偏好）",
+      "authorization": "具备该库读权限"
     }
   ],
   "counts": {
     "source": 65,
-    "supplemental": 68,
-    "total": 133
+    "supplemental": 70,
+    "total": 135
   }
 }

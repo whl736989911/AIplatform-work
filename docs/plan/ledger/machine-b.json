@@ -2,7 +2,7 @@
   "machine": "machine-B",
   "line": "B",
   "owner": "machine-B（权限与知识库）",
-  "updated": "2026-09-20T16:10:00Z",
+  "updated": "2026-09-20T16:45:00Z",
   "batches": {
     "1": {
       "state": "done",
@@ -60,7 +60,7 @@
         "1afb7e1e"
       ],
       "evidence": "B-12 第一步 + B-10 前两批均自测通过。新增 PG 验收：适配层 6 项、每库上限/默认打开 4 项、文本读取与重建索引 4 项（真实 PG + 桩嵌入器，跑真实世代/分块/作业行）。回归汇总:tests/unit/workbuddy + tests/unit/knowledge + tests/unit/api/test_knowledge_bases.py = 115 passed(本轮聚焦集);此前全量聚焦集 627 passed/3 skipped;ruff/format 与 mypy --strict 545 文件 0 错。",
-      "notes": "已完成：①B-12 适配层（开关/镜像/投影/回退 + 四条挂钩）;②B-10 第一批（迁移 054 + 每库上限 + 每成员默认打开 + 投影保真）;③B-10 第二批（文档文本读取/预览/导出 + 单篇与整库重建索引,三条端点已入 route-manifest,supplemental 50→53、total 112→115）。**未完成（B-10 余项）**：文本型文档类型面的前端展示、知识库页 UI（文件夹后端已完成,见下）;原列的文件夹已完成（需迁移加列/表 + 前端）、KB 级 OCR（受 integrator.blocked[knowledge-onnx] 影响,按 §5.4 暂不做）、文本型文档类型面的前端展示、以及知识库页对这些能力的 UI。B-12 余项：文档级镜像（交给 B-08/B-13）、icon_name 保真。状态：停在 feat/rbac-kb-adapter,未合并（§5.3;verified[2] 仍未出现）。 已 rebase 到批次 3 合并后的 main(CHANGELOG/清单/ledger 取并集与重算 counts),新分支 feat/rbac-kb-carried。 本轮新增(B-10 第三批,文件夹):迁移 055(workbuddy_knowledge_documents.folder_path + 形状 CHECK + 部分索引)、仓库 move_document/list_folders、服务 normalize_folder_path/list_folders/move_document、路由 GET /knowledge-bases/{id}/folders 与 PATCH .../documents/{document_id}/folder(清单 supplemental 68、total 133);验收 tests/unit/workbuddy/test_workbuddy_knowledge_folders_postgresql.py 10 项全通过。"
+      "notes": "已完成：①B-12 适配层（开关/镜像/投影/回退 + 四条挂钩）;②B-10 第一批（迁移 054 + 每库上限 + 每成员默认打开 + 投影保真）;③B-10 第二批（文档文本读取/预览/导出 + 单篇与整库重建索引,三条端点已入 route-manifest,supplemental 50→53、total 112→115）。**未完成（B-10 余项）**：文本型文档类型面的前端展示、知识库页 UI（文件夹后端已完成,见下）;原列的文件夹已完成（需迁移加列/表 + 前端）、KB 级 OCR（受 integrator.blocked[knowledge-onnx] 影响,按 §5.4 暂不做）、文本型文档类型面的前端展示、以及知识库页对这些能力的 UI。B-12 余项：文档级镜像（交给 B-08/B-13）、icon_name 保真。状态：停在 feat/rbac-kb-adapter,未合并（§5.3;verified[2] 仍未出现）。 已 rebase 到批次 3 合并后的 main(CHANGELOG/清单/ledger 取并集与重算 counts),新分支 feat/rbac-kb-carried。 本轮新增(B-10 第三批,文件夹):迁移 055(workbuddy_knowledge_documents.folder_path + 形状 CHECK + 部分索引)、仓库 move_document/list_folders、服务 normalize_folder_path/list_folders/move_document、路由 GET /knowledge-bases/{id}/folders 与 PATCH .../documents/{document_id}/folder(清单 supplemental 68、total 133);验收 tests/unit/workbuddy/test_workbuddy_knowledge_folders_postgresql.py 10 项全通过。 另完成:默认打开库接口(GET /knowledge-bases/default-open、PUT /knowledge-bases/{id}/default-open,每成员偏好;字面路由声明在 {id} 之前并有顺序回归用例),知识库验收 20 项全通过(folders 10 + cap 6 + text/reindex 4);清单 supplemental 70、total 135。前端知识库页由子代理并行实现中。"
     },
     "5": {
       "state": "pending",
@@ -72,10 +72,10 @@
       "pr": null,
       "commits": [],
       "evidence": "",
-      "notes": ""
+      "notes": "待做:B-13 ACL/偏好映射与回填(shared→scope、members→ACL、default_open→偏好)、B-14 前端 UI 合流(一页四层过滤 + 文档编辑/文件夹/预览)、B-15 校验工具(chunk 计数对账 + 检索抽样对比)。"
     },
     "6": {
-      "state": "pending",
+      "state": "blocked",
       "tasks": [
         "B-11",
         "B-16"
@@ -83,7 +83,7 @@
       "pr": null,
       "commits": [],
       "evidence": "",
-      "notes": "B-16 合规后端需先签合规政策，未签则跳过"
+      "notes": "按 §5.4 挂起,等人工决策:integrator.blocked[knowledge-onnx] 决定本地 ONNX 是否纳入平台模型目录(影响 B-11 与 B-10 的 OCR 子项);integrator.blocked[policy-compliance] 待合规政策签署(影响 B-16)。B 线其余任务不受阻。"
     }
   }
 }

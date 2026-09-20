@@ -1258,6 +1258,28 @@ class WorkBuddyKnowledgeService:
             },
         )
 
+    def default_open_bases(self, actor: WorkBuddyKnowledgeActor) -> dict[str, Any]:
+        """The bases this member opens by default (the personal edition's flag)."""
+        ctx = self.context(actor)
+        opened = self._repository().default_open_bases(ctx, user_id=actor.user_id)
+        return {"kb_ids": sorted(kb_id for kb_id, flag in opened.items() if flag)}
+
+    def set_default_open(
+        self,
+        actor: WorkBuddyKnowledgeActor,
+        kb_id: str,
+        *,
+        default_open: bool,
+    ) -> dict[str, Any]:
+        """Open (or close) one base for the calling member only."""
+        ctx = self.context(actor)
+        base, _access = self._require(ctx, actor, kb_id, "read")
+        if not self._repository().set_default_open(
+            ctx, base.kb_id, user_id=actor.user_id, default_open=default_open
+        ):
+            raise OctopError(ErrorCode.NOT_FOUND, "knowledge base not found")
+        return {"kb_id": base.kb_id, "default_open": bool(default_open)}
+
     def list_folders(self, actor: WorkBuddyKnowledgeActor, kb_id: str) -> dict[str, Any]:
         """The folders of one base with their live document counts.
 

@@ -36,6 +36,7 @@ from octop.infra.db.repos.workbuddy_knowledge import (
     WorkBuddyKnowledgeRepo,
 )
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext
+from octop.infra.errors import OctopError
 
 pytestmark = [pytest.mark.postgresql, requires_postgresql]
 
@@ -242,3 +243,42 @@ def test_the_preference_table_is_isolated_on_every_base(
         ).fetchone()
     assert state is not None and state["relrowsecurity"] and state["relforcerowsecurity"]
     assert caps is not None and "max_documents" in str(caps["definition"])
+
+
+def test_default_open_is_a_preference_of_the_calling_member(
+    pool: PostgresPool, world: dict[str, Any]
+) -> None:
+    """The service opens a base for the caller only, and reports it back."""
+    from octop.infra.workbuddy.knowledge import WorkBuddyKnowledgeActor, WorkBuddyKnowledgeService
+
+    service = WorkBuddyKnowledgeService(db=pool)
+    owner = WorkBuddyKnowledgeActor(
+        user_id=world["owner_user_id"], tenant_id=world["tenant_id"], department_id=None
+    )
+    other = WorkBuddyKnowledgeActor(
+        user_id=world["other_user_id"], tenant_id=world["tenant_id"], department_id=None
+    )
+    kb_id = _fresh_base(pool, world, f"Opened {uuid.uuid4().hex[:6]}")
+
+    assert service.default_open_bases(owner)["kb_ids"] == []
+    opened = service.set_default_open(owner, kb_id, default_open=True)
+    assert opened == {"kb_id": kb_id, "default_open": True}
+    assert service.default_open_bases(owner)["kb_ids"] == [kb_id]
+    assert service.default_open_bases(other)["kb_ids"] == []
+
+    service.set_default_open(owner, kb_id, default_open=False)
+    assert service.default_open_bases(owner)["kb_ids"] == []
+
+    with pytest.raises(OctopError) as refused:
+        service.set_default_open(other, kb_id, default_open=True)
+    assert refused.value.code.value == "NOT_FOUND"
+
+
+def test_the_default_open_literal_route_is_declared_before_the_id_route() -> None:
+    """A literal path declared after ``{id}`` would be swallowed by the parameter."""
+    from octop.api.routers import workbuddy_knowledge as module
+
+    paths = [route.path for route in module.router.routes]
+    literal = paths.index("/knowledge-bases/default-open")
+    parameter = paths.index("/knowledge-bases/{id}")
+    assert literal < parameter

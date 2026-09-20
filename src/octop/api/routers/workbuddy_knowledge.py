@@ -267,6 +267,48 @@ async def create_knowledge_base(
     return workbuddy_envelope(request, payload)
 
 
+class DefaultOpenBody(BaseModel):
+    """Whether the calling member wants this base opened by default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    default_open: bool = True
+
+
+@router.get(
+    "/knowledge-bases/default-open",
+    summary="List the calling member's default-open knowledge bases",
+)
+async def list_default_open_bases(
+    request: Request,
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Declared before the ``{id}`` route: the literal path must win."""
+    payload = _knowledge(server).default_open_bases(_actor(principal))
+    return workbuddy_envelope(request, payload)
+
+
+@router.put(
+    "/knowledge-bases/{id}/default-open",
+    summary="Open or close one knowledge base for the calling member",
+)
+async def set_default_open_base(
+    request: Request,
+    id: str,
+    body: DefaultOpenBody,
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """The preference is per member: a shared base is opened by each of them."""
+    payload = _knowledge(server).set_default_open(
+        _actor(principal),
+        _require_uuid(id, "knowledge base id"),
+        default_open=body.default_open,
+    )
+    return workbuddy_envelope(request, payload)
+
+
 @router.get("/knowledge-bases/{id}", summary="Read one knowledge base")
 async def get_knowledge_base(
     request: Request,
