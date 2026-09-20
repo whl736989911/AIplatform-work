@@ -8,6 +8,7 @@
 
 ### 新增
 
+- WorkBuddy 知识库**文件夹**（迁移 055，B-10 第三批）：文档新增 `folder_path`（有界 CHECK 拒绝绝对路径、`..`/`.` 段、双斜杠、尾斜杠、反斜杠与段内/两端空白），并按 `(tenant, kb, folder_path, title)` 建部分索引；文件夹就是活文档的路径集合（个人版用占位文档建模，这里以文档为唯一事实源，不再维护第二套生命周期），`GET /knowledge-bases/{id}/folders` 列出各路径与文档数（根目录始终在列），`PATCH /knowledge-bases/{id}/documents/{document_id}/folder` 把文档移入文件夹或移回根目录；文档载荷带 `folder_path`，前端可据此直接渲染目录树。
 - WorkBuddy 知识库**旧接口适配层**（B-12 第一步）：新增 `infra/workbuddy/knowledge_adapter.py` 作为个人版与企业版两侧的接缝——`OCTOP_KNOWLEDGE_SOURCE` 取值 `personal`（默认，个人表仍为准、不镜像）、`dual`（双写、读个人侧）或 `enterprise`（读企业侧并投影回个人载荷）；个人库创建/更新时按「创建者 + 名称」幂等地镜像成企业行（`shared` 映射为 `enterprise` 范围，共享行不落 owner 以满足租户表形状约束），删除时按名归档企业孪生；`enterprise` 模式下列表把企业行投影成个人载荷。未配置、拼错、无租户、SQLite 控制面或租户没有已授权嵌入修订时，一律退回个人表而不是让请求失败。
 - WorkBuddy 知识库**每库上限**与**每成员默认打开**（迁移 054）：企业侧基表补回个人版自 v10 起就有的 `max_documents`（有界 CHECK 1–100000，默认 100），并由 `document_cap_reached` 在摄取前判定（只计未删除文档）；「默认打开库」改为**每成员偏好** `workbuddy_knowledge_preferences`（共享库会有多个成员各持己见），两表均租户隔离并随基表级联；适配层投影随之保真。
 - WorkBuddy 知识库**文档文本读取与重建索引**（B-10 第二批）：`GET /knowledge-bases/{id}/documents/{document_id}/text`按分块顺序返回已索引文本（`limit` 即预览，`download=true` 以 text/plain 附件导出——文本型/迁移型文档没有原文件，分块就是文本）；`POST .../documents/{document_id}/reindex` 与 `POST /knowledge-bases/{id}/reindex` 重建单篇/整库索引（沿用文档自身的作业行，前一代在原子发布前始终可读），整库重建逐篇报告失败码。

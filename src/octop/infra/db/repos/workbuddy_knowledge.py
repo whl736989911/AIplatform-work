@@ -53,6 +53,14 @@ def _int_or_none(row: DbRow, key: str) -> int | None:
     return None if value is None else int(value)
 
 
+def _folder_path_or_root(row: DbRow) -> str:
+    """Schema v55 adds ``folder_path``; older rows and doubles mean the base root."""
+    keys = frozenset(row.keys()) if hasattr(row, "keys") else frozenset()
+    if "folder_path" not in keys:
+        return ""
+    return str(row["folder_path"] or "")
+
+
 def _str_or_none(row: DbRow, key: str) -> str | None:
     value = row[key]
     return None if value is None else str(value)
@@ -266,6 +274,9 @@ class WorkBuddyKnowledgeDocumentRow:
     created_at: int
     updated_at: int
     deleted_at: int | None
+    # Schema v55 adds the folder path. Rows read before it existed (and callers
+    # that build the row by hand) mean the base root.
+    folder_path: str = ""
 
     @classmethod
     def from_row(cls, row: DbRow) -> WorkBuddyKnowledgeDocumentRow:
@@ -285,6 +296,7 @@ class WorkBuddyKnowledgeDocumentRow:
             created_at=int(row["created_at"]),
             updated_at=int(row["updated_at"]),
             deleted_at=_int_or_none(row, "deleted_at"),
+            folder_path=_folder_path_or_root(row),
         )
 
 
@@ -625,6 +637,34 @@ class WorkBuddyKnowledgeRepo:
                 (ctx.tenant_id, max(1, min(limit, MAX_LIST_BASES))),
             ).fetchall()
         return [WorkBuddyKnowledgeBaseRow.from_row(row) for row in rows]
+
+    def move_document(
+        self, ctx: WorkBuddyDbContext, kb_id: str, document_id: str, *, folder_path: str
+    ) -> bool:
+        """Put one document in a folder; ``False`` when the document is not visible."""
+        with workbuddy_transaction(self._db, ctx) as conn:
+            row = conn.execute(
+                "UPDATE workbuddy_knowledge_documents SET folder_path = ?, updated_at = ?"
+                " WHERE tenant_id = ? AND kb_id = ? AND document_id = ? AND deleted_at IS NULL"
+                " RETURNING document_id",
+                (folder_path, now_ts(), ctx.tenant_id, kb_id, document_id),
+            ).fetchone()
+        return row is not None
+
+    def list_folders(self, ctx: WorkBuddyDbContext, kb_id: str) -> list[tuple[str, int]]:
+        """``(folder path, live document count)`` for one base, path order.
+
+        A folder exists exactly as long as it holds a live document — the same
+        truth the personal edition kept, without a second table to keep in sync.
+        """
+        with workbuddy_transaction(self._db, ctx) as conn:
+            rows = conn.execute(
+                "SELECT folder_path, COUNT(*) AS held FROM workbuddy_knowledge_documents"
+                " WHERE tenant_id = ? AND kb_id = ? AND deleted_at IS NULL"
+                " GROUP BY folder_path ORDER BY folder_path",
+                (ctx.tenant_id, kb_id),
+            ).fetchall()
+        return [(str(row["folder_path"]), int(row["held"])) for row in rows]
 
     def active_chunk_texts(
         self, ctx: WorkBuddyDbContext, kb_id: str, document_id: str

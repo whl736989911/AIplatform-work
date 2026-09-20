@@ -1258,6 +1258,35 @@ class WorkBuddyKnowledgeService:
             },
         )
 
+    def list_folders(self, actor: WorkBuddyKnowledgeActor, kb_id: str) -> dict[str, Any]:
+        """The folders of one base with their live document counts.
+
+        The root is always reported, even when empty, so a client can render the
+        base itself without special-casing a missing entry.
+        """
+        ctx = self.context(actor)
+        base, _access = self._require(ctx, actor, kb_id, "read")
+        titled = []
+        for path, held in self._repository().list_folders(ctx, kb_id):
+            titled.append({"path": path, "document_count": held})
+        return {"kb_id": base.kb_id, "folders": titled}
+
+    def move_document(
+        self,
+        actor: WorkBuddyKnowledgeActor,
+        kb_id: str,
+        document_id: str,
+        *,
+        folder_path: str,
+    ) -> dict[str, Any]:
+        """Move one document into a folder (or back to the root)."""
+        ctx = self.context(actor)
+        self._require(ctx, actor, kb_id, "write")
+        target = normalize_folder_path(folder_path)
+        if not self._repository().move_document(ctx, kb_id, document_id, folder_path=target):
+            raise OctopError(ErrorCode.NOT_FOUND, "document not found")
+        return {"document_id": document_id, "kb_id": kb_id, "folder_path": target}
+
     def document_text(
         self,
         actor: WorkBuddyKnowledgeActor,
@@ -1579,6 +1608,7 @@ class WorkBuddyKnowledgeService:
             "error_code": row.error_code,
             "active_generation_id": row.active_generation_id,
             "chunk_count": row.chunk_count,
+            "folder_path": row.folder_path,
             "job_id": row.job_id,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
@@ -1603,6 +1633,38 @@ def validate_document_source(source: Any) -> bool:
             "source must be one of: " + ", ".join(DOCUMENT_SOURCES),
         )
     return value in TEXT_DOCUMENT_SOURCES
+
+
+FOLDER_SEPARATOR = "/"
+
+
+def normalize_folder_path(value: Any) -> str:
+    """Validate a folder path and return its canonical form (``""`` is the root).
+
+    The same rules the database check enforces: relative segments only, no
+    traversal, no backslash, single separators, no surrounding spaces. An empty
+    string is the base root rather than a folder of its own.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.startswith(FOLDER_SEPARATOR) or text.endswith(FOLDER_SEPARATOR):
+        raise OctopError(ErrorCode.WORKBUDDY_INVALID_ARGUMENT, "folder path must be relative")
+    segments = text.split(FOLDER_SEPARATOR)
+    for segment in segments:
+        if segment in ("", ".", ".."):
+            raise OctopError(
+                ErrorCode.WORKBUDDY_INVALID_ARGUMENT, "folder path has an empty or relative segment"
+            )
+        if "\\" in segment:
+            raise OctopError(ErrorCode.WORKBUDDY_INVALID_ARGUMENT, "folder path cannot hold \\")
+        if segment != segment.strip():
+            raise OctopError(
+                ErrorCode.WORKBUDDY_INVALID_ARGUMENT, "folder segment has stray spaces"
+            )
+    return FOLDER_SEPARATOR.join(segments)
 
 
 def validate_document_text(text: Any) -> str:

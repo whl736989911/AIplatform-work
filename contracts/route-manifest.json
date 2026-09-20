@@ -1054,11 +1054,27 @@
       "success_status": 202,
       "summary": "重建整库索引，逐篇报告失败码",
       "authorization": "具备该库写权限"
+    },
+    {
+      "method": "GET",
+      "path": "/knowledge-bases/{id}/folders",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "列出知识库的文件夹与各自文档数（根目录始终在列）",
+      "authorization": "具备该库读权限"
+    },
+    {
+      "method": "PATCH",
+      "path": "/knowledge-bases/{id}/documents/{document_id}/folder",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "把文档移入文件夹或移回根目录",
+      "authorization": "具备该库写权限"
     }
   ],
   "counts": {
     "source": 65,
-    "supplemental": 66,
-    "total": 131
+    "supplemental": 68,
+    "total": 133
   }
 }

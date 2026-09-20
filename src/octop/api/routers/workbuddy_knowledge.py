@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from octop.api.common.content_disposition import content_disposition
 from octop.api.deps import get_server
@@ -716,5 +716,51 @@ async def reindex_knowledge_base(
     payload = _knowledge(server).reindex_base(
         _actor(principal),
         _require_uuid(id, "knowledge base id"),
+    )
+    return workbuddy_envelope(request, payload)
+
+
+class FolderMoveBody(BaseModel):
+    """The folder a document belongs to; an empty string means the base root."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    folder_path: str = Field(default="", max_length=400)
+
+
+@router.get(
+    "/knowledge-bases/{id}/folders",
+    summary="List one knowledge base's folders and their document counts",
+)
+async def list_knowledge_folders(
+    request: Request,
+    id: str,
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """A folder exists as long as it holds a live document; the root is always listed."""
+    payload = _knowledge(server).list_folders(
+        _actor(principal), _require_uuid(id, "knowledge base id")
+    )
+    return workbuddy_envelope(request, payload)
+
+
+@router.patch(
+    "/knowledge-bases/{id}/documents/{document_id}/folder",
+    summary="Move one document into a folder, or back to the root",
+)
+async def move_knowledge_document(
+    request: Request,
+    id: str,
+    document_id: str,
+    body: FolderMoveBody,
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    payload = _knowledge(server).move_document(
+        _actor(principal),
+        _require_uuid(id, "knowledge base id"),
+        _require_uuid(document_id, "document id"),
+        folder_path=body.folder_path,
     )
     return workbuddy_envelope(request, payload)
