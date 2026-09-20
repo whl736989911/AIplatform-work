@@ -70,6 +70,7 @@
 - WorkBuddy 发件箱派发器（合同「Scheduler / Outbox dispatcher」）：已提交的 outbox 事件此前只写不读，永远停在 `pending`；现在由派发器按 `available_at` 领取（`FOR UPDATE SKIP LOCKED` + 可见性窗口，跨租户平台上下文）、经可注入的发布端口送出，成功标记 `dispatched`，失败按指数退避重排，超过尝试上限后进入死信（`failed` 并保留最后错误）。发送通道是端口（合同只规定语义：PG 为事实源、至少一次投递、消费者按 PG 去重）；未配置发布端口时派发器拒绝运行，不会把没人收到的事件标记为已送达。
 - WorkBuddy 执行 Worker：接纳执行只写入 `queued`，由 Worker 从数据库原子领取（锁租户行、占运行槽、取租约并单调递增 fencing token）。整体等待（审批/对账）释放运行槽，恢复时重新排队申请；Worker 崩溃后租约到期由下一个 Worker 接管。
 - `octop workbuddy worker` 命令行与 `deploy/compose.production.yml` 的 `worker` 服务；单进程安装默认在 `octop run` 内托管该 Worker（`OCTOP_WORKBUDDY_WORKER=off` 可关闭）。
+- WorkBuddy **本地 ONNX 嵌入模型纳入平台模型目录**（迁移 056，B-11）：本地 ONNX 模型不再是目录之外的一条捷径——它就是一类平台模型修订（`adapter_key='onnx'`、`model_key` 即本地模型 id），并额外声明 `embedding_dimensions` 与 `local_model_id`（两个可空新列：已发布的行保持为空、仍由平台常量兜底）。**可审计**沿用既有语义：发布是新增一条不可变修订行、撤销只改 `status`/`revoked_at`（行永不删除），授权沿用既有 `grant_capability`（公司/部门/个人三类主体），不新增审计表。**可选**也真的成立：基座 pin 从「只允许 `bge-m3`」放宽为「`bge-m3`，或声明了维度与本地模型 id 且维度与存储层一致的 ONNX 修订」，其余仍以原错误码 `MODEL_NOT_CONFIGURED` 拒绝；`adapter_key='onnx'` 缺少声明由 schema 的 CHECK 直接挡住（裸 SQL 同样挡）。新增 `infra/workbuddy/onnx_embedder.py` 作为 `EmbeddingHook` 的本地 ONNX 后端：`available()` 取决于本地运行时是否可导入与模型是否已下载，`embed()` 只读复用个人版 `onnx_service`，依赖缺失或模型未下载一律 fail closed（`MODEL_NOT_CONFIGURED`，不静默降级、不联网下载），并在钩子侧复核向量数量/宽度/有限性。模型目录接口（`POST /platform/models`、`GET /platform/models/{id}`、`/model-catalog`）追加只读的 `embedding_dimensions`/`local_model_id` 展示与可选入参，未新增路由。
 
 ### 修复
 

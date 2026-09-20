@@ -291,6 +291,10 @@ def _model_payload(record: Any) -> dict[str, Any]:
         "status": record.status,
         "published_at": record.published_at,
         "revoked_at": record.revoked_at,
+        # The local-embedding declaration (null on hosted revisions): an admin
+        # sees which local model and width a published ONNX revision stands for.
+        "embedding_dimensions": record.embedding_dimensions,
+        "local_model_id": record.local_model_id,
     }
 
 
@@ -397,6 +401,19 @@ class ModelPublishBody(BaseModel):
     adapter_key: str = Field(min_length=1, max_length=120)
     display_name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=1000)
+    # A local ONNX embedding model is published as adapter_key='onnx' and has to
+    # declare what it produces and which downloaded model it loads; hosted
+    # revisions leave both empty.
+    embedding_dimensions: int | None = Field(
+        default=None,
+        gt=0,
+        description="Declared embedding width; required for adapter_key='onnx'.",
+    )
+    local_model_id: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Downloaded local ONNX model id; required for adapter_key='onnx'.",
+    )
 
 
 class CapabilitiesBody(BaseModel):
@@ -673,6 +690,8 @@ async def publish_platform_model(
             adapter_key=body.adapter_key,
             display_name=body.display_name,
             description=body.description or "",
+            embedding_dimensions=body.embedding_dimensions,
+            local_model_id=body.local_model_id,
             actor_user_id=platform.user_id,
         )
     except _CATALOG_ERRORS as exc:

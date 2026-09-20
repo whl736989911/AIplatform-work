@@ -2,7 +2,7 @@
   "machine": "machine-B",
   "line": "B",
   "owner": "machine-B（权限与知识库）",
-  "updated": "2026-09-20T18:40:00Z",
+  "updated": "2026-09-20T19:30:00Z",
   "batches": {
     "1": {
       "state": "done",
@@ -75,15 +75,15 @@
       "notes": "B-13 关键设计:个人版权限模型只有 owner_user_id + shared(成员表在 v7 已删),因此「members→ACL」只对旧库残留行生效;**企业 KB 服务的可见性只读 workbuddy_knowledge_acl,通用 workbuddy_object_acl 不是它读的表**——脚本因此双写两表并保留通用 scope 注册(外键需要),同时把这条坑写进模块 docstring;未来收敛到四层模型需要一次切换让 KB 服务改读通用表。B-14 关键设计:可见性只由后端回答——新增只读字段 access_sources 暴露 resolver 的来源,前端筛选为并集;文档重命名走「服务校验 strip 后 1–255、与 DB CHECK 同口径、不可见 404、权限不足 403」。B-15 关键设计:不引入模型提供方,用源库自身分块向量做自检索探针;k 位并列分数显式计入 tied 以免误报差异。未包含:B-11/B-16 仍按 §5.4 挂起待人工决策(knowledge-onnx / policy-compliance);部门层 scope 不产生(个人版无部门概念)。"
     },
     "6": {
-      "state": "blocked",
+      "state": "in_progress",
       "tasks": [
         "B-11",
         "B-16"
       ],
       "pr": null,
       "commits": [],
-      "evidence": "",
-      "notes": "按 §5.4 挂起,等人工决策:integrator.blocked[knowledge-onnx] 决定本地 ONNX 是否纳入平台模型目录(影响 B-11 与 B-10 的 OCR 子项);integrator.blocked[policy-compliance] 待合规政策签署(影响 B-16)。B 线其余任务不受阻。"
+      "evidence": "B-11 已交付:迁移 056(embedding_dimensions/local_model_id + 三条 CHECK + (adapter_key,status) 索引 + 水位 56)、publish_model 支持两字段、_require_published_model 放宽为「bge-m3 或 onnx 且声明 1024 维且已授权」、src/octop/infra/workbuddy/onnx_embedder.py(EmbeddingHook 的本地 ONNX 后端,依赖或模型缺失一律 fail closed、不联网下载)、目录接口两个可选入参与两个只读返回字段(未新增路由)。门禁:ruff 通过;mypy --strict 553 文件 0 错;新增 24 项验收;tests/unit/workbuddy 全量回归 508 passed/2 skipped。可审计:未新增审计表,发布/撤销沿用不可变修订语义(撤销后行仍存在,status/revoked_at 变化),catalog 的 platform-revision 不可变触发器按 to_jsonb 比较,新增两列自动随修订冻结。",
+      "notes": "【人工决策已给】knowledge-onnx:**纳入**本地 ONNX embedding 模型到平台模型目录(用户 2026-09-20 决策)。据此实现 B-11,并把「当前仅支持 1024 维(存储层固定 vector(1024),支持其它维度需先改向量列/迁移)」写进迁移头注释、pin 规则与 onnx_embedder 模块 docstring 三处,避免出现「能选但写不进去」的空壳。建议集成者在 integrator.blocked[knowledge-onnx] 记 resolved(该文件归 machine-A)。【仍挂起】B-16 合规后端:integrator.blocked[policy-compliance] 为 open——合规政策未签署,按 §5.4 保持框架态(不开放生产入口);我已向需求方说明「签署」的工程含义(对外承诺的参数:注销冷静期与不可逆销毁范围、证据留档时长与责任人、数据驻留、清单规则版本与批准人),并提议先起草保守默认的政策草案供其确认。"
     }
   }
 }

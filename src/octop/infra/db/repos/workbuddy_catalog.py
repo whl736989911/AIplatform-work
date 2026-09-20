@@ -14,7 +14,11 @@ Guarantees this module keeps:
   revision)``; the table triggers reject rewrites and deletes;
 * platform tool and model rows are fixed revisions identified only by
   ``adapter_key`` plus ``tool_key``/``model_key`` plus display metadata.  A key
-  with a live revision refuses re-publication, and revocation is one-way;
+  with a live revision refuses re-publication, and revocation is one-way.  A
+  local ONNX embedding model is one such model revision (``adapter_key='onnx'``,
+  ``model_key`` = the local model id) that additionally declares its embedding
+  width and downloaded model id — frozen with the revision like every other
+  descriptor column;
 * tenant capabilities may only reference published revisions, and the tenant
   default model must stay inside the tenant's approved model set;
 * a cross-tenant or unknown object id is reported as ``None``/``False`` — never
@@ -41,6 +45,7 @@ from octop.infra.rbac.subjects import (
 )
 
 __all__ = [
+    "ADAPTER_KEY_ONNX",
     "CODE_CAPABILITY_NO_FIELDS",
     "CODE_CAPABILITY_NOT_APPROVED",
     "CODE_CAPABILITY_REVISION_CONFLICT",
@@ -83,6 +88,16 @@ __all__ = [
 STATUS_ACTIVE = "active"
 STATUS_REVOKED = "revoked"
 STATUS_PUBLISHED = "published"
+
+#: A local ONNX embedding model is *a kind of* platform model revision, not a
+#: second catalog: ``adapter_key`` names the local runtime (``onnx``) and
+#: ``model_key`` the local ONNX model id. Such a revision must declare both its
+#: ``embedding_dimensions`` and its ``local_model_id`` (schema v56 checks it, and
+#: ``publish_model`` refuses it first with a caller-facing error).
+ADAPTER_KEY_ONNX = "onnx"
+#: The width the local model id may name at most: the column is unbounded text,
+#: the same bound the ``model_key`` column carries.
+_MAX_LOCAL_MODEL_ID_LENGTH = 200
 
 # Contract §4.6.1: a tool either only reads (safe to repeat) or writes outside
 # the platform (repeating it needs confirmed idempotency).
@@ -406,6 +421,11 @@ class WorkBuddyModelRevision:
     published_at: int
     revoked_by_user_id: int | None
     revoked_at: int | None
+    # Schema v56 adds the local-embedding declaration. It is null for every
+    # hosted revision (bge-m3 included), whose width the platform constant
+    # already states.
+    embedding_dimensions: int | None = None
+    local_model_id: str | None = None
 
     @property
     def revoked(self) -> bool:
@@ -425,6 +445,8 @@ class WorkBuddyModelRevision:
             published_at=int(row["published_at"]),
             revoked_by_user_id=_optional_int(row["revoked_by_user_id"]),
             revoked_at=_optional_int(row["revoked_at"]),
+            embedding_dimensions=_optional_int(row["embedding_dimensions"]),
+            local_model_id=_optional_str(row["local_model_id"]),
         )
 
 
@@ -803,8 +825,34 @@ class WorkBuddyCatalogRepo:
         display_name: str,
         actor_user_id: int,
         description: str = "",
+        embedding_dimensions: int | None = None,
+        local_model_id: str | None = None,
     ) -> WorkBuddyModelRevision:
-        """Freeze a new platform model revision for ``(adapter_key, model_key)``."""
+        """Freeze a new platform model revision for ``(adapter_key, model_key)``.
+
+        A hosted model leaves both declaration fields empty. A local ONNX
+        embedding model arrives as ``adapter_key='onnx'`` with the local model id
+        in ``model_key`` and both ``embedding_dimensions`` and ``local_model_id``
+        declared: an ``onnx`` revision that cannot say what it produces or which
+        downloaded model it loads could never be embedded, so it is refused here
+        (and by the schema, for a raw write).
+        """
+        clean_dimensions = _validated_dimensions(embedding_dimensions)
+        clean_local_model = (
+            None
+            if local_model_id is None
+            else _validated_text(
+                local_model_id, field="local_model_id", max_length=_MAX_LOCAL_MODEL_ID_LENGTH
+            )
+        )
+        if (
+            _validated_text(adapter_key, field="adapter_key", max_length=120) == ADAPTER_KEY_ONNX
+            and (clean_dimensions is None or clean_local_model is None)
+        ):
+            raise WorkBuddyInvalidInput(
+                f"an {ADAPTER_KEY_ONNX} revision must declare"
+                " embedding_dimensions and local_model_id"
+            )
         return self._publish_revision(
             table=_TABLE_MODEL_REVISIONS,
             key_column="model_key",
@@ -814,6 +862,10 @@ class WorkBuddyCatalogRepo:
             description=description,
             actor_user_id=actor_user_id,
             record=WorkBuddyModelRevision,
+            extra={
+                "embedding_dimensions": clean_dimensions,
+                "local_model_id": clean_local_model,
+            },
         )
 
     def get_model_revision(self, model_revision_id: str) -> WorkBuddyModelRevision | None:
@@ -1343,6 +1395,21 @@ def _validated_description(value: str) -> str:
             f"description must be at most {_MAX_DESCRIPTION_LENGTH} characters"
         )
     return text
+
+
+def _validated_dimensions(value: Any) -> int | None:
+    """A declared embedding width: a positive integer, or nothing at all."""
+    if value is None:
+        return None
+    try:
+        dimensions = int(value)
+    except (TypeError, ValueError):
+        raise WorkBuddyInvalidInput(
+            "embedding_dimensions must be a positive integer"
+        ) from None
+    if dimensions <= 0:
+        raise WorkBuddyInvalidInput("embedding_dimensions must be a positive integer")
+    return dimensions
 
 
 def _json_text_tuple(raw: Any) -> tuple[str, ...]:

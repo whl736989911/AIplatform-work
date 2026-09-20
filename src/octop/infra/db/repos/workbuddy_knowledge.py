@@ -88,6 +88,11 @@ class WorkBuddyPlatformModelRevisionRow:
     revision: int
     display_name: str
     status: str
+    # Schema v56 adds the local-embedding declaration. Hosted revisions leave it
+    # empty — the platform constant states their width — and callers that build
+    # the row by hand get the same empty declaration.
+    embedding_dimensions: int | None = None
+    local_model_id: str | None = None
 
     @classmethod
     def from_row(cls, row: DbRow) -> WorkBuddyPlatformModelRevisionRow:
@@ -98,6 +103,8 @@ class WorkBuddyPlatformModelRevisionRow:
             revision=int(row["revision"]),
             display_name=str(row["display_name"]),
             status=str(row["status"]),
+            embedding_dimensions=_int_or_none(row, "embedding_dimensions"),
+            local_model_id=_str_or_none(row, "local_model_id"),
         )
 
 
@@ -528,7 +535,8 @@ class WorkBuddyKnowledgeRepo:
     ) -> WorkBuddyPlatformModelRevisionRow | None:
         with workbuddy_transaction(self._db, ctx) as conn:
             row = conn.execute(
-                "SELECT model_revision_id, adapter_key, model_key, revision, display_name, status "
+                "SELECT model_revision_id, adapter_key, model_key, revision, display_name, status,"
+                " embedding_dimensions, local_model_id "
                 "FROM workbuddy_platform_model_revisions WHERE model_revision_id = ?",
                 (model_revision_id,),
             ).fetchone()
