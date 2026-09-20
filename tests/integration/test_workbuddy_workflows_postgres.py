@@ -483,3 +483,135 @@ async def test_concurrent_revision_cas_lets_exactly_one_writer_win(
 
     versions = repo.list_versions(tenant["tenant_id"], bundle.workflow.workflow_id)
     assert [version.version_number for version in versions] == [2, 1]
+
+
+class _TwoStepAuthor:
+    """A wired author, so the test never depends on a live model."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def draft(self, *, request: str, metadata: Any, existing: Any) -> dict[str, Any]:
+        self.calls += 1
+        return {
+            "trigger": {"type": "manual"},
+            "inputs": [{"key": "who", "type": "string", "required": True}],
+            "steps": [
+                {
+                    "id": "greet",
+                    "kind": "transform",
+                    "purpose": "把输入包成一句问候",
+                    "config": {"input": {"who": "{{ inputs.who }}"}, "expression": "input"},
+                },
+                {
+                    "id": "polish",
+                    "kind": "transform",
+                    "purpose": "把问候再润色一下",
+                    "uses": ["greet"],
+                    "config": {"input": "{{ steps.greet.output }}", "expression": "input"},
+                },
+            ],
+        }
+
+    def revise(self, **_: Any) -> dict[str, Any]:
+        raise AssertionError("a correct document must not need a second round")
+
+
+class _StubbornAuthor:
+    """Never writes anything the compiler can accept."""
+
+    def draft(self, *, request: str, metadata: Any, existing: Any) -> dict[str, Any]:
+        return {
+            "trigger": {"type": "cron", "config": {}},
+            "inputs": [],
+            "steps": [
+                {
+                    "id": "greet",
+                    "kind": "transform",
+                    "purpose": "缺触发器配置",
+                    "config": {"input": {"who": "x"}, "expression": "input"},
+                }
+            ],
+        }
+
+    def revise(self, **_: Any) -> dict[str, Any]:
+        return self.draft(request="", metadata=None, existing=None)
+
+
+def _wire_author(app: FastAPI, pool: Any, source: Any) -> None:
+    from octop.api.deps import get_server
+
+    app.dependency_overrides[get_server] = lambda: SimpleNamespace(
+        services=SimpleNamespace(db=pool, workbuddy_authoring_source=source)
+    )
+
+
+async def test_a_description_becomes_a_draft_and_publishing_still_needs_a_person(
+    app: FastAPI, pool: Any, tenants: dict[str, dict[str, Any]]
+) -> None:
+    """A-15: the model describes, the compiler decides, and a person publishes."""
+    principal = _principal(tenants["a"])
+    author = _TwoStepAuthor()
+    async with _client(app, principal) as client:
+        _wire_author(app, pool, author)
+        authored = await client.post(
+            "/workflow-authoring",
+            json={"request": "收到人名后先问候，再把问候润色一下"},
+        )
+        assert authored.status_code == 201, authored.text
+        body = authored.json()["data"]
+        assert author.calls == 1, author.calls
+        # A draft: nothing is live until somebody publishes it.
+        assert body["active_version_id"] is None, body
+        assert body["revision"] == 1, body
+        # The description became a name, because a workflow needs one.
+        assert body["name"].startswith("收到人名后先问候"), body
+        explanation = body["authoring"]
+        assert explanation["rounds"] == 1, explanation
+        assert [step["purpose"] for step in explanation["steps"]] == [
+            "把输入包成一句问候",
+            "把问候再润色一下",
+        ], explanation
+        # The author's ``steps`` namespace was lowered into the runtime's ``nodes``.
+        nodes = body["version"]["definition"]["nodes"]
+        assert [node["id"] for node in nodes] == ["greet", "polish"], nodes
+        assert nodes[1]["config"]["input"] == "{{ nodes.greet.output }}", nodes[1]
+
+        published = await client.post(
+            f"/workflows/{body['id']}/activate",
+            headers={"If-Match": authored.headers["etag"]},
+            json={"version_id": body["version"]["id"]},
+        )
+        assert published.status_code == 200, published.text
+        assert published.json()["data"]["active_version_id"] == body["version"]["id"]
+
+
+async def test_a_description_that_never_compiles_is_reported_not_stored(
+    app: FastAPI, pool: Any, tenants: dict[str, dict[str, Any]]
+) -> None:
+    """Two rounds without a compilable result is a failure, and nothing is created."""
+    principal = _principal(tenants["a"])
+    async with _client(app, principal) as client:
+        _wire_author(app, pool, _StubbornAuthor())
+        refused = await client.post("/workflow-authoring", json={"request": "写不出来"})
+        assert refused.status_code == 400, refused.text
+        error = refused.json()["error"]
+        assert error["code"] == ErrorCode.WORKBUDDY_VALIDATION_FAILED.value, error
+        assert error["details"]["rounds"] == 2, error
+        # The diagnostics are the compiler's own, which is what the repair round was
+        # handed back — they are about the workflow, not about the authoring format.
+        codes = {item["code"] for item in error["details"]["diagnostics"]}
+        assert codes == {"WORKFLOW_SCHEMA_INVALID"}, error
+        # The strongest part of the promise: a failed attempt leaves no workflow behind.
+        listed = await client.get("/workflows")
+        names = [item["name"] for item in listed.json()["data"]["items"]]
+        assert "写不出来" not in names, names
+
+
+async def test_authoring_without_a_wired_model_fails_closed(
+    app: FastAPI, tenants: dict[str, dict[str, Any]]
+) -> None:
+    """No authoring model configured is a refusal, never an invented workflow."""
+    async with _client(app, _principal(tenants["a"])) as client:
+        refused = await client.post("/workflow-authoring", json={"request": "随便写点什么"})
+        assert refused.status_code == 503, refused.text

@@ -29,6 +29,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.node_metadata import definition_metadata
 from octop.infra.workbuddy.workflow_compiler import (
     WorkflowCompileError,
@@ -126,6 +127,35 @@ class AuthoringSource(Protocol):
         diagnostics: Sequence[AuthoringDiagnostic],
         metadata: Mapping[str, Any],
     ) -> Mapping[str, Any]: ...
+
+
+class UnavailableAuthoringSource:
+    """Fails closed when no authoring model is wired into this deployment."""
+
+    def draft(
+        self,
+        *,
+        request: str,
+        metadata: Mapping[str, Any],
+        existing: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any]:
+        raise OctopError(
+            ErrorCode.DEPENDENCY_UNAVAILABLE, "no workflow authoring model is configured"
+        )
+
+    def revise(
+        self,
+        *,
+        document: Mapping[str, Any],
+        diagnostics: Sequence[AuthoringDiagnostic],
+        metadata: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise OctopError(
+            ErrorCode.DEPENDENCY_UNAVAILABLE, "no workflow authoring model is configured"
+        )
+
+
+UNAVAILABLE_AUTHORING = UnavailableAuthoringSource()
 
 
 def _config_fields(metadata: Mapping[str, Any], kind: str) -> tuple[set[str], set[str]] | None:
@@ -369,7 +399,9 @@ def author_workflow(
         if not problems:
             definition = lower_authoring(document)
             try:
-                compile_workflow_definition(definition)
+                # What is returned is the compiler's own normalization: the thing it
+                # accepted is the thing that gets stored, never the pre-compile draft.
+                accepted = compile_workflow_definition(definition)
             except WorkflowCompileError as exc:
                 diagnostics = tuple(
                     AuthoringDiagnostic(
@@ -383,7 +415,7 @@ def author_workflow(
             else:
                 return AuthoringOutcome(
                     ok=True,
-                    definition=definition,
+                    definition=accepted.definition,
                     steps=_steps_of(document),
                     rounds=rounds,
                 )
@@ -403,11 +435,13 @@ def author_workflow(
 
 __all__ = [
     "MAX_AUTHORING_ROUNDS",
+    "UNAVAILABLE_AUTHORING",
     "STEP_ID_PATTERN",
     "AuthoringDiagnostic",
     "AuthoringOutcome",
     "AuthoringSource",
     "AuthoringStep",
+    "UnavailableAuthoringSource",
     "author_workflow",
     "lower_authoring",
     "validate_authoring",

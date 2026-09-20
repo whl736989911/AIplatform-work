@@ -10,8 +10,9 @@ Two normalizations are deliberate:
   descriptive names such as ``{workflow_id}``; both produce the same URL, so the
   comparison replaces every template with ``{}``;
 * paths owned by other modules (execute, improvement-proposals,
-  trigger-registrations) belong to the runtime, proposal, and knowledge
-  routers, so they are excluded here.
+  trigger-registrations, attribution, improvement-analysis) belong to the runtime,
+  proposal, and knowledge routers, so they are excluded here — and everything else
+  under the workflow prefixes, including authoring, is checked against this router.
 """
 
 from __future__ import annotations
@@ -24,7 +25,17 @@ from octop.api.routers import workbuddy_workflows
 
 MANIFEST = Path(__file__).resolve().parents[3] / "contracts" / "route-manifest.json"
 
-_OTHER_MODULE_SUFFIXES = ("/execute", "/improvement-proposals", "/trigger-registrations")
+_OTHER_MODULE_SUFFIXES = (
+    "/execute",
+    "/improvement-proposals",
+    "/improvement-analysis",
+    "/trigger-registrations",
+    "/attribution",
+)
+
+#: Prefixes whose manifest entries belong to the workflow router, so a route that
+#: disappears from it is caught even when it is not nested under ``/workflows``.
+_WORKFLOW_PREFIXES = ("/workflows", "/workflow-definitions", "/workflow-authoring")
 _TEMPLATE = re.compile(r"\{[^}]*\}")
 
 
@@ -37,7 +48,7 @@ def _manifest_routes() -> dict[tuple[str, str], int]:
     routes: dict[tuple[str, str], int] = {}
     for entry in manifest["routes"]:
         path = entry["path"]
-        if not path.startswith(("/workflows", "/workflow-definitions")):
+        if not path.startswith(_WORKFLOW_PREFIXES):
             continue
         if any(suffix in path for suffix in _OTHER_MODULE_SUFFIXES):
             continue
