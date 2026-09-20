@@ -35,5 +35,13 @@
       "raised_by": "machine-A",
       "raised_at": "2026-09-20T00:00:00Z"
     }
-  ]
+  ],
+  "rules": [
+    "新增节点类型必须同时扩 workbuddy_step_runs.node_type 约束：018 的五类词表曾让 input/knowledge/output（A-07）与 ask（A-08）在真实运行时整次失败（迁移 034 已补到九类）。新增类型时同步检查该 CHECK 与编译器 NODE_TYPES。",
+    "迁移里不得对 octop_app / workbuddy_auth 角色 GRANT：本仓库从不创建这两个角色（018/019/031/050 只 REVOKE FROM PUBLIC），GRANT 会因角色不存在而中止迁移；角色创建属部署方 D 批次。",
+    "新增任何人工等待状态（如 waiting_input）时，必须同时检查三类硬编码状态清单：request_cancel 的可直接取消集、_CLAIMABLE_EXECUTIONS_SQL/claim_execution 的可领取集（**不得**加入停放态）、以及 SQL 部分索引谓词（idx_wb_executions_open 需含新停放态）。",
+    "契约文档未列出的新端点登记为 route-manifest 的 supplemental，并保持 counts.source == source.original_route_count；契约扩展（如新执行状态 waiting_input）需在 machine-*.json 的 notes 里留痕。",
+    "单元测试全绿不等于功能可用：新增节点类型/状态/表，必须有一条真实 PostgreSQL 端到端用例走过它（本轮即由该用例抓到 node_type CHECK 缺陷）。"
+  ],
+  "updated": "2026-09-20T03:49:06Z"
 }

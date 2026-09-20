@@ -476,6 +476,7 @@
     "APPROVAL_BINDING_CHANGED": "The approved target or parameters changed; approve again.",
     "APPROVAL_EXPIRED": "This approval has expired.",
     "APPROVAL_NO_VALID_APPROVER": "No declared approver is currently effective.",
+    "ASK_NO_VALID_ASSIGNEE": "No declared assignee for this question is currently effective.",
     "RECONCILIATION_EVIDENCE_INVALID": "The reconciliation evidence is missing or not verifiable.",
     "WORKBUDDY_IDEMPOTENCY_CONFLICT": "The idempotency key was used with a different request.",
     "WORKBUDDY_EXECUTION_NOT_CANCELLABLE": "The execution can no longer be canceled.",

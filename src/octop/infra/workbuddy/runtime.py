@@ -34,6 +34,8 @@ from octop.infra.db.repos.workbuddy_runtime import (
     ChatSessionRow,
     ExecutionClaim,
     ExecutionRow,
+    InputAssigneeRow,
+    InputRequestRow,
     JobRow,
     NotificationRow,
     ReconciliationRow,
@@ -50,19 +52,26 @@ from octop.infra.workbuddy.cel_sandbox import CELSandboxError, evaluate_cel
 from octop.infra.workbuddy.log_redaction import register_secret
 from octop.infra.workbuddy.roles import TENANT_ADMIN_ROLES
 from octop.infra.workbuddy.workflow_compiler import (
+    ASK_FIELD_TYPES,
+    NODE_TYPES,
     CompiledWorkflow,
     WorkflowCompileError,
     compile_stored_definition,
     parse_reference,
 )
 
-NODE_TYPES = frozenset({"tool", "llm", "condition", "approval", "transform"})
+# ``NODE_TYPES`` is imported, not re-declared: the compiler owns the node-type
+# contract because it validates a definition against the schema.  A second list
+# here could only drift — and it did: it was missing the input/knowledge/output
+# types this module already executes.  The name stays in ``__all__`` so callers
+# that import it from the runtime keep working.
 TERMINAL_EXECUTION_STATUSES = frozenset({"success", "failed", "partial", "canceled"})
 EXECUTION_STATUSES = frozenset(
     {
         "queued",
         "running",
         "waiting_approval",
+        "waiting_input",
         "waiting_reconciliation",
         "success",
         "failed",
@@ -70,7 +79,7 @@ EXECUTION_STATUSES = frozenset(
         "canceled",
     }
 )
-CANCELLABLE_EXECUTION_STATUSES = ("queued", "running", "waiting_approval")
+CANCELLABLE_EXECUTION_STATUSES = ("queued", "running", "waiting_approval", "waiting_input")
 APPROVAL_TOKEN_TTL_SECONDS = 120
 # A monthly execution reservation must outlive any legitimate wait (approval,
 # reconciliation) inside its own period; anything shorter would let the monthly
@@ -245,8 +254,10 @@ class GraphRun:
     error_code: str | None = None
     error_message: str | None = None
     waiting_approval_node_id: str | None = None
+    waiting_input_node_id: str | None = None
     reconciliation_node_id: str | None = None
     approval_candidates: dict[str, tuple[tuple[int, str | None], ...]] = field(default_factory=dict)
+    input_assignees: dict[str, tuple[tuple[int, str | None], ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -823,8 +834,10 @@ def run_graph(
     inputs: Mapping[str, Any],
     replay: ReplayState | None = None,
     decisions: Mapping[str, str] | None = None,
+    answers: Mapping[str, Mapping[str, Any]] | None = None,
     effects: SideEffectPort | None = None,
     resolve_approvers: Callable[[GraphNode], Sequence[tuple[int, str | None]]] | None = None,
+    resolve_assignees: Callable[[GraphNode], Sequence[tuple[int, str | None]]] | None = None,
     execution_id: str = "",
     on_step_start: Callable[[GraphNode], None] | None = None,
     on_step_settled: Callable[[StepOutcome], None] | None = None,
@@ -851,6 +864,7 @@ def run_graph(
     """
     replay = replay or ReplayState()
     decisions = dict(decisions or {})
+    answers = {key: dict(value) for key, value in (answers or {}).items()}
     port: SideEffectPort = effects or UNAVAILABLE_SIDE_EFFECTS
 
     incoming: dict[str, list[GraphEdge]] = {node.id: [] for node in graph.nodes}
@@ -869,7 +883,9 @@ def run_graph(
     failure: StepOutcome | None = None  # only the step-limit guard stops a run
     node_failures: list[StepOutcome] = []
     approval_candidates: dict[str, tuple[tuple[int, str | None], ...]] = {}
+    input_assignees: dict[str, tuple[tuple[int, str | None], ...]] = {}
     waiting_node: str | None = None
+    waiting_input_node: str | None = None
     reconciliation_node: str | None = None
     canceled = False
     executed = 0
@@ -983,7 +999,7 @@ def run_graph(
             return ("run", candidate)
         return None
 
-    while failure is None and waiting_node is None:
+    while failure is None and waiting_node is None and waiting_input_node is None:
         if should_stop is not None and should_stop():
             # A cancel landed while this attempt was working: stop before
             # creating another call and let the attempt settle as canceled.
@@ -1242,6 +1258,37 @@ def run_graph(
             propagate_taken(node)
             continue
 
+        if node.type == "ask":
+            answer = answers.get(node.id)
+            if answer is None:
+                assignees = tuple(resolve_assignees(node)) if resolve_assignees else ()
+                if resolve_assignees is not None and not assignees:
+                    # Nobody can answer, so parking would strand the execution
+                    # forever: the node fails in place, its downstream is skipped
+                    # while independent branches keep running, and no input
+                    # request is ever created.  An approval node behaves the same
+                    # way for the same reason.
+                    node_failures.append(
+                        record(
+                            node,
+                            "failed",
+                            error_code=ErrorCode.ASK_NO_VALID_ASSIGNEE.value,
+                            error_message=f"ask node '{node.id}' has no eligible assignee",
+                            timing=elapsed(),
+                        )
+                    )
+                    propagate_skip(node, failed=True)
+                    continue
+                if assignees:
+                    input_assignees[node.id] = assignees
+                waiting_input_node = node.id
+                record(node, "waiting_input", timing=elapsed())
+                break
+            store(node, dict(answer))
+            record(node, "success", output=dict(answer), timing=elapsed())
+            propagate_taken(node)
+            continue
+
         # External nodes: only a trusted adapter may run them; otherwise the
         # step fails closed and the execution records that failure.
         settled = replay.failed.get(node.id)
@@ -1399,6 +1446,16 @@ def run_graph(
             tokens=sum(step.tokens for step in steps),
             waiting_approval_node_id=waiting_node,
             approval_candidates=approval_candidates,
+        )
+    if waiting_input_node is not None:
+        return GraphRun(
+            status="waiting_input",
+            steps=tuple(steps),
+            edges=tuple(edge_outcomes),
+            outputs=dict(results),
+            tokens=sum(step.tokens for step in steps),
+            waiting_input_node_id=waiting_input_node,
+            input_assignees=input_assignees,
         )
     # Settlement follows the selected branches: a terminal that succeeded marks a
     # successful branch, so a failure elsewhere makes the execution partial rather
@@ -1900,6 +1957,40 @@ def _latest_attempts(steps: Sequence[Any]) -> dict[str, Any]:
     return latest
 
 
+def input_request_payload(
+    row: InputRequestRow, assignees: Sequence[InputAssigneeRow] = ()
+) -> dict[str, Any]:
+    """One input request as the API and the answering UI need it.
+
+    The form travels with the answer, because a client that shows a question has
+    to render the fields it will validate against; ``values`` stays null until
+    somebody answers, so the UI can tell an open question from an answered one
+    without a second request.
+    """
+    return {
+        "id": row.id,
+        "execution_id": row.execution_id,
+        "node_id": row.node_id,
+        "status": row.status,
+        "prompt": row.prompt,
+        "form": dict(row.form) if isinstance(row.form, Mapping) else {},
+        "values": dict(row.values) if isinstance(row.values, Mapping) else None,
+        "expires_at": _iso(row.expires_at),
+        "submitted_by_user_id": row.submitted_by_user_id,
+        "submitted_at": _iso(row.submitted_at),
+        "created_at": _iso(row.created_at),
+        "assignees": [
+            {
+                "user_id": assignee.user_id,
+                "department_id": assignee.department_id,
+                "status": assignee.status,
+                "submitted_at": _iso(assignee.submitted_at),
+            }
+            for assignee in assignees
+        ],
+    }
+
+
 def execution_wait_facts(view: ExecutionView, steps: Sequence[Any]) -> dict[str, Any]:
     """Derived waiting facts for the execution detail (never stored separately).
 
@@ -1910,14 +2001,17 @@ def execution_wait_facts(view: ExecutionView, steps: Sequence[Any]) -> dict[str,
     latest = _latest_attempts(steps)
     waiting = [step for step in latest.values() if step.status == "waiting_reconciliation"]
     approval = [step for step in latest.values() if step.status == "waiting_approval"]
+    answer = [step for step in latest.values() if step.status == "waiting_input"]
     reasons: list[str] = []
     if waiting:
         reasons.append("reconciliation")
     if approval:
         reasons.append("approval")
+    if answer:
+        reasons.append("input")
     return {
         "wait_reasons": reasons,
-        "waiting_steps": [step.node_id for step in (*waiting, *approval)],
+        "waiting_steps": [step.node_id for step in (*waiting, *approval, *answer)],
         "cancel_requested": view.cancel_requested,
     }
 
@@ -2043,6 +2137,100 @@ def approval_requirements(node: GraphNode) -> tuple[tuple[str, ...], int]:
     timeout = node.config.get("timeout_hours")
     timeout_hours = int(timeout) if isinstance(timeout, int) and 1 <= timeout <= 168 else 24
     return approvers, timeout_hours
+
+
+def ask_requirements(node: GraphNode) -> tuple[tuple[str, ...], int]:
+    """Assignee membership ids and answer timeout hours from an ask node.
+
+    The workflow schema requires ``assignee_user_ids`` (membership ids), a
+    ``prompt`` and at least one field; the timeout is what bounds the wait, so a
+    run parked on a form does not wait forever by default (24 hours, the same
+    default an approval uses).
+    """
+    raw = node.config.get("assignee_user_ids")
+    assignees = tuple(
+        str(value)
+        for value in (raw if isinstance(raw, Sequence) else [])
+        if isinstance(value, str) and value
+    )
+    timeout = node.config.get("timeout_hours")
+    timeout_hours = int(timeout) if isinstance(timeout, int) and 1 <= timeout <= 168 else 24
+    return assignees, timeout_hours
+
+
+def _answer_refused(field_name: str, reason: str) -> OctopError:
+    return OctopError(
+        ErrorCode.WORKBUDDY_VALIDATION_FAILED,
+        f"answer for field {field_name!r} {reason}",
+    )
+
+
+def _coerce_answer(field_name: str, spec: Mapping[str, Any], value: Any) -> Any:
+    """One submitted value, in the shape the declared field type promises."""
+    kind = str(spec.get("type") or "")
+    if kind not in ASK_FIELD_TYPES:
+        # A type the schema does not define can only come from a hand-edited row
+        # or a schema newer than this runtime, and accepting any value for it
+        # would store something no reader agrees on: refuse the answer instead.
+        raise _answer_refused(field_name, f"declares an unsupported type {kind!r}")
+    if kind in {"string", "text", "date"}:
+        if not isinstance(value, str):
+            raise _answer_refused(field_name, "must be text")
+        return value
+    if kind == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise _answer_refused(field_name, "must be a whole number")
+        return value
+    if kind == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _answer_refused(field_name, "must be a number")
+        return value
+    if kind == "boolean":
+        if not isinstance(value, bool):
+            raise _answer_refused(field_name, "must be true or false")
+        return value
+    options = [str(option) for option in spec.get("options") or ()]
+    if not isinstance(value, str) or value not in options:
+        raise _answer_refused(field_name, f"must be one of {options}")
+    return value
+
+
+def validate_answers(form: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
+    """Check one submitted answer against the form the run was asked with.
+
+    The answer becomes a step's output, so what the graph reads must be exactly
+    what the form declared: an undeclared key would let a caller invent data for
+    a question that was never asked, and a missing required field would store an
+    absence the workflow would go on to treat as a value.
+    """
+    raw_fields = form.get("fields") if isinstance(form, Mapping) else None
+    declared: dict[str, Mapping[str, Any]] = {}
+    for spec in raw_fields if isinstance(raw_fields, Sequence) else ():
+        if isinstance(spec, Mapping) and isinstance(spec.get("name"), str):
+            declared[str(spec["name"])] = spec
+    if not declared:
+        raise OctopError(
+            ErrorCode.WORKBUDDY_VALIDATION_FAILED,
+            "the input request carries no usable form",
+        )
+    unknown = sorted(str(key) for key in values if str(key) not in declared)
+    if unknown:
+        listed = ", ".join(repr(key) for key in unknown)
+        raise OctopError(
+            ErrorCode.WORKBUDDY_VALIDATION_FAILED,
+            f"the form does not declare {listed}",
+        )
+    cleaned: dict[str, Any] = {}
+    for name, spec in declared.items():
+        present = name in values
+        value = values.get(name)
+        blank = value is None or (isinstance(value, str) and not value.strip())
+        if not present or blank:
+            if bool(spec.get("required", True)):
+                raise _answer_refused(name, "is required")
+            continue
+        cleaned[name] = _coerce_answer(name, spec, value)
+    return cleaned
 
 
 class MembershipApproverResolver:
@@ -2191,7 +2379,7 @@ class WorkBuddyRuntimeService:
         repo: WorkBuddyRuntimeRepo | None = None,
         versions: WorkflowVersionSource | None = None,
         effects: SideEffectPort | None = None,
-        approver_resolver: Any | None = None,
+        member_resolver: Any | None = None,
         canary: CanaryDirectory | None = None,
         tool_declarations: Any | None = None,
     ) -> None:
@@ -2199,8 +2387,8 @@ class WorkBuddyRuntimeService:
         self._repo = repo or WorkBuddyRuntimeRepo(db)
         self._versions = versions or WorkflowCatalogVersions(db)
         self._effects = effects or UNAVAILABLE_SIDE_EFFECTS
-        self._approver_resolver = (
-            approver_resolver if approver_resolver is not None else MembershipApproverResolver(db)
+        self._member_resolver = (
+            member_resolver if member_resolver is not None else MembershipApproverResolver(db)
         )
         self._canary = canary or NO_CANARY_EVALUATION
         self._tool_declarations = (
@@ -2285,6 +2473,22 @@ class WorkBuddyRuntimeService:
             raise _not_found()
         return row
 
+    def _load_input_request(
+        self, actor: RuntimeActor, input_request_id: str, *, conn: Any = None
+    ) -> InputRequestRow:
+        """One input request the actor may read, or a 404.
+
+        The 404 matches the approval path on purpose: somebody who is neither an
+        assignee nor an admin learns nothing about whether the request exists.
+        """
+        row = self._repo.get_input_request(self._ctx(actor), input_request_id, conn=conn)
+        if row is None:
+            raise _not_found()
+        assignees = self._repo.list_input_assignees(self._ctx(actor), input_request_id, conn=conn)
+        if not actor.is_admin and all(assignee.user_id != actor.user_id for assignee in assignees):
+            raise _not_found()
+        return row
+
     def _resolved_candidates(
         self, actor: RuntimeActor, node: GraphNode
     ) -> list[tuple[int, str | None]]:
@@ -2300,17 +2504,45 @@ class WorkBuddyRuntimeService:
                 ErrorCode.DEPENDENCY_UNAVAILABLE,
                 f"approval node '{node.id}' has no configured approvers",
             )
-        if self._approver_resolver is None:
+        if self._member_resolver is None:
             raise OctopError(
                 ErrorCode.DEPENDENCY_UNAVAILABLE,
                 "approver resolution is not configured for this deployment",
             )
         resolved = {
             int(user_id): department_id
-            for user_id, department_id in self._approver_resolver(actor.tenant_id, approvers)
+            for user_id, department_id in self._member_resolver(actor.tenant_id, approvers)
         }
         # An empty resolution is not an error here: the caller decides between a
         # node-scoped failure (nobody valid) and parking the execution.
+        return sorted(resolved.items())
+
+    def _resolved_assignees(
+        self, actor: RuntimeActor, node: GraphNode
+    ) -> list[tuple[int, str | None]]:
+        """Eligible assignees for one ask node, or a fail-closed refusal.
+
+        Same rule as approvers: a form nobody can fill would park the execution
+        forever, so an empty resolution lets the caller fail the node in place.
+        The membership resolver is shared with approvals — it answers "which of
+        these ids is a current, acting member of this tenant", which is the
+        question both node types ask.
+        """
+        declared, _timeout = ask_requirements(node)
+        if not declared:
+            raise OctopError(
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
+                f"ask node '{node.id}' has no configured assignees",
+            )
+        if self._member_resolver is None:
+            raise OctopError(
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
+                "assignee resolution is not configured for this deployment",
+            )
+        resolved = {
+            int(user_id): department_id
+            for user_id, department_id in self._member_resolver(actor.tenant_id, declared)
+        }
         return sorted(resolved.items())
 
     def _audit(
@@ -2734,9 +2966,11 @@ class WorkBuddyRuntimeService:
             inputs=execution.inputs,
             replay=self._replay_state(ctx, claim.execution_id),
             decisions=self._recorded_decisions(ctx, execution),
+            answers=self._recorded_answers(ctx, execution),
             effects=self._effects,
             execution_id=claim.execution_id,
             resolve_approvers=lambda node: self._resolved_candidates(actor, node),
+            resolve_assignees=lambda node: self._resolved_assignees(actor, node),
             on_step_start=lambda node: self._mark_step_running(actor, claim, node, attempt),
             on_step_settled=lambda step: self._persist_step(actor, claim, step, attempt),
             # A cancel is noticed between nodes, so the call already in flight
@@ -3066,6 +3300,32 @@ class WorkBuddyRuntimeService:
                     conn=conn,
                 )
                 return
+            if run.status == "waiting_input" and run.waiting_input_node_id is not None:
+                self._open_input_request(
+                    actor,
+                    execution,
+                    run.waiting_input_node_id,
+                    run.input_assignees.get(run.waiting_input_node_id, ()),
+                    conn=conn,
+                )
+                self._repo.update_execution_status(
+                    ctx,
+                    execution.id,
+                    status="waiting_input",
+                    expected_status=("running",),
+                    expected_fence=fence,
+                    conn=conn,
+                )
+                self._release_concurrency_slot(actor, execution.id, conn=conn)
+                self._repo.release_lease(
+                    ctx,
+                    tenant_id=actor.tenant_id,
+                    lease_name=lease_name,
+                    holder=claim.worker_id,
+                    fence=fence,
+                    conn=conn,
+                )
+                return
             self._repo.update_execution_status(
                 ctx,
                 execution.id,
@@ -3195,6 +3455,98 @@ class WorkBuddyRuntimeService:
             conn=conn,
         )
         return approval_id
+
+    def _open_input_request(
+        self,
+        actor: RuntimeActor,
+        execution: ExecutionRow,
+        node_id: str,
+        assignees: Sequence[tuple[int, str | None]],
+        *,
+        conn: Any,
+    ) -> str:
+        """Record the form a parked execution is waiting on, and tell its assignees.
+
+        The locked version id and hash are copied onto the request for the same
+        reason an approval copies them: the definition that asked the question is
+        the one the answer belongs to, so a later publish cannot reinterpret it.
+        """
+        ctx = self._ctx(actor)
+        graph = self._graph_from_snapshot(execution)
+        node = graph.node(node_id)
+        if node is None:
+            raise _invalid("ask node is not part of the locked workflow version")
+        _assignees, timeout_hours = ask_requirements(node)
+        fields = [dict(field) for field in node.config.get("fields") or ()]
+        # The question is rendered the moment it is asked: an assignee has to read
+        # a question about *this* run, not the template that produced it.  The
+        # recorded outputs are the ones this attempt has already settled, which is
+        # exactly the context the template was validated against.
+        prompt = render_template(
+            node.config.get("prompt"),
+            inputs=execution.inputs,
+            node_results=self._repo.recorded_outputs(ctx, execution.id),
+        )
+        form = {
+            "node_id": node_id,
+            "node_name": node.name,
+            "prompt": str(prompt or "")[:1000],
+            "fields": fields,
+            "assignee_membership_ids": [user_id for user_id, _dept in assignees],
+            "timeout_hours": timeout_hours,
+            "workflow_id": execution.workflow_id,
+            "workflow_version_id": execution.workflow_version_id,
+            "inputs": execution.inputs,
+        }
+        form_sha, _ = _hash_json(form)
+        request_id = self._repo.insert_input_request(
+            ctx,
+            tenant_id=actor.tenant_id,
+            execution_id=execution.id,
+            node_id=node_id,
+            prompt=form["prompt"],
+            form=form,
+            form_sha256=form_sha,
+            expires_at=datetime.now(UTC) + timedelta(hours=timeout_hours),
+            locked_workflow_version_id=execution.workflow_version_id,
+            locked_workflow_version_hash=execution.workflow_version_hash,
+            conn=conn,
+        )
+        self._repo.insert_input_assignees(
+            ctx,
+            tenant_id=actor.tenant_id,
+            input_request_id=request_id,
+            assignees=assignees,
+            conn=conn,
+        )
+        for user_id, _department in assignees:
+            self._repo.insert_notification(
+                ctx,
+                tenant_id=actor.tenant_id,
+                user_id=user_id,
+                kind="input.requested",
+                title=f"Input required: {node.name}",
+                resource_type="input_request",
+                resource_id=request_id,
+                conn=conn,
+            )
+        self._repo.enqueue_outbox(
+            ctx,
+            tenant_id=actor.tenant_id,
+            topic="workbuddy.input_request.created",
+            dedupe_key=f"{request_id}:created",
+            payload={"input_request_id": request_id, "execution_id": execution.id},
+            conn=conn,
+        )
+        self._audit(
+            actor,
+            action="input.request",
+            resource_type="input_request",
+            resource_id=request_id,
+            details={"execution_id": execution.id, "node_id": node_id},
+            conn=conn,
+        )
+        return request_id
 
     def get_execution(self, actor: RuntimeActor, execution_id: str) -> ExecutionView:
         self._require_postgres()
@@ -3484,6 +3836,140 @@ class WorkBuddyRuntimeService:
             raise _not_found()
         return _execution_view(requeued)
 
+    def submit_input(
+        self,
+        actor: RuntimeActor,
+        execution_id: str,
+        *,
+        input_request_id: str,
+        values: Mapping[str, Any],
+    ) -> ExecutionView:
+        """Record one answer and re-queue the execution for admission.
+
+        An answer settles like an approval decision: the parked execution holds no
+        running slot, so the write only moves it back to ``queued`` and the worker
+        admits it again when the tenant has one free.  What differs is who may
+        write it (an assignee, with no token to hold) and what is written (values
+        the form the run asked with is checked against).
+        """
+        self._require_postgres()
+        ctx = self._ctx(actor)
+        with runtime_transaction(self._db, ctx) as conn:
+            execution = self._load_execution(actor, execution_id, conn=conn)
+            if execution.status != "waiting_input":
+                raise OctopError(
+                    ErrorCode.STATE_CONFLICT,
+                    "execution is not waiting for an answer",
+                )
+            request = self._load_input_request(actor, input_request_id, conn=conn)
+            if request.execution_id != execution_id:
+                raise _not_found()
+            if request.locked_workflow_version_id != execution.workflow_version_id:
+                # The answer belongs to the question the locked version asked; a
+                # different version means the row no longer describes this run.
+                raise OctopError(
+                    ErrorCode.STATE_CONFLICT,
+                    "input request was bound to a different workflow version",
+                )
+            if request.status != "open":
+                raise OctopError(
+                    ErrorCode.STATE_CONFLICT,
+                    "input request has already been answered",
+                )
+            cleaned = validate_answers(request.form, values)
+            values_sha, _ = _hash_json(cleaned)
+            if not self._repo.submit_input_request(
+                ctx,
+                input_request_id=input_request_id,
+                values=cleaned,
+                values_sha256=values_sha,
+                submitted_by_user_id=actor.acting_user_id,
+                conn=conn,
+            ):
+                # Another answer won the compare-and-set after the read above:
+                # exactly one answer may ever be recorded for one question.
+                raise OctopError(
+                    ErrorCode.STATE_CONFLICT,
+                    "input request has already been answered",
+                )
+            self._repo.mark_input_assignee_answered(
+                ctx,
+                input_request_id=input_request_id,
+                user_id=actor.acting_user_id,
+                conn=conn,
+            )
+            self._repo.requeue_execution(
+                ctx,
+                execution_id,
+                expected_status=("waiting_input",),
+                conn=conn,
+            )
+            self._audit(
+                actor,
+                action="input.submit",
+                resource_type="input_request",
+                resource_id=input_request_id,
+                details={"execution_id": execution_id, "node_id": request.node_id},
+                conn=conn,
+            )
+            requeued = self._repo.get_execution(ctx, execution_id, conn=conn)
+        if requeued is None:  # pragma: no cover - defensive
+            raise _not_found()
+        return _execution_view(requeued)
+
+    def list_execution_input_requests(
+        self, actor: RuntimeActor, execution_id: str
+    ) -> list[dict[str, Any]]:
+        """Every question one execution asked, newest first, with its assignees.
+
+        Reading the execution first is what keeps the 404 honest: an actor who
+        cannot see the run cannot enumerate the questions it asked either.
+        """
+        self._require_postgres()
+        ctx = self._ctx(actor)
+        self._load_execution(actor, execution_id)
+        rows = self._repo.list_input_requests(ctx, execution_id=execution_id, limit=200)
+        return [
+            input_request_payload(row, self._repo.list_input_assignees(ctx, row.id)) for row in rows
+        ]
+
+    def list_input_requests(
+        self,
+        actor: RuntimeActor,
+        *,
+        scope: str = "self",
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """The questions the caller may read, newest first.
+
+        ``scope="self"`` is the answering queue: only what is assigned to this
+        member.  ``scope="tenant"`` is the operator view, needs an admin, and is
+        audited — a member must never read another member's questions.
+        """
+        self._require_postgres()
+        if scope not in {"self", "tenant"}:
+            raise _invalid("scope must be 'self' or 'tenant'")
+        tenant_scope = scope == "tenant"
+        if tenant_scope and not actor.is_admin:
+            raise OctopError(ErrorCode.FORBIDDEN, "tenant scope requires tenant admin")
+        ctx = self._ctx(actor)
+        rows = self._repo.list_input_requests(
+            ctx,
+            assignee_user_id=None if tenant_scope else actor.user_id,
+            status=status,
+            limit=limit,
+        )
+        if tenant_scope:
+            self._audit(
+                actor,
+                action="input.list_tenant",
+                resource_type="input_request",
+                resource_id=None,
+                details={"count": len(rows)},
+            )
+        return [input_request_payload(row) for row in rows]
+
     def _recorded_decisions(
         self, ctx: WorkBuddyDbContext, execution: ExecutionRow
     ) -> dict[str, str]:
@@ -3496,6 +3982,21 @@ class WorkBuddyRuntimeService:
             elif row.status == "rejected":
                 decisions[row.node_id] = "rejected"
         return decisions
+
+    def _recorded_answers(
+        self, ctx: WorkBuddyDbContext, execution: ExecutionRow
+    ) -> dict[str, dict[str, Any]]:
+        """Answers already submitted for this execution, by node id.
+
+        Only a submitted request counts: an open one holds no values yet, and an
+        invalidated (superseded) one must not be replayed into a fresh attempt.
+        """
+        rows = self._repo.list_input_requests(ctx, execution_id=execution.id, limit=200)
+        answers: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if row.status == "submitted" and row.values is not None:
+                answers[row.node_id] = dict(row.values)
+        return answers
 
     # -- reconciliations ----------------------------------------------------
 

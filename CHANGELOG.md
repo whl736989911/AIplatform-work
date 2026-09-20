@@ -8,6 +8,10 @@
 
 ### 新增
 
+- WorkBuddy **运行中向人提问**（A-08）：新增 `ask` 节点——运行到某一步缺少只有人能给的事实时（发票号、两个账户选哪个），执行**停在原地等回答**，而不是取消重跑（后者会丢掉已完成的工作与图上的位置）。节点在权威 schema 里声明 `prompt`、`fields`（名字/标签/类型/是否必填/占位/选项）与 `assignee_user_ids`；编译器校验字段名在同一节点内**唯一**（字段名就是提交结果的键）、`select` 必须给 `options`、受派人须是租户内**当前可见**成员——与审批同一条规则：只有"没人能答"才拦发布，已离职的受派人在运行时表现为该步失败（`ASK_NO_VALID_ASSIGNEE`），不会让本来健全的工作流发布不了。执行状态新增 `waiting_input`，与 `waiting_approval` 同类：停放时不占运行槽，回答后重新排队、由 Worker 再次接纳。
+- 提问落库为 `workbuddy_input_requests`（问题、表单与表单摘要、锁定版本 id/hash、截止时间、答案与答案摘要、作答人/时间）与 `workbuddy_input_assignees`（谁该答、是否已回答），两张表 ENABLE + FORCE RLS 并配租户内复合外键；`workbuddy_step_runs.status` 同步接纳 `waiting_input`。**问题文案在开单时渲染**（`{{ … }}` 按本次运行的实际输入与已结算输出渲染），受派人拿到的是一句关于这次运行的话，而不是模板原文。
+- 新增三个端点：`GET /executions/{id}/input-requests`（某次执行提出的问题，含表单与受派人）、`POST /executions/{id}/input-requests/{rid}/answer`（提交答案；未声明的键、类型不符、选项外、必填缺失一律 400 `WORKBUDDY_VALIDATION_FAILED` 且**不改动任何状态**；CAS 保证一个问题只被回答一次，重复提交冲突）、`GET /input-requests`（本人待填队列；admin 的 `scope=tenant` 需有管理目的并审计）。**非受派人一律 404**，与审批一致，不泄漏问题是否存在。运行详情新增等待原因 `input`（`wait_reasons`/`waiting_steps`），前端据此给出答题入口；`input.requested` 通知与 `workbuddy.input_request.created` 发件箱事件与审批同构。
+- WorkBuddy **待我填写**界面（A-08/A-11 前端）：收件箱新增「待我填写」面板（问题、来自哪次执行、截止时间、空态与失败重试），回答抽屉按 `form.fields` 逐类型渲染输入（文本/多行/整数/数字/布尔/日期/下拉），必填缺失在提交前拦下、后端错误原样展示；运行详情在等 `input` 时给出同一抽屉的入口。收件箱三合一中的「待我审核」随 A-09 落地，本轮不放假数据。
 - WorkBuddy **创建向导**（A-06）：面向非技术员工的四步引导——① 输入（声明工作流输入）② 步骤（选类型，字段**由 `GET /workflow-definitions/metadata` 驱动**渲染该类型的必填/可选/枚举/范围，向导里没有任何硬编码的字段清单）③ 数据（为每步设置结果名并列出可引用写法）④ 输出。能否放行"下一步"由**服务端校验**决定：定义变化后防抖调用 `POST /workflow-definitions/validate`，回来的诊断按 `path`/`node_id` 归到所在页面，当前页有错就不放行——而不是等到保存时才被编译器拒绝。保存按 建草稿 → 存版本 → 发布 走既有路由，发布后可直接**试运行**；原自由 JSON 编辑器保留为进阶路径，两条路并存。
 - WorkBuddy 节点集**显式化**（A-07）：新增三类节点——`input`（把某个已声明的输入接入图）、`knowledge`（检索成为独立一步）、`output`（显式声明运行结果）。三者同时进入权威 schema（`contracts/workflow-v1.schema.json` 的节点枚举与 `allOf` 分支）与编译器校验（输入节点必须指向**已声明**输入；输出节点**唯一且必须为终态**；知识库节点按调用者可达性校验），并**自动出现在 `GET /workflow-definitions/metadata`**（元数据从 schema 同源导出，不手写副本）。
 - 运行时执行三类新节点：`input`/`output` **本地执行**（读声明输入 / 渲染运行结果，不离开进程）；`knowledge` 走**可注入的检索端口**（与工具、模型适配器同类）；未接线时该步 **fail-closed**（明确报依赖不可用），而不是静默返回"没有检索结果"而看起来像空答案。
@@ -41,6 +45,9 @@
 
 ### 修复
 
+- 修复阶段遗漏的**步骤节点类型约束**：迁移 018 建表时把 `workbuddy_step_runs.node_type` 限定为当时存在的五类（`tool`/`llm`/`condition`/`approval`/`transform`），此后新增的 `input`/`knowledge`/`output`（A-07）与本次的 `ask` 都不在其中——**任何含这些节点的工作流一旦真正运行，第一步落库就会以 check 违例整次失败**；而 A-07 的验证只到单元层（不写数据库），所以没有暴露。迁移 034 把该词表扩到与编译器节点集一致的九类。这个缺陷是批次 4 的端到端用例（真实 PostgreSQL 上跑停放 → 作答 → 恢复）第一次执行就抓到的——它也是"单元测试全绿不等于功能可用"的实例。
+- 修复**停在表单上的运行取消不掉**：`request_cancel` 的状态白名单只有 `queued`/`waiting_approval`，漏了新增的 `waiting_input`，于是员工在「等待填写」的执行上点取消不会有任何效果（接口既不改状态也不报错）。补入后取消会立即结算该执行——停在任何人工等待上的运行都必须能直接取消，因为它已经没有在途调用需要等。该修复由端到端用例（停放 → 取消 → 状态为 `canceled`）证明。
+- 修复 `workbuddy_executions` 写入方法 `insert_execution` 的**绑参缺列**：列清单已含迁移 024/025 加入的路由列（`proposal_id`/`cohort`/`bucket`/`route_canary_percent`/`subject`），绑定值却只有 12 个，调用即报占位符数量不符。该方法当前无调用方（运行时走 `insert_execution_if_absent`），属潜伏缺陷而非线上故障。现两者列集与绑参完全一致，并以真实 PG 探针逐字段回读证明同一入参写出同样形状的行（含 5 个路由列非空回读）。
 - 企业治理面板把租户角色判定写死为 `admin`，而后端 `TENANT_ADMIN_ROLES` 与租户创建流程都以 **owner** 作为首位治理者：结果是每个租户的第一位用户在企业治理页只看到只读的「企业成员」视图，成员、邀请、配额、凭据、能力许可五个管理页签全部不可见，尽管接口本会放行。现改为共享的 `utils/tenantRole.ts`，并新增一条读取后端 `roles.py` 的一致性测试，防止两侧角色集合再次漂移。
 - 生产 Worker 容器启动即失败：`deploy/scripts/app-entrypoint.sh` 执行的是 `octop workbuddy-worker`，而命令行只提供 `octop workbuddy worker`（组 + 子命令），容器会以「No such command」退出。同步修正 `docs/architecture.md`、`.env.example` 与 CHANGELOG 中的同一处写法，并新增 `tests/unit/test_deploy_cli_commands.py`：解析 `deploy/scripts/*.sh` 中所有 `octop …` 调用并与真实命令行注册表比对，防止部署脚本与命令面再次漂移。
 - WorkBuddy 作业状态：此前没有任何路径把作业从 `queued` 置为 `running`，正在执行的作业对客户端仍显示 `queued`；新增 `start_job`（同时写入 `started_at`）。

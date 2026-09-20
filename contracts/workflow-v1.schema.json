@@ -97,11 +97,27 @@
          "then": {"not": {"required": ["max_length"]}}}
       ]
     },
+    "askField": {
+      "type": "object", "required": ["name", "label", "type"], "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/definitions/identifier"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 200},
+        "type": {"type": "string", "enum": ["string", "text", "integer", "number", "boolean", "date", "select"]},
+        "required": {"type": "boolean", "default": true},
+        "placeholder": {"type": "string", "maxLength": 200},
+        "options": {"type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 200}}
+      },
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "select"}}, "required": ["type"]},
+         "then": {"required": ["options"]}}
+      ]
+    },
     "node": {
       "type": "object", "required": ["id", "type", "name", "config"], "additionalProperties": false,
       "properties": {
         "id": {"$ref": "#/definitions/identifier"},
-        "type": {"type": "string", "enum": ["tool", "llm", "condition", "approval", "transform", "input", "knowledge", "output"]},
+        "type": {"type": "string", "enum": ["tool", "llm", "condition", "approval", "ask", "transform", "input", "knowledge", "output"]},
         "name": {"type": "string", "minLength": 1, "maxLength": 100},
         "config": {"type": "object"},
         "save_as": {"$ref": "#/definitions/identifier"},
@@ -145,6 +161,18 @@
              "approver_user_ids": {"type": "array", "minItems": 1, "maxItems": 10,
                                    "uniqueItems": true, "items": {"$ref": "#/definitions/uuid"}},
              "target_node_id": {"$ref": "#/definitions/identifier"},
+             "timeout_hours": {"type": "integer", "minimum": 1, "maximum": 168, "default": 24}
+           }}}}},
+        {"if": {"properties": {"type": {"const": "ask"}}, "required": ["type"]},
+         "then": {"properties": {"config": {
+           "type": "object", "required": ["prompt", "assignee_user_ids", "fields"],
+           "additionalProperties": false,
+           "properties": {
+             "prompt": {"type": "string", "minLength": 1, "maxLength": 1000},
+             "assignee_user_ids": {"type": "array", "minItems": 1, "maxItems": 10,
+                                   "uniqueItems": true, "items": {"$ref": "#/definitions/uuid"}},
+             "fields": {"type": "array", "minItems": 1, "maxItems": 20,
+                        "items": {"$ref": "#/definitions/askField"}},
              "timeout_hours": {"type": "integer", "minimum": 1, "maximum": 168, "default": 24}
            }}}}},
         {"if": {"properties": {"type": {"const": "transform"}}, "required": ["type"]},

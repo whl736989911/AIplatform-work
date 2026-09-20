@@ -371,6 +371,72 @@ class ApprovalCandidateRow:
 
 
 @dataclass(frozen=True, slots=True)
+class InputRequestRow:
+    id: str
+    execution_id: str
+    node_id: str
+    status: str
+    prompt: str
+    form: Any
+    form_sha256: str
+    values: Any
+    values_sha256: str | None
+    locked_workflow_version_id: str
+    locked_workflow_version_hash: str
+    expires_at: Any
+    submitted_by_user_id: int | None
+    submitted_at: Any
+    created_at: Any
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> InputRequestRow:
+        return cls(
+            id=str(row["id"]),
+            execution_id=str(row["execution_id"]),
+            node_id=str(row["node_id"]),
+            status=str(row["status"]),
+            prompt=str(row["prompt"]),
+            form=row["form"],
+            form_sha256=str(row["form_sha256"]),
+            values=row["values"],
+            values_sha256=(str(row["values_sha256"]) if row["values_sha256"] is not None else None),
+            locked_workflow_version_id=str(row["locked_workflow_version_id"]),
+            locked_workflow_version_hash=str(row["locked_workflow_version_hash"]),
+            expires_at=row["expires_at"],
+            submitted_by_user_id=(
+                int(row["submitted_by_user_id"])
+                if row["submitted_by_user_id"] is not None
+                else None
+            ),
+            submitted_at=row["submitted_at"],
+            created_at=row["created_at"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class InputAssigneeRow:
+    id: str
+    input_request_id: str
+    user_id: int
+    department_id: str | None
+    status: str
+    submitted_at: Any
+    created_at: Any
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> InputAssigneeRow:
+        return cls(
+            id=str(row["id"]),
+            input_request_id=str(row["input_request_id"]),
+            user_id=int(row["user_id"]),
+            department_id=str(row["department_id"]) if row["department_id"] else None,
+            status=str(row["status"]),
+            submitted_at=row["submitted_at"],
+            created_at=row["created_at"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ReconciliationRow:
     id: str
     execution_id: str
@@ -638,6 +704,11 @@ class WorkBuddyRuntimeRepo:
         idempotency_scope: str | None = None,
         idempotency_key: str | None = None,
         idempotency_hash: str | None = None,
+        proposal_id: str | None = None,
+        cohort: str | None = None,
+        bucket: int | None = None,
+        route_canary_percent: int | None = None,
+        subject: str | None = None,
         execution_id: str | None = None,
         conn: Any | None = None,
     ) -> str:
@@ -665,6 +736,11 @@ class WorkBuddyRuntimeRepo:
                     idempotency_hash,
                     _jsonb(inputs),
                     created_by_user_id,
+                    proposal_id,
+                    cohort,
+                    bucket,
+                    route_canary_percent,
+                    subject,
                 ),
             )
         return rid
@@ -876,18 +952,21 @@ class WorkBuddyRuntimeRepo:
     ) -> bool:
         """Cancel an execution that is not running; report False when it is.
 
-        A queued or parked execution has no call in flight, so it can be canceled
-        outright. A *running* one may be in the middle of an external call, and
-        the contract forbids claiming to undo a write that may already have
+        A queued or parked execution -- waiting on an approval decision or on a
+        person's answer -- has no call in flight, so it can be canceled outright.
+        A *running* one may be in the middle of an external call, and the
+        contract forbids claiming to undo a write that may already have
         happened: the request is recorded instead (``request_cancel_running``)
         and the run converges to ``canceled`` once its current call lands.
         """
         with runtime_transaction(self._db, ctx, conn) as c:
+            # A run parked on any human wait must be cancellable right here: it
+            # is alive but holds no call in flight to wait out.
             cursor = c.execute(
                 """
                 UPDATE workbuddy_executions
                 SET status = 'canceled', cancel_requested_at = now(), finished_at = now()
-                WHERE id = ? AND status IN ('queued', 'waiting_approval')
+                WHERE id = ? AND status IN ('queued', 'waiting_approval', 'waiting_input')
                 """,
                 (execution_id,),
             )
@@ -1603,6 +1682,185 @@ class WorkBuddyRuntimeRepo:
                 WHERE execution_id = ? AND status = 'pending'
                 """,
                 (execution_id,),
+            )
+            return int(getattr(cursor, "rowcount", 0) or 0)
+
+    # -- input requests -----------------------------------------------------
+
+    def insert_input_request(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        node_id: str,
+        prompt: str,
+        form: Any,
+        form_sha256: str,
+        expires_at: Any,
+        locked_workflow_version_id: str,
+        locked_workflow_version_hash: str,
+        input_request_id: str | None = None,
+        conn: Any | None = None,
+    ) -> str:
+        """Open the question one node asks; the row starts ``open``.
+
+        ``values`` and ``values_sha256`` are left NULL on purpose: the answer is
+        the only thing that fills them, so an open question can never be read as
+        an answered one.
+        """
+        rid = input_request_id or new_runtime_id()
+        with runtime_transaction(self._db, ctx, conn) as c:
+            c.execute(
+                """
+                INSERT INTO workbuddy_input_requests(
+                    id, tenant_id, execution_id, node_id, status, prompt, form,
+                    form_sha256, expires_at, locked_workflow_version_id,
+                    locked_workflow_version_hash
+                ) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rid,
+                    tenant_id,
+                    execution_id,
+                    node_id,
+                    prompt,
+                    _jsonb(form),
+                    form_sha256,
+                    expires_at,
+                    locked_workflow_version_id,
+                    locked_workflow_version_hash,
+                ),
+            )
+        return rid
+
+    def insert_input_assignees(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        tenant_id: str,
+        input_request_id: str,
+        assignees: Sequence[tuple[int, str | None]],
+        conn: Any | None = None,
+    ) -> int:
+        inserted = 0
+        with runtime_transaction(self._db, ctx, conn) as c:
+            for user_id, department_id in assignees:
+                c.execute(
+                    """
+                    INSERT INTO workbuddy_input_assignees(
+                        id, tenant_id, input_request_id, user_id, department_id
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_runtime_id(),
+                        tenant_id,
+                        input_request_id,
+                        int(user_id),
+                        department_id,
+                    ),
+                )
+                inserted += 1
+        return inserted
+
+    def get_input_request(
+        self, ctx: WorkBuddyDbContext, input_request_id: str, *, conn: Any | None = None
+    ) -> InputRequestRow | None:
+        with runtime_transaction(self._db, ctx, conn) as c:
+            row = c.execute(
+                "SELECT * FROM workbuddy_input_requests WHERE id = ?", (input_request_id,)
+            ).fetchone()
+        return InputRequestRow.from_row(row) if row is not None else None
+
+    def list_input_requests(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        execution_id: str | None = None,
+        assignee_user_id: int | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        conn: Any | None = None,
+    ) -> list[InputRequestRow]:
+        clauses = ["r.tenant_id = ?"]
+        params: list[Any] = [ctx.tenant_id]
+        if execution_id is not None:
+            clauses.append("r.execution_id = ?")
+            params.append(execution_id)
+        if status is not None:
+            clauses.append("r.status = ?")
+            params.append(status)
+        if assignee_user_id is not None:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM workbuddy_input_assignees a "
+                "WHERE a.input_request_id = r.id AND a.user_id = ?)"
+            )
+            params.append(int(assignee_user_id))
+        params.append(max(1, min(int(limit), 200)))
+        with runtime_transaction(self._db, ctx, conn) as c:
+            rows = c.execute(
+                "SELECT r.* FROM workbuddy_input_requests r "
+                f"WHERE {' AND '.join(clauses)} ORDER BY r.created_at DESC, r.id DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        return [InputRequestRow.from_row(r) for r in rows]
+
+    def list_input_assignees(
+        self, ctx: WorkBuddyDbContext, input_request_id: str, *, conn: Any | None = None
+    ) -> list[InputAssigneeRow]:
+        with runtime_transaction(self._db, ctx, conn) as c:
+            rows = c.execute(
+                "SELECT * FROM workbuddy_input_assignees WHERE input_request_id = ? "
+                "ORDER BY created_at, user_id",
+                (input_request_id,),
+            ).fetchall()
+        return [InputAssigneeRow.from_row(r) for r in rows]
+
+    def submit_input_request(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        input_request_id: str,
+        values: Any,
+        values_sha256: str,
+        submitted_by_user_id: int,
+        conn: Any | None = None,
+    ) -> bool:
+        """Answer an open question once; False means it was answered already.
+
+        ``status = 'open'`` is part of the WHERE clause, so two answers racing
+        for the same form cannot both land: the first commits, the second finds
+        no row and is reported as a no-op instead of overwriting the answer of
+        record.
+        """
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_input_requests
+                SET status = 'submitted', values = ?, values_sha256 = ?,
+                    submitted_by_user_id = ?, submitted_at = now()
+                WHERE id = ? AND status = 'open'
+                """,
+                (_jsonb(values), values_sha256, int(submitted_by_user_id), input_request_id),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def mark_input_assignee_answered(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        input_request_id: str,
+        user_id: int,
+        conn: Any | None = None,
+    ) -> int:
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_input_assignees
+                SET status = 'answered', submitted_at = now()
+                WHERE input_request_id = ? AND user_id = ?
+                """,
+                (input_request_id, int(user_id)),
             )
             return int(getattr(cursor, "rowcount", 0) or 0)
 
@@ -2681,6 +2939,8 @@ __all__ = [
     "ChatSessionRow",
     "EdgeRunRow",
     "ExecutionRow",
+    "InputAssigneeRow",
+    "InputRequestRow",
     "JobRow",
     "LeaseRow",
     "NotificationRow",

@@ -476,6 +476,7 @@
     "APPROVAL_BINDING_CHANGED": "审批目标或参数已变化，需重新审批。",
     "APPROVAL_EXPIRED": "该审批已过期。",
     "APPROVAL_NO_VALID_APPROVER": "声明的审批人当前均无效。",
+    "ASK_NO_VALID_ASSIGNEE": "该填写节点声明的受派人当前均无效。",
     "RECONCILIATION_EVIDENCE_INVALID": "对账证据缺失或无法核验。",
     "WORKBUDDY_IDEMPOTENCY_CONFLICT": "同一幂等键对应了不同的请求内容。",
     "WORKBUDDY_EXECUTION_NOT_CANCELLABLE": "该执行已无法取消。",

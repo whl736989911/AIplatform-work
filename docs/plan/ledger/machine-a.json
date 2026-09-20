@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-20T03:17:01Z",
+  "updated": "2026-09-20T03:48:56Z",
   "batches": {
     "1": {
       "state": "done",
@@ -54,16 +54,20 @@
       "notes": "本批次已 rebase 到含「A 线批次 2 + B 线批次 2」的 main。未包含项：knowledge 检索端口未接线（部署方接线，未接线即 fail-closed）；向导按线性步骤链生成边；试运行不在向导内展示逐节点结果；三类新节点暂无专门图标。"
     },
     "4": {
-      "state": "pending",
+      "state": "in_progress",
       "tasks": [
         "A-08",
         "A-09",
-        "A-11"
+        "A-10",
+        "A-11",
+        "A-18"
       ],
       "pr": null,
-      "commits": [],
-      "evidence": "",
-      "notes": ""
+      "commits": [
+        "A-08 backend+frontend on feat/orchestration-batch4-ask-input (stacked on batch 3)"
+      ],
+      "evidence": "A-08 已实现并在真实 PostgreSQL 上端到端验证（5 条新集成用例：停放→渲染后的问题→作答→恢复→成功；非法答案 400 且状态不变；非受派人 404；停放可取消；无人可答就地失败）；单元层 13+16 条新用例覆盖编译期与引擎语义；迁移 034 经真实 runner 全链验证（PG 001→051 + SQLite 水位）。",
+      "notes": "契约偏差（记录以免后续误判）：① 新增执行状态 waiting_input —— 源文档的状态表（约 1482 行）尚未列出，本状态由已批准的批次任务 A-08 引入，属**契约扩展**而非偏离；② 三个输入请求端点（GET /executions/{id}/input-requests、POST …/answer、GET /input-requests）在源文档路由表中不存在，故在 contracts/route-manifest.json 标为 supplemental（计数 62/54/116）；③ 计划的 §4.0.2 提到 octop_app / workbuddy_auth 两个角色，本仓库从不创建它们（018/019/031/050 只 REVOKE FROM PUBLIC），迁移里**不得**对它们 GRANT（会因角色不存在而中止），角色创建属部署方（D 批次）；④ 迁移 034 顺带修复 workbuddy_step_runs.node_type 词表（018 的 5 类 → 编译器当前的 9 类）：新增节点类型必须同时扩该约束，否则含新节点的工作流一运行就整次失败（A-07 曾潜伏此缺陷）；⑤ 顺带修复 request_cancel 漏 waiting_input、insert_execution 绑参缺 5 个路由列。"
     },
     "5": {
       "state": "pending",
