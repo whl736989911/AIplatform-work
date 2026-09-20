@@ -152,9 +152,7 @@ def analyse_and_propose(
             "kind": cluster.kind,
             "corrections": cluster.corrections,
             "reason": (
-                "not_a_correction"
-                if cluster.kind != "correction"
-                else "insufficient_evidence"
+                "not_a_correction" if cluster.kind != "correction" else "insufficient_evidence"
             ),
         }
         for cluster in clusters
