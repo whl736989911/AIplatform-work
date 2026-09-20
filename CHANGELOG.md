@@ -8,6 +8,9 @@
 
 ### 新增
 
+- WorkBuddy 节点集**显式化**（A-07）：新增三类节点——`input`（把某个已声明的输入接入图）、`knowledge`（检索成为独立一步）、`output`（显式声明运行结果）。三者同时进入权威 schema（`contracts/workflow-v1.schema.json` 的节点枚举与 `allOf` 分支）与编译器校验（输入节点必须指向**已声明**输入；输出节点**唯一且必须为终态**；知识库节点按调用者可达性校验），并**自动出现在 `GET /workflow-definitions/metadata`**（元数据从 schema 同源导出，不手写副本）。
+- 运行时执行三类新节点：`input`/`output` **本地执行**（读声明输入 / 渲染运行结果，不离开进程）；`knowledge` 走**可注入的检索端口**（与工具、模型适配器同类）；未接线时该步 **fail-closed**（明确报依赖不可用），而不是静默返回"没有检索结果"而看起来像空答案。
+- 旧定义**行为完全不变**：入口规则只在定义里确实存在 `input` 节点时放宽（额外的输入根不算"多入口"），可达性从**所有源点**计算（单根定义与原行为逐字等价）；编译器 41 项既有用例与运行时 59 项既有用例全部保持通过。
 - WorkBuddy 工作流接入权限四层（B-02）：工作流创建时在同一事务内注册权限对象（默认 `enterprise`），列表按「公司 / 部门 / 个人 / 单独授权」四层过滤且与纯解析器逐 actor 一致；详情、保存、发布、回滚、归档统一走同一判定，读不到或管不到的对象一律 404（跨租户同码，不泄漏存在性）。此前无权限行的历史工作流保持公司可见（与列表同一回退），管理权仍归创建者与租户管理员。
 - WorkBuddy 工具与模型授权支持部门/成员主体（B-03）：两个授权表加入 `subject_key`（`tenant` / `department:<id>` / `member:<user_id>`）并进入主键，配可空的 `user_id`/`department_id`、形状 CHECK 与租户内复合外键，既有行默认 `tenant` 语义不变；`GET /tenant-capabilities` 返回 `tool_grants`/`model_grants`，新增 `POST|DELETE /tenant-capabilities/{kind}/{revision_id}/grants`（租户 admin）。替换租户级批准集只影响 `tenant` 行，部门/成员授权不被覆盖；撤销租户级模型授权会清空租户默认模型（默认模型必须保持租户级批准，否则会留下没人能用的默认值）。已跳过 016 的既有库由 `_ensure_workbuddy_grant_subjects` 幂等补齐同样的列、主键与约束。
 - WorkBuddy 编译器按**调用者**解析工具与模型可达性（B-04，与 A 线的唯一交叉点）：`PostgresWorkflowSemanticResolver(conn, tenant_id, *, user_id=None)` 的回答改为「租户级授权行 ∪ 调用者所属部门及其父链上的部门授权 ∪ 调用者本人授权」的并集，默认模型同样须对该调用者可达（否则 `MODEL_NOT_CONFIGURED`），缺 `user_id` 时 fail-closed；知识库嵌入模型的授权校验同步改为按调用者解析。A 线三处构造点未改实现（构造时已传 `user_id=principal.user_id`）。
@@ -38,7 +41,6 @@
 ### 修复
 
 - 企业治理面板把租户角色判定写死为 `admin`，而后端 `TENANT_ADMIN_ROLES` 与租户创建流程都以 **owner** 作为首位治理者：结果是每个租户的第一位用户在企业治理页只看到只读的「企业成员」视图，成员、邀请、配额、凭据、能力许可五个管理页签全部不可见，尽管接口本会放行。现改为共享的 `utils/tenantRole.ts`，并新增一条读取后端 `roles.py` 的一致性测试，防止两侧角色集合再次漂移。
-
 - 生产 Worker 容器启动即失败：`deploy/scripts/app-entrypoint.sh` 执行的是 `octop workbuddy-worker`，而命令行只提供 `octop workbuddy worker`（组 + 子命令），容器会以「No such command」退出。同步修正 `docs/architecture.md`、`.env.example` 与 CHANGELOG 中的同一处写法，并新增 `tests/unit/test_deploy_cli_commands.py`：解析 `deploy/scripts/*.sh` 中所有 `octop …` 调用并与真实命令行注册表比对，防止部署脚本与命令面再次漂移。
 - WorkBuddy 作业状态：此前没有任何路径把作业从 `queued` 置为 `running`，正在执行的作业对客户端仍显示 `queued`；新增 `start_job`（同时写入 `started_at`）。
 - WorkBuddy 作业结果写入：`finish_job` 未按 jsonb 绑定 `result`，任何以对象作为结果的作业都会在写入时失败。

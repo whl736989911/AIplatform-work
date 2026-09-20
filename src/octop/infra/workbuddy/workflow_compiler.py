@@ -55,7 +55,9 @@ MAX_DIAGNOSTICS = 20
 #: carries prose for a repair hint.
 DIAGNOSTIC_HINT_PREFIX = "workflowDiagnostics"
 
-NODE_TYPES = frozenset({"tool", "llm", "condition", "approval", "transform"})
+NODE_TYPES = frozenset(
+    {"tool", "llm", "condition", "approval", "transform", "input", "knowledge", "output"}
+)
 ACTIVATABLE_VERSION_ORIGINS = frozenset({"save", "rollback", "promotion", "import"})
 CANDIDATE_VERSION_ORIGINS = frozenset({"proposal"})
 VERSION_ORIGINS = ACTIVATABLE_VERSION_ORIGINS | CANDIDATE_VERSION_ORIGINS
@@ -86,6 +88,9 @@ WORKFLOW_CEL_INVALID = "WORKFLOW_CEL_INVALID"
 WORKFLOW_TOOL_UNAVAILABLE = "WORKFLOW_TOOL_UNAVAILABLE"
 WORKFLOW_KNOWLEDGE_BASE_UNKNOWN = "WORKFLOW_KNOWLEDGE_BASE_UNKNOWN"
 WORKFLOW_APPROVER_INVALID = "WORKFLOW_APPROVER_INVALID"
+WORKFLOW_INPUT_NODE_UNKNOWN = "WORKFLOW_INPUT_NODE_UNKNOWN"
+WORKFLOW_OUTPUT_NOT_TERMINAL = "WORKFLOW_OUTPUT_NOT_TERMINAL"
+WORKFLOW_OUTPUT_DUPLICATE = "WORKFLOW_OUTPUT_DUPLICATE"
 WORKFLOW_VERSION_HASH_MISMATCH = "WORKFLOW_VERSION_HASH_MISMATCH"
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -152,6 +157,8 @@ TEMPLATE_FIELD_PATHS: Mapping[str, str] = {
     "llm": "prompt",
     "transform": "input",
     "approval": "approval_message",
+    "knowledge": "query",
+    "output": "value",
 }
 
 
@@ -897,21 +904,48 @@ class _Compiler:
         for compiled_edge in self.effective_edges:
             self.outgoing[compiled_edge.from_node_id].append(compiled_edge)
             self.incoming[compiled_edge.to_node_id].append(compiled_edge)
+
+        # An explicit output node is the run's result: at most one, and nothing
+        # may follow it (a successor would make "what the run produced" ambiguous).
+        output_nodes = sorted(
+            str(node["id"]) for node in self.nodes if str(node.get("type")) == "output"
+        )
+        if len(output_nodes) > 1:
+            collector.refuse(
+                WORKFLOW_OUTPUT_DUPLICATE,
+                f"a workflow declares at most one output node; found {len(output_nodes)}",
+                details={"output_nodes": output_nodes},
+            )
+        for node_id in output_nodes:
+            if self.outgoing[node_id]:
+                collector.refuse(
+                    WORKFLOW_OUTPUT_NOT_TERMINAL,
+                    f"output node {node_id!r} must be terminal",
+                    path=f"nodes.{node_id}.config.value",
+                )
         collector.raise_if_any("edges")
 
     def check_topology(self) -> None:
         collector = _DiagnosticCollector()
         entries = sorted(node_id for node_id in self.node_ids if not self.incoming[node_id])
-        if len(entries) != 1:
+        node_type_by_id = {str(node["id"]): str(node.get("type")) for node in self.nodes}
+        # Explicit ``input`` nodes are sources of the graph by design: several may
+        # feed one pipeline, so only the *other* roots are counted as entries.
+        # A definition without input nodes keeps the original rule exactly.
+        non_input_entries = [
+            node_id for node_id in entries if node_type_by_id.get(node_id) != "input"
+        ]
+        if len(non_input_entries) > 1:
             collector.refuse(
                 WORKFLOW_ENTRY_COUNT,
-                f"workflow needs exactly one entry node; found {len(entries)}",
-                details={"entry_candidates": entries},
+                "workflow needs exactly one entry node besides its explicit input nodes;"
+                f" found {len(non_input_entries)}",
+                details={"entry_candidates": non_input_entries},
             )
             # Reachability and ancestry are defined relative to that one entry.
             collector.raise_if_any("topology")
             return
-        self.entry_node_id = entries[0]
+        self.entry_node_id = non_input_entries[0] if non_input_entries else entries[0]
 
         indegree = {node_id: len(self.incoming[node_id]) for node_id in self.node_ids}
         ready = list(entries)
@@ -940,8 +974,11 @@ class _Compiler:
             return
         self.topological_order = tuple(order)
 
-        reached = {self.entry_node_id}
-        pending = [self.entry_node_id]
+        # Every source starts the run: explicit ``input`` nodes are roots by
+        # design, so reachability is measured from all of them.  A definition
+        # without input nodes has exactly one root and behaves as before.
+        reached = set(entries)
+        pending = list(entries)
         while pending:
             current = pending.pop()
             for edge in self.outgoing[current]:
@@ -952,7 +989,7 @@ class _Compiler:
         if unreachable:
             collector.refuse(
                 WORKFLOW_UNREACHABLE,
-                "workflow has nodes that are not reachable from the entry node",
+                "workflow has nodes that are not reachable from its sources",
                 details={"unreachable_nodes": unreachable},
             )
 
@@ -1034,6 +1071,18 @@ class _Compiler:
             node_id = str(node["id"])
             node_type = str(node.get("type"))
             config = node.get("config") or {}
+            if node_type == "input":
+                # An explicit input node surfaces one declared input into the
+                # graph; naming an undeclared one would read as "no input" at run
+                # time, so it is refused while the definition is still a draft.
+                declared = str(config.get("input"))
+                if declared not in self.input_names:
+                    collector.refuse(
+                        WORKFLOW_INPUT_NODE_UNKNOWN,
+                        f"input node {node_id!r} names undeclared input {declared!r}",
+                        path=f"nodes.{node_id}.config.input",
+                    )
+                continue
             field = TEMPLATE_FIELD_PATHS.get(node_type)
             if field is not None and field in config:
                 field_path = f"nodes.{node_id}.config.{field}"
@@ -1081,7 +1130,10 @@ class _Compiler:
         *,
         require_semantic_resolution: bool,
     ) -> str:
-        needed = any(str(node.get("type")) in {"tool", "llm", "approval"} for node in self.nodes)
+        needed = any(
+            str(node.get("type")) in {"tool", "llm", "approval", "knowledge"}
+            for node in self.nodes
+        )
         if not needed:
             return "not_required"
         if resolver is None:
@@ -1114,6 +1166,17 @@ class _Compiler:
                     fallback_message="no tenant model is configured for this llm node",
                     path=f"nodes.{node_id}.config.model",
                 )
+                for index, knowledge_base_id in enumerate(config.get("knowledge_base_ids") or []):
+                    self._apply_decision(
+                        collector,
+                        resolver.check_knowledge_base(str(knowledge_base_id)),
+                        fallback_code=WORKFLOW_KNOWLEDGE_BASE_UNKNOWN,
+                        fallback_message="knowledge base is not visible in this tenant",
+                        path=f"nodes.{node_id}.config.knowledge_base_ids[{index}]",
+                    )
+            elif node_type == "knowledge":
+                # Retrieval is its own step now; its sources must be reachable for
+                # the caller exactly like an llm node's knowledge bases.
                 for index, knowledge_base_id in enumerate(config.get("knowledge_base_ids") or []):
                     self._apply_decision(
                         collector,
