@@ -242,6 +242,8 @@
     "APPROVAL_BINDING_CHANGED": "审批目标或参数已变化，需重新审批。",
     "APPROVAL_EXPIRED": "该审批已过期。",
     "APPROVAL_NO_VALID_APPROVER": "声明的审批人当前均无效。",
+    "ASK_NO_VALID_ASSIGNEE": "该填写节点声明的受派人当前均无效。",
+    "INPUT_REQUEST_EXPIRED": "该问题已超过截止时间，运行已按超时规则结束。",
     "RECONCILIATION_EVIDENCE_INVALID": "对账证据缺失或无法核验。",
     "WORKBUDDY_IDEMPOTENCY_CONFLICT": "同一幂等键对应了不同的请求内容。",
     "WORKBUDDY_EXECUTION_NOT_CANCELLABLE": "该执行已无法取消。",
@@ -6432,6 +6434,7 @@
           "pending": "待处理",
           "running": "运行中",
           "waiting_approval": "等待审批",
+          "waiting_input": "等待填写",
           "succeeded": "成功",
           "failed": "失败",
           "partial": "部分成功",
@@ -7552,17 +7555,76 @@
     },
     "inbox": {
       "title": "收件箱",
-      "subtitle": "待你审批与待你审阅，集中在一处。",
+      "subtitle": "待你审批、待你填写与待你审阅，集中在一处。",
+      "state": {
+        "errorFallback": "服务端未说明失败原因。"
+      },
       "approvalsTitle": "待我审批",
+      "inputsTitle": "待我填写",
       "proposalsTitle": "待我审阅的提案",
       "proposalsEmpty": "没有待你审阅的提案。",
       "proposalsScope": "范围：全租户处于「待审」状态的提案。提案接口目前没有「审阅人过滤」参数，因此这里不只是指派给你的提案。",
-      "proposalsEmptyHint": "有提案进入待审且仍需审阅人时，会出现在这里。"
+      "proposalsEmptyHint": "有提案进入待审且仍需审阅人时，会出现在这里。",
+      "inputs": {
+        "title": "待填写的问题",
+        "description": "运行中途向你提出的问题；提交答案后，该次运行会继续。",
+        "loadFailed": "加载待填写问题失败",
+        "emptyTitle": "暂无待填写的问题",
+        "emptyHint": "当某次运行到达提问节点并将你列为填写人时，问题会出现在这里。",
+        "scope": {
+          "self": "我的问题",
+          "tenant": "租户范围"
+        },
+        "filterAll": "全部状态",
+        "column": {
+          "status": "状态",
+          "prompt": "问题",
+          "node": "节点",
+          "execution": "执行",
+          "expiresAt": "截止时间",
+          "createdAt": "创建时间",
+          "actions": "操作"
+        },
+        "status": {
+          "open": "待填写",
+          "submitted": "已提交",
+          "expired": "已过期",
+          "invalidated": "已失效"
+        },
+        "overdue": "已超过截止时间",
+        "overdueHint": "该问题已超过运行声明的截止时间，服务端可能已将其视为过期；状态仍以服务端为准。",
+        "answer": "填写",
+        "view": "查看",
+        "answerTitle": "填写问题",
+        "detailTitle": "问题 {{id}}",
+        "detailLoadFailed": "加载该问题失败",
+        "overview": "概览",
+        "prompt": "问题",
+        "node": "节点",
+        "execution": "执行",
+        "expiresAt": "截止时间",
+        "createdAt": "创建时间",
+        "submittedAt": "提交时间",
+        "none": "—",
+        "noOpenTitle": "该运行当前没有待填写的问题",
+        "noOpenHint": "问题可能已经有人提交，或已经被关闭；刷新列表可以看到最新状态。",
+        "closedTitle": "该问题已关闭",
+        "closedHint": "只有待填写的问题可以提交答案。下面是服务端记录的答案。",
+        "submittedValues": "已提交的答案",
+        "noValues": "该问题没有记录答案。",
+        "noFieldsTitle": "该问题没有可填写的字段",
+        "noFieldsHint": "运行提出的表单没有任何字段，这里无法构造答案；请检查节点定义。",
+        "fieldRequired": "请填写「{{label}}」",
+        "submit": "提交答案",
+        "submitted": "答案已提交，运行将继续。",
+        "submitFailed": "提交答案失败"
+      }
     },
     "runs": {
       "title": "运行",
       "subtitle": "跨工作流的执行记录；点开任意一条可看逐节点过程。",
       "empty": "还没有执行记录。",
+      "answer": "等待填写",
       "columnWorkflow": "工作流",
       "columnStatus": "状态",
       "columnTrigger": "触发方式",
@@ -7579,6 +7641,9 @@
     },
     "WORKFLOW_SAVE_AS_DUPLICATE": {
       "hint": "save_as 键重复：每个节点写入的结果键只允许一个产出者，改掉冲突的 save_as。"
+    },
+    "WORKFLOW_ASK_FIELDS_DUPLICATE": {
+      "hint": "填写节点的字段名重复：字段名就是提交结果的键，同一节点内必须唯一。"
     },
     "WORKFLOW_EDGE_UNKNOWN_NODE": {
       "hint": "边指向了不存在的节点：检查 source/target 是否是已声明节点的 id（或该节点已被删除）。"

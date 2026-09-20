@@ -2,29 +2,40 @@
  * WorkBuddy console → Inbox (/workbuddy/inbox).
  *
  * The one surface for "something is waiting on me": approvals addressed to the
- * caller and proposals that still need an independent review. Both panes are
- * existing panels — the approvals pane *is* Approvals/ApprovalInboxPanel (it
- * already defaults to scope=self, status=pending, i.e. exactly "mine, still
- * pending") and the proposals pane reuses the proposals detail/review panel
- * through the one list this page adds. No panel logic is duplicated here.
+ * caller, questions a run asked them (the ``ask`` node's form), and proposals
+ * that still need an independent review. Every pane is an existing panel — the
+ * approvals pane *is* Approvals/ApprovalInboxPanel (it already defaults to
+ * scope=self, status=pending, i.e. exactly "mine, still pending"), the questions
+ * pane lists the caller's own input requests, and the proposals pane reuses the
+ * proposals detail/review panel through the one list this page adds. No panel
+ * logic is duplicated here.
+ *
+ * The inbox is meant to have one more pane — output review (A-09) — which does
+ * not exist yet: this page shows the three panes it has and invents nothing.
  */
 
 import { useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { ClipboardCheck, Gavel } from "lucide-react";
+import { ClipboardCheck, Gavel, PenLine } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import PageShell from "../../../layouts/PageShell";
 import TabBar, { type TabBarItem } from "../../../components/TabLabel/TabBar";
 import ApprovalInboxPanel from "../Approvals/ApprovalInboxPanel";
+import InputInboxPanel from "./InputInboxPanel";
 import ProposalsReviewPanel from "./ProposalsReviewPanel";
 
-type InboxTabKey = "approvals" | "proposals";
+type InboxTabKey = "approvals" | "inputs" | "proposals";
 
 const TAB_ITEMS: readonly TabBarItem<InboxTabKey>[] = [
   {
     key: "approvals",
     labelKey: "workbuddy.inbox.approvalsTitle",
     icon: Gavel,
+  },
+  {
+    key: "inputs",
+    labelKey: "workbuddy.inbox.inputsTitle",
+    icon: PenLine,
   },
   {
     key: "proposals",
@@ -35,6 +46,7 @@ const TAB_ITEMS: readonly TabBarItem<InboxTabKey>[] = [
 
 const TAB_KEYS: Record<InboxTabKey, true> = {
   approvals: true,
+  inputs: true,
   proposals: true,
 };
 
@@ -70,6 +82,7 @@ export default function InboxPage() {
       }
     >
       {activeTab === "approvals" && <ApprovalInboxPanel />}
+      {activeTab === "inputs" && <InputInboxPanel />}
       {activeTab === "proposals" && <ProposalsReviewPanel />}
     </PageShell.Tabbed>
   );

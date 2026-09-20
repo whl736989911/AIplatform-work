@@ -9,6 +9,8 @@
  *   GET  /v1/executions/{id}/reconciliations
  *   GET  /v1/approval-requests             GET /v1/approval-requests/{id}
  *   POST /v1/approval-requests/{id}/challenge
+ *   GET  /v1/input-requests                GET /v1/executions/{id}/input-requests
+ *   POST /v1/executions/{id}/input-requests/{input_request_id}/answer
  *   GET  /v1/notifications                 POST /v1/notifications/{id}/read
  *
  * Two invariants this module never breaks:
@@ -68,6 +70,9 @@ export const EXECUTION_STATUSES = [
   "pending",
   "running",
   "waiting_approval",
+  // Migration 034 added ``waiting_input`` to both CHECK constraints: the run is
+  // alive and parked on a question (``ask`` node) rather than on a decision.
+  "waiting_input",
   "succeeded",
   "failed",
   "partial",
@@ -342,6 +347,90 @@ export interface ApprovalChallenge {
   expires_in: number;
 }
 
+// --- input requests --------------------------------------------------------
+
+export const INPUT_REQUEST_STATUSES = [
+  "open",
+  "submitted",
+  "expired",
+  "invalidated",
+] as const;
+export type InputRequestStatus = (typeof INPUT_REQUEST_STATUSES)[number];
+
+/** The kinds of answer a question may declare (mirrors ``ASK_FIELD_TYPES``). */
+export const INPUT_FIELD_TYPES = [
+  "string",
+  "text",
+  "integer",
+  "number",
+  "boolean",
+  "date",
+  "select",
+] as const;
+export type InputFieldType = (typeof INPUT_FIELD_TYPES)[number];
+
+export const INPUT_ASSIGNEE_STATUSES = [
+  "pending",
+  "answered",
+  "abstained",
+  "invalidated",
+] as const;
+export type InputAssigneeStatus = (typeof INPUT_ASSIGNEE_STATUSES)[number];
+
+/** One field of a question: what to render, and what the answer must satisfy. */
+export interface InputField {
+  name: string;
+  label: string;
+  type: InputFieldType;
+  /** Absent means required — the server applies ``required: true`` by default. */
+  required?: boolean;
+  placeholder?: string;
+  /** The only values a ``select`` accepts. */
+  options?: string[];
+}
+
+/**
+ * The form a question was asked with, stored beside the asking node's own
+ * snapshot (node name, assignees, timeout). ``fields`` is the part an answer is
+ * checked against; the other keys are that node's context.
+ */
+export interface InputForm {
+  fields: InputField[];
+}
+
+/** Who may answer a question, and whether they already did. */
+export interface InputAssignee {
+  user_id: number;
+  department_id: string | null;
+  status: InputAssigneeStatus;
+  submitted_at: string | null;
+}
+
+/** One question a run is parked on, as both list routes answer it. */
+export interface InputRequest {
+  id: string;
+  execution_id: string;
+  node_id: string;
+  status: InputRequestStatus;
+  prompt: string;
+  form: InputForm;
+  /** The answer that was submitted; ``null`` while the question is open. */
+  values: JsonObject | null;
+  expires_at: string | null;
+  submitted_by_user_id: number | null;
+  submitted_at: string | null;
+  created_at: string;
+  assignees: InputAssignee[];
+}
+
+/**
+ * An answer to one question: exactly the form's declared field names. A key the
+ * form does not declare is refused, so the UI sends only what it rendered.
+ */
+export interface InputAnswerRequest {
+  values: JsonObject;
+}
+
 // --- notifications ---------------------------------------------------------
 
 export interface WorkBuddyNotification {
@@ -373,6 +462,12 @@ export interface ApprovalListQuery {
 
 export interface NotificationListQuery {
   unread_only?: boolean;
+  limit?: number;
+}
+
+export interface InputRequestListQuery {
+  scope?: WorkBuddyScope;
+  status?: InputRequestStatus | "";
   limit?: number;
 }
 
@@ -446,6 +541,31 @@ export const workbuddyRuntimeApi = {
       expires_in: body.expires_in,
     };
   },
+
+  // Input requests — the questions a run asked, and the answers to them. Both
+  // list routes answer with the form, because a client that shows a question
+  // has to render the fields its answer will be checked against.
+  listInputRequests: (query: InputRequestListQuery = {}) =>
+    unwrapItems<InputRequest>(
+      withQuery(`${BASE}/input-requests`, {
+        scope: query.scope,
+        status: query.status,
+        limit: query.limit,
+      }),
+    ),
+  listExecutionInputRequests: (executionId: string) =>
+    unwrapItems<InputRequest>(
+      `${BASE}/executions/${encodeURIComponent(executionId)}/input-requests`,
+    ),
+  answerInputRequest: (
+    executionId: string,
+    inputRequestId: string,
+    body: InputAnswerRequest,
+  ) =>
+    unwrap<Execution>(
+      `${BASE}/executions/${encodeURIComponent(executionId)}/input-requests/${encodeURIComponent(inputRequestId)}/answer`,
+      jsonInit("POST", body),
+    ),
 
   // Notifications — the caller's own rows only.
   listNotifications: (query: NotificationListQuery = {}) =>

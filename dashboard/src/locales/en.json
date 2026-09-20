@@ -242,6 +242,8 @@
     "APPROVAL_BINDING_CHANGED": "The approved target or parameters changed; approve again.",
     "APPROVAL_EXPIRED": "This approval has expired.",
     "APPROVAL_NO_VALID_APPROVER": "No declared approver is currently effective.",
+    "ASK_NO_VALID_ASSIGNEE": "No declared assignee for this question is currently effective.",
+    "INPUT_REQUEST_EXPIRED": "The question passed its deadline; the run was settled by the timeout rule.",
     "RECONCILIATION_EVIDENCE_INVALID": "The reconciliation evidence is missing or not verifiable.",
     "WORKBUDDY_IDEMPOTENCY_CONFLICT": "The idempotency key was used with a different request.",
     "WORKBUDDY_EXECUTION_NOT_CANCELLABLE": "The execution can no longer be canceled.",
@@ -6293,6 +6295,7 @@
           "pending": "Pending",
           "running": "Running",
           "waiting_approval": "Waiting for approval",
+          "waiting_input": "Waiting for input",
           "succeeded": "Succeeded",
           "failed": "Failed",
           "partial": "Partial",
@@ -7413,17 +7416,76 @@
     },
     "inbox": {
       "title": "Inbox",
-      "subtitle": "Approvals and reviews that need you, in one place.",
+      "subtitle": "Approvals, questions and reviews that need you, in one place.",
+      "state": {
+        "errorFallback": "The server did not say why it failed."
+      },
       "approvalsTitle": "Waiting on my approval",
+      "inputsTitle": "Waiting on my answer",
       "proposalsTitle": "Proposals awaiting my review",
       "proposalsEmpty": "No proposals are waiting for your review.",
       "proposalsScope": "Scope: every proposal in the under-review state across this tenant. The proposals route has no reviewer filter yet, so this is not limited to proposals assigned to you.",
-      "proposalsEmptyHint": "Under-review proposals appear here as soon as one is opened and still needs a reviewer."
+      "proposalsEmptyHint": "Under-review proposals appear here as soon as one is opened and still needs a reviewer.",
+      "inputs": {
+        "title": "Questions to fill in",
+        "description": "Questions a run asked you halfway through; answering one lets that run continue.",
+        "loadFailed": "Failed to load the questions waiting on you",
+        "emptyTitle": "Nothing to fill in",
+        "emptyHint": "Questions appear here as soon as a run reaches an ask node that lists you as an assignee.",
+        "scope": {
+          "self": "My questions",
+          "tenant": "Tenant scope"
+        },
+        "filterAll": "All statuses",
+        "column": {
+          "status": "Status",
+          "prompt": "Question",
+          "node": "Node",
+          "execution": "Execution",
+          "expiresAt": "Deadline",
+          "createdAt": "Created",
+          "actions": "Actions"
+        },
+        "status": {
+          "open": "Open",
+          "submitted": "Submitted",
+          "expired": "Expired",
+          "invalidated": "Invalidated"
+        },
+        "overdue": "Past its deadline",
+        "overdueHint": "This question is past the deadline its run declared, so the server may already treat it as expired; the server's own status stays authoritative.",
+        "answer": "Fill in",
+        "view": "View",
+        "answerTitle": "Answer a question",
+        "detailTitle": "Question {{id}}",
+        "detailLoadFailed": "Failed to load the question",
+        "overview": "Overview",
+        "prompt": "Question",
+        "node": "Node",
+        "execution": "Execution",
+        "expiresAt": "Deadline",
+        "createdAt": "Created",
+        "submittedAt": "Submitted",
+        "none": "—",
+        "noOpenTitle": "This run has no question waiting on you",
+        "noOpenHint": "Someone may have answered it already, or it was closed; refreshing the list shows the current state.",
+        "closedTitle": "This question is closed",
+        "closedHint": "Only an open question accepts an answer. What the server recorded is below.",
+        "submittedValues": "Submitted answer",
+        "noValues": "No answer is recorded for this question.",
+        "noFieldsTitle": "This question has no fields to fill in",
+        "noFieldsHint": "The form the run asked with declares no fields, so no answer can be built here; check the node definition.",
+        "fieldRequired": "Fill in \"{{label}}\"",
+        "submit": "Submit answer",
+        "submitted": "Answer submitted; the run will continue.",
+        "submitFailed": "Failed to submit the answer"
+      }
     },
     "runs": {
       "title": "Runs",
       "subtitle": "Executions across workflows; open one to inspect its steps.",
       "empty": "No executions yet.",
+      "answer": "Waiting on input",
       "columnWorkflow": "Workflow",
       "columnStatus": "Status",
       "columnTrigger": "Trigger",
@@ -7439,7 +7501,10 @@
       "hint": "Node ids must be unique: rename the duplicate node or merge the two into one."
     },
     "WORKFLOW_SAVE_AS_DUPLICATE": {
-      "hint": "Duplicate save_as key: each result key may have exactly one producer — rename the conflicting save_as."
+      "hint": "Duplicate save_as key: each output key may have one producer; rename the conflicting save_as."
+    },
+    "WORKFLOW_ASK_FIELDS_DUPLICATE": {
+      "hint": "Duplicate field name in a question node: field names are the keys of the answer and must be unique inside one node."
     },
     "WORKFLOW_EDGE_UNKNOWN_NODE": {
       "hint": "An edge points at a node that does not exist: check that source/target name a declared node id."

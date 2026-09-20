@@ -7,10 +7,12 @@
  * detail drawer (steps, edge decisions, reconciliation evidence) instead of a
  * second, thinner rendering of the same execution.
  *
- * Nothing on this page mutates an execution — the row action is a read. The
- * workflow filter can arrive in the URL (`?workflow=<id>`, e.g. from a link on
- * the dashboard) and the picker writes it back, so a filtered view is
- * shareable, visibly labelled and always clearable.
+ * Nothing on this page edits an execution: the detail action is a read, and the
+ * one write it offers — answering a question a run is parked on — goes through
+ * the inbox's answer drawer and the execution's own answer route, which is the
+ * run's only way forward. The workflow filter can arrive in the URL
+ * (`?workflow=<id>`, e.g. from a link on the dashboard) and the picker writes it
+ * back, so a filtered view is shareable, visibly labelled and always clearable.
  *
  * No data is fabricated: an unmerged slice (404/501) or a real failure renders
  * the shared informational / error state, and a workflow the name lookup does
@@ -21,7 +23,7 @@ import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Segmented, Select, Space, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { Eye, RefreshCw } from "lucide-react";
+import { Eye, PenLine, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import PageShell from "../../../layouts/PageShell";
 import { ResizableTable } from "../../../components/ResizableTable";
@@ -46,6 +48,7 @@ import {
   type WorkflowOption,
 } from "../Workflows/consoleState";
 import ExecutionDetailDrawer from "../Workflows/ExecutionDetailDrawer";
+import AnswerDrawer from "../Inbox/AnswerDrawer";
 
 const { Text } = Typography;
 
@@ -54,6 +57,8 @@ function statusColor(status: ExecutionStatus): string {
   if (status === "succeeded") return "green";
   if (status === "failed") return "red";
   if (status === "waiting_approval") return "gold";
+  // A run parked on a question is waiting on a person, not on its own work.
+  if (status === "waiting_input") return "cyan";
   if (status === "partial") return "orange";
   return "default";
 }
@@ -65,6 +70,9 @@ export default function RunsPage() {
   const [scope, setScope] = useState<WorkBuddyScope>("self");
   const [status, setStatus] = useState<ExecutionStatus | "">("");
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [answerExecutionId, setAnswerExecutionId] = useState<string | null>(
+    null,
+  );
 
   const workflowId = searchParams.get("workflow");
 
@@ -160,17 +168,32 @@ export default function RunsPage() {
     {
       title: t("workbuddy.workflows.executions.column.actions"),
       key: "actions",
-      width: 120,
+      width: 200,
       fixed: "right",
       render: (_value, row) => (
-        <Button
-          type="link"
-          size="small"
-          icon={<Eye size={13} />}
-          onClick={() => setDetailId(row.id)}
-        >
-          {t("workbuddy.shared.open")}
-        </Button>
+        <Space size={4}>
+          <Button
+            type="link"
+            size="small"
+            icon={<Eye size={13} />}
+            onClick={() => setDetailId(row.id)}
+          >
+            {t("workbuddy.shared.open")}
+          </Button>
+          {/* The row status is the same fact the execution detail reports as
+              ``wait_reasons: ["input"]``; the drawer reads the questions of
+              this execution through the execution's own list route. */}
+          {row.status === "waiting_input" && (
+            <Button
+              type="link"
+              size="small"
+              icon={<PenLine size={13} />}
+              onClick={() => setAnswerExecutionId(row.id)}
+            >
+              {t("workbuddy.runs.answer")}
+            </Button>
+          )}
+        </Space>
       ),
     },
   ];
@@ -261,7 +284,7 @@ export default function RunsPage() {
           columns={columns}
           dataSource={executions.data}
           pagination={false}
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1080 }}
           storageKey="workbuddy-runs"
         />
       )}
@@ -269,6 +292,13 @@ export default function RunsPage() {
       <ExecutionDetailDrawer
         executionId={detailId}
         onClose={() => setDetailId(null)}
+      />
+
+      <AnswerDrawer
+        executionId={answerExecutionId}
+        inputRequestId={null}
+        onClose={() => setAnswerExecutionId(null)}
+        onAnswered={() => void executions.reload()}
       />
     </PageShell>
   );
