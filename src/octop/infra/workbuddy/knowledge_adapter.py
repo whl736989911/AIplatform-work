@@ -54,12 +54,7 @@ SOURCES: tuple[str, ...] = (SOURCE_PERSONAL, SOURCE_DUAL, SOURCE_ENTERPRISE)
 
 KNOWLEDGE_SOURCE_ENV = "OCTOP_KNOWLEDGE_SOURCE"
 
-# The personal schema's own default, used when the tenant row has no cap of its
-# own (``max_documents`` is a personal-edition column; B-10 carries it over).
-DEFAULT_MAX_DOCUMENTS = 100
-
 __all__ = [
-    "DEFAULT_MAX_DOCUMENTS",
     "KNOWLEDGE_SOURCE_ENV",
     "SOURCE_DUAL",
     "SOURCE_ENTERPRISE",
@@ -166,6 +161,7 @@ def mirror_base(server: Any, *, user_id: int, base: Any) -> str | None:
             model=model,
             created_by_user_id=user_id,
             owner_user_id=None if shared else user_id,
+            max_documents=getattr(base, "max_documents", None),
         )
         return row.kb_id
     except WorkBuddyPostgresRequiredError:
@@ -191,6 +187,7 @@ def project_bases(server: Any, *, user_id: int, is_admin: bool) -> list[dict[str
         repo = WorkBuddyKnowledgeRepo(db)
         rows = repo.list_bases(ctx)
         documents = {row.kb_id: repo.list_documents(ctx, row.kb_id) for row in rows}
+        opened = repo.default_open_bases(ctx, user_id=user_id)
     except WorkBuddyPostgresRequiredError:
         return None
     except Exception as exc:  # noqa: BLE001 - a read must degrade, not fail
@@ -201,16 +198,24 @@ def project_bases(server: Any, *, user_id: int, is_admin: bool) -> list[dict[str
         for row in rows
         if is_admin or row.scope != SOURCE_PERSONAL or row.owner_user_id == user_id
     ]
-    return [project_base(row, doc_count=len(documents.get(row.kb_id, ()))) for row in visible]
+    return [
+        project_base(
+            row,
+            doc_count=len(documents.get(row.kb_id, ())),
+            default_open=opened.get(row.kb_id, False),
+        )
+        for row in visible
+    ]
 
 
-def project_base(row: WorkBuddyKnowledgeBaseRow, *, doc_count: int = 0) -> dict[str, Any]:
+def project_base(
+    row: WorkBuddyKnowledgeBaseRow, *, doc_count: int = 0, default_open: bool = False
+) -> dict[str, Any]:
     """Render one tenant row in the personal payload shape.
 
-    Fields the tenant schema does not carry yet are projected with the personal
-    edition's own defaults: ``default_open`` is a preference (B-13 maps it),
-    ``icon_name`` has no tenant column, and ``max_documents`` falls back to the
-    personal default until B-10 carries the cap over.
+    ``default_open`` is the *calling member's* preference (schema v54 keeps it per
+    member, because a tenant base is opened by many people); ``icon_name`` has no
+    tenant column and is projected empty.
     """
     return {
         "id": row.kb_id,
@@ -222,13 +227,13 @@ def project_base(row: WorkBuddyKnowledgeBaseRow, *, doc_count: int = 0) -> dict[
         else row.created_by_user_id,
         "name": row.name,
         "description": row.description,
-        "default_open": False,
+        "default_open": bool(default_open),
         "shared": row.scope != SOURCE_PERSONAL,
         "icon_name": "",
         "embedding_model": row.embedding_model_key,
         "embedding_dim": row.embedding_dimensions,
         "doc_count": int(doc_count),
-        "max_documents": DEFAULT_MAX_DOCUMENTS,
+        "max_documents": int(row.max_documents),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }

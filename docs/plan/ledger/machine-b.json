@@ -2,7 +2,7 @@
   "machine": "machine-B",
   "line": "B",
   "owner": "machine-B（权限与知识库）",
-  "updated": "2026-09-20T04:40:00Z",
+  "updated": "2026-09-20T05:30:00Z",
   "batches": {
     "1": {
       "state": "done",
@@ -53,8 +53,8 @@
       ],
       "pr": null,
       "commits": [],
-      "evidence": "B-12 第一步（适配层接缝）：新增 tests/unit/workbuddy/test_workbuddy_knowledge_adapter_postgresql.py 6 项（开关默认/拼错回退、镜像幂等、shared→enterprise 范围、无租户与无授权模型不写不炸、投影字段集与个人载荷一致）全通过；个人版路径零回归：tests/unit/api/test_knowledge_bases.py + tests/unit/knowledge + tests/integration/test_knowledge_bases_api.py = 103 passed；ruff/format 与 mypy --strict 545 文件 0 错。",
-      "notes": "已完成：knowledge_adapter.py（开关解析、镜像、投影、无租户/无模型/SQLite 的优雅回退）与 knowledge_bases.py 的四条挂钩（列表投影、创建/更新镜像、删除按名归档企业孪生），全部 best-effort 且默认零行为变化。**未完成**：B-10 全部（个人版能力并入企业侧：文本型文档/文件夹/预览/抽取文本下载/单·整库重建索引/默认打开库/每库上限/KB 级 OCR）；B-12 的文档级镜像（设计上交给 B-08/B-13 的迁移通道）、default_open/icon_name/max_documents 的保真（等 B-13 偏好映射与 B-10 的每库上限）、以及「开关打开时」的路由级集成用例（当前只有适配层级用例 + 默认路径的 103 项回归）。状态：停在自有分支 feat/rbac-kb-adapter，未合并（§5.3；integrator 的 verified[2] 仍未出现，next_batch 仍为 2）。"
+      "evidence": "B-12 第一步（适配层接缝）与 B-10 第一批（每库上限 + 每成员默认打开）均自测通过。新增 tests/unit/workbuddy/test_workbuddy_knowledge_adapter_postgresql.py 6 项、tests/unit/workbuddy/test_workbuddy_knowledge_cap_postgresql.py 4 项（真实 PG）全通过；回归：tests/unit/db + tests/unit/knowledge + tests/unit/api/test_knowledge_bases.py + tests/unit/workbuddy = 627 passed / 3 skipped；ruff/format 与 mypy --strict 545 文件 0 错。",
+      "notes": "已完成：①B-12 适配层（knowledge_adapter.py：开关解析/镜像/投影/优雅回退 + knowledge_bases.py 四条挂钩，默认零行为变化）；②B-10 第一批（迁移 054：workbuddy_knowledge_bases.max_documents + workbuddy_knowledge_preferences 每成员默认打开，仓库方法 update_base_settings/document_cap_reached/set_default_open/default_open_bases，投影保真）。**未完成（B-10 余项）**：文件夹、预览、抽取文本下载、单·整库重建索引、文本型文档类型面、KB 级 OCR（后者受 integrator.blocked[knowledge-onnx] 影响，先不做）；以及这些能力的前端（知识库页）与路由/清单接线。B-12 余项：文档级镜像（设计上交 B-08/B-13 迁移通道）、icon_name 保真（租户表无该列）。状态：停在 feat/rbac-kb-adapter，未合并（§5.3；integrator verified[2] 仍未出现，next_batch=2）。"
     },
     "5": {
       "state": "pending",

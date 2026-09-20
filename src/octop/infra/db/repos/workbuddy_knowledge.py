@@ -93,6 +93,12 @@ class WorkBuddyPlatformModelRevisionRow:
         )
 
 
+# The per-base cap the personal edition has enforced since v10, and the ceiling
+# the ingestion path will accept (schema v54 holds the same bound).
+MAX_DOCUMENTS_PER_BASE = 100000
+DEFAULT_MAX_DOCUMENTS = 100
+
+
 @dataclass(frozen=True, slots=True)
 class WorkBuddyKnowledgeBaseRow:
     kb_id: str
@@ -111,6 +117,9 @@ class WorkBuddyKnowledgeBaseRow:
     created_by_user_id: int
     created_at: int
     updated_at: int
+    # Schema v54 adds the per-base cap. Callers that build the row by hand get the
+    # personal edition's default, which is what a base created before v54 holds.
+    max_documents: int = DEFAULT_MAX_DOCUMENTS
 
     @property
     def is_archived(self) -> bool:
@@ -131,6 +140,7 @@ class WorkBuddyKnowledgeBaseRow:
             embedding_model_key=str(row["embedding_model_key"]),
             embedding_revision=int(row["embedding_revision"]),
             embedding_dimensions=int(row["embedding_dimensions"]),
+            max_documents=int(row["max_documents"]),
             archived_at=_int_or_none(row, "archived_at"),
             created_by_user_id=int(row["created_by_user_id"]),
             created_at=int(row["created_at"]),
@@ -488,8 +498,8 @@ class DeliveryClaim:
 _BASE_COLUMNS = (
     "kb_id, tenant_id, scope, owner_user_id, department_id, name, description, "
     "embedding_model_revision_id, embedding_adapter_key, embedding_model_key, "
-    "embedding_revision, embedding_dimensions, archived_at, created_by_user_id, "
-    "created_at, updated_at"
+    "embedding_revision, embedding_dimensions, max_documents, archived_at, "
+    "created_by_user_id, created_at, updated_at"
 )
 
 
@@ -551,6 +561,7 @@ class WorkBuddyKnowledgeRepo:
         kb_id: str | None = None,
         owner_user_id: int | None = None,
         department_id: str | None = None,
+        max_documents: int | None = None,
     ) -> WorkBuddyKnowledgeBaseRow:
         stamp = now_ts()
         public_id = kb_id or new_uuid()
@@ -559,8 +570,9 @@ class WorkBuddyKnowledgeRepo:
                 "INSERT INTO workbuddy_knowledge_bases ("
                 "tenant_id, kb_id, scope, owner_user_id, department_id, name, description, "
                 "embedding_model_revision_id, embedding_adapter_key, embedding_model_key, "
-                "embedding_revision, embedding_dimensions, created_by_user_id, created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "embedding_revision, embedding_dimensions, max_documents, created_by_user_id, "
+                "created_at, updated_at"
+                f") VALUES ({', '.join(['?'] * 16)}) "
                 f"RETURNING {_BASE_COLUMNS}",
                 (
                     ctx.tenant_id,
@@ -575,6 +587,7 @@ class WorkBuddyKnowledgeRepo:
                     model.model_key,
                     model.revision,
                     EMBEDDING_DIMENSIONS,
+                    max_documents or DEFAULT_MAX_DOCUMENTS,
                     created_by_user_id,
                     stamp,
                     stamp,
@@ -612,6 +625,82 @@ class WorkBuddyKnowledgeRepo:
                 (ctx.tenant_id, max(1, min(limit, MAX_LIST_BASES))),
             ).fetchall()
         return [WorkBuddyKnowledgeBaseRow.from_row(row) for row in rows]
+
+    def update_base_settings(
+        self, ctx: WorkBuddyDbContext, kb_id: str, *, max_documents: int
+    ) -> WorkBuddyKnowledgeBaseRow | None:
+        """Replace the per-base document cap; ``None`` when the base is not visible."""
+        cap = int(max_documents)
+        if cap < 1 or cap > MAX_DOCUMENTS_PER_BASE:
+            raise ValueError(f"max_documents must be between 1 and {MAX_DOCUMENTS_PER_BASE}")
+        with workbuddy_transaction(self._db, ctx) as conn:
+            row = conn.execute(
+                "UPDATE workbuddy_knowledge_bases SET max_documents = ?, updated_at = ? "
+                "WHERE tenant_id = ? AND kb_id = ? AND archived_at IS NULL "
+                f"RETURNING {_BASE_COLUMNS}",
+                (cap, now_ts(), ctx.tenant_id, kb_id),
+            ).fetchone()
+        return WorkBuddyKnowledgeBaseRow.from_row(row) if row is not None else None
+
+    def document_cap_reached(
+        self, ctx: WorkBuddyDbContext, kb_id: str, *, incoming: int = 1
+    ) -> bool:
+        """True when adding ``incoming`` documents would pass the base's cap.
+
+        ``incoming=0`` answers "is the base already full"; the default answers
+        "may one more be accepted", which is what the ingestion path asks.
+        """
+        with workbuddy_transaction(self._db, ctx) as conn:
+            row = conn.execute(
+                "SELECT b.max_documents AS cap, ("
+                " SELECT COUNT(*) FROM workbuddy_knowledge_documents d"
+                " WHERE d.tenant_id = b.tenant_id AND d.kb_id = b.kb_id AND d.deleted_at IS NULL"
+                ") AS held FROM workbuddy_knowledge_bases b"
+                " WHERE b.tenant_id = ? AND b.kb_id = ? AND b.archived_at IS NULL",
+                (ctx.tenant_id, kb_id),
+            ).fetchone()
+        if row is None:
+            return False
+        return int(row["held"]) + max(0, int(incoming)) > int(row["cap"])
+
+    # ── per-member preferences ─────────────────────────────────────────────
+
+    def set_default_open(
+        self,
+        ctx: WorkBuddyDbContext,
+        kb_id: str,
+        *,
+        user_id: int,
+        default_open: bool,
+    ) -> bool:
+        """Open (or close) one base for one member; ``False`` when the base is invisible."""
+        with workbuddy_transaction(self._db, ctx) as conn:
+            base = conn.execute(
+                "SELECT 1 FROM workbuddy_knowledge_bases"
+                " WHERE tenant_id = ? AND kb_id = ? AND archived_at IS NULL",
+                (ctx.tenant_id, kb_id),
+            ).fetchone()
+            if base is None:
+                return False
+            conn.execute(
+                "INSERT INTO workbuddy_knowledge_preferences("
+                " tenant_id, user_id, kb_id, default_open, updated_at"
+                ") VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT (tenant_id, user_id, kb_id) DO UPDATE SET"
+                " default_open = EXCLUDED.default_open, updated_at = EXCLUDED.updated_at",
+                (ctx.tenant_id, int(user_id), kb_id, bool(default_open), now_ts()),
+            )
+        return True
+
+    def default_open_bases(self, ctx: WorkBuddyDbContext, *, user_id: int) -> dict[str, bool]:
+        """``kb_id -> default_open`` for one member: absent means "not opened"."""
+        with workbuddy_transaction(self._db, ctx) as conn:
+            rows = conn.execute(
+                "SELECT kb_id, default_open FROM workbuddy_knowledge_preferences"
+                " WHERE tenant_id = ? AND user_id = ?",
+                (ctx.tenant_id, int(user_id)),
+            ).fetchall()
+        return {str(row["kb_id"]): bool(row["default_open"]) for row in rows}
 
     def archive_base(
         self, ctx: WorkBuddyDbContext, kb_id: str, *, archived_by_user_id: int
