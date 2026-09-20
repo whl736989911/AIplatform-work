@@ -41,6 +41,7 @@
 
 ### 修复
 
+- 修复**无源点的环导致编译崩溃**：拓扑检查先取入口节点、之后才找环，于是「每个节点都有入边」这种没有源点的纯环定义会以 `IndexError` 中断编译，`POST /workflow-definitions/validate` 返回 503 而不是调用方要用来修定义的环诊断。现在没有源点时直接交由环检查报出节点列表（422 + `WORKFLOW_CYCLE`），并补上这条此前缺失的用例——它是由 CI 的 live-PostgreSQL 用例发现的：该用例带 PG 标记，本地只跑了定向用例。
 - 企业治理面板把租户角色判定写死为 `admin`，而后端 `TENANT_ADMIN_ROLES` 与租户创建流程都以 **owner** 作为首位治理者：结果是每个租户的第一位用户在企业治理页只看到只读的「企业成员」视图，成员、邀请、配额、凭据、能力许可五个管理页签全部不可见，尽管接口本会放行。现改为共享的 `utils/tenantRole.ts`，并新增一条读取后端 `roles.py` 的一致性测试，防止两侧角色集合再次漂移。
 - 生产 Worker 容器启动即失败：`deploy/scripts/app-entrypoint.sh` 执行的是 `octop workbuddy-worker`，而命令行只提供 `octop workbuddy worker`（组 + 子命令），容器会以「No such command」退出。同步修正 `docs/architecture.md`、`.env.example` 与 CHANGELOG 中的同一处写法，并新增 `tests/unit/test_deploy_cli_commands.py`：解析 `deploy/scripts/*.sh` 中所有 `octop …` 调用并与真实命令行注册表比对，防止部署脚本与命令面再次漂移。
 - WorkBuddy 作业状态：此前没有任何路径把作业从 `queued` 置为 `running`，正在执行的作业对客户端仍显示 `queued`；新增 `start_job`（同时写入 `started_at`）。
