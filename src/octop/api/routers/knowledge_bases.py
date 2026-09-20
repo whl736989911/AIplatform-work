@@ -58,6 +58,13 @@ from octop.infra.knowledge.service import (
 from octop.infra.server import OctopServer
 from octop.infra.users.identity import User
 from octop.infra.utils.locale import resolve_request_locale
+from octop.infra.workbuddy.knowledge_adapter import (
+    knowledge_source,
+    mirror_base,
+    mirror_enabled,
+    project_bases,
+    project_enabled,
+)
 
 router = APIRouter(prefix="/knowledge-bases")
 logger = logging.getLogger(__name__)
@@ -176,6 +183,48 @@ def _base_payload(server: OctopServer, row: Any) -> dict[str, Any]:
     payload = asdict(row)
     payload["knowledge_base_id"] = row.id
     return {**payload, **_owner_fields(server, row.owner_user_id)}
+
+
+def _mirror_personal_base(server: OctopServer, *, user_id: int, base: Any) -> None:
+    """Mirror a personal write into the tenant tables when the switch asks for it.
+
+    Best effort by design: the personal request has already succeeded, and the
+    adapter logs a divergence instead of turning it into an error here.
+    """
+    if mirror_enabled(knowledge_source()):
+        mirror_base(server, user_id=user_id, base=base)
+
+
+def _personal_base_name(
+    server: OctopServer, *, user_id: int, is_admin: bool, kb_id: str
+) -> str | None:
+    """The name of one personal base, used to find its tenant twin before deleting."""
+    bases = _knowledge_service(server).list_visible_bases(actor_user_id=user_id, is_admin=is_admin)
+    return next((base.name for base in bases if base.id == kb_id), None)
+
+
+def _archive_mirrored_base(server: OctopServer, *, user_id: int, name: str) -> None:
+    """Archive the tenant twin of a deleted personal base, best effort."""
+    from octop.infra.db.repos.workbuddy_knowledge import WorkBuddyKnowledgeRepo
+    from octop.infra.workbuddy.knowledge_adapter import mirror_target
+
+    ctx = mirror_target(server, user_id)
+    if ctx is None or server.services is None:
+        return
+    try:
+        repo = WorkBuddyKnowledgeRepo(server.services.db)
+        twin = next(
+            (
+                row
+                for row in repo.list_bases(ctx)
+                if row.owner_user_id == user_id and row.name == name
+            ),
+            None,
+        )
+        if twin is not None:
+            repo.archive_base(ctx, twin.kb_id, archived_by_user_id=user_id)
+    except Exception as exc:  # noqa: BLE001 - the personal delete already succeeded
+        logger.warning("knowledge mirror: base %r was not archived: %s", name, exc)
 
 
 def _is_admin(user: User) -> bool:
@@ -520,6 +569,13 @@ async def list_bases(
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_user),
 ) -> list[dict[str, Any]]:
+    if project_enabled(knowledge_source()):
+        projected = project_bases(server, user_id=user.id, is_admin=_is_admin(user))
+        if projected is not None:
+            return [
+                {**base, **_owner_fields(server, int(base["owner_user_id"] or 0))}
+                for base in projected
+            ]
     return [
         _base_payload(server, base)
         for base in _knowledge_service(server).list_visible_bases(
@@ -547,6 +603,7 @@ async def create_base(
             icon_name=body.icon_name.strip(),
             max_documents=body.max_documents if body.max_documents is not None else MAX_DOCS_PER_KB,
         )
+        _mirror_personal_base(server, user_id=user.id, base=base)
         return _base_payload(server, base)
     except Exception as exc:
         raise _map_knowledge_error(exc, locale=locale, server=server) from exc
@@ -598,20 +655,19 @@ async def update_base(
     user: User = Depends(require_permission("knowledge_bases")),
 ) -> dict[str, Any]:
     try:
-        return _base_payload(
-            server,
-            _knowledge_service(server).update_base(
-                kb_id,
-                actor_user_id=user.id,
-                name=body.name.strip() if body.name is not None else None,
-                description=body.description.strip() if body.description is not None else None,
-                default_open=body.default_open,
-                shared=body.shared,
-                icon_name=body.icon_name.strip() if body.icon_name is not None else None,
-                max_documents=body.max_documents,
-                is_admin=_is_admin(user),
-            ),
+        base = _knowledge_service(server).update_base(
+            kb_id,
+            actor_user_id=user.id,
+            name=body.name.strip() if body.name is not None else None,
+            description=body.description.strip() if body.description is not None else None,
+            default_open=body.default_open,
+            shared=body.shared,
+            icon_name=body.icon_name.strip() if body.icon_name is not None else None,
+            max_documents=body.max_documents,
+            is_admin=_is_admin(user),
         )
+        _mirror_personal_base(server, user_id=user.id, base=base)
+        return _base_payload(server, base)
     except Exception as exc:
         raise _map_knowledge_error(
             exc, locale=resolve_request_locale(request), server=server
@@ -628,9 +684,16 @@ async def delete_base(
     user: User = Depends(require_permission("knowledge_bases")),
 ) -> None:
     try:
+        name = (
+            _personal_base_name(server, user_id=user.id, is_admin=_is_admin(user), kb_id=kb_id)
+            if mirror_enabled(knowledge_source())
+            else None
+        )
         _knowledge_service(server).delete_base(
             kb_id, actor_user_id=user.id, is_admin=_is_admin(user)
         )
+        if name is not None:
+            _archive_mirrored_base(server, user_id=user.id, name=name)
     except Exception as exc:
         raise _map_knowledge_error(
             exc, locale=resolve_request_locale(request), server=server

@@ -8,6 +8,9 @@
 
 ### 新增
 
+- WorkBuddy 知识库**旧接口适配层**（B-12 第一步）：新增 `infra/workbuddy/knowledge_adapter.py` 作为个人版与企业版两侧的接缝——`OCTOP_KNOWLEDGE_SOURCE` 取值 `personal`（默认，个人表仍为准、不镜像）、`dual`（双写、读个人侧）或 `enterprise`（读企业侧并投影回个人载荷）；个人库创建/更新时按「创建者 + 名称」幂等地镜像成企业行（`shared` 映射为 `enterprise` 范围，共享行不落 owner 以满足租户表形状约束），删除时按名归档企业孪生；`enterprise` 模式下列表把企业行投影成个人载荷。未配置、拼错、无租户、SQLite 控制面或租户没有已授权嵌入修订时，一律退回个人表而不是让请求失败。
+- WorkBuddy 知识库**每库上限**与**每成员默认打开**（迁移 054）：企业侧基表补回个人版自 v10 起就有的 `max_documents`（有界 CHECK 1–100000，默认 100），并由 `document_cap_reached` 在摄取前判定（只计未删除文档）；「默认打开库」改为**每成员偏好** `workbuddy_knowledge_preferences`（共享库会有多个成员各持己见），两表均租户隔离并随基表级联；适配层投影随之保真。
+- WorkBuddy 知识库**文档文本读取与重建索引**（B-10 第二批）：`GET /knowledge-bases/{id}/documents/{document_id}/text`按分块顺序返回已索引文本（`limit` 即预览，`download=true` 以 text/plain 附件导出——文本型/迁移型文档没有原文件，分块就是文本）；`POST .../documents/{document_id}/reindex` 与 `POST /knowledge-bases/{id}/reindex` 重建单篇/整库索引（沿用文档自身的作业行，前一代在原子发布前始终可读），整库重建逐篇报告失败码。
 - WorkBuddy **默认可见性回填**（迁移 053）：B-02 之前创建的工作流没有权限行——列表靠 legacy 回退仍算公司可见，但权限模型本身看不到它，发布者或管理员按模型读会读不到。上线前给每一条既有工作流补齐它本来就隐含的 `enterprise` 行（`workbuddy_object_scopes`），语句幂等、可重复运行；已跳过该文件的库由 `migrate.py::_ensure_workbuddy_visibility_backfill` 补齐——上线不「丢东西」。
 - WorkBuddy 租户**岗位授权**（迁移 052）：新增 `workbuddy_tenant_duty_grants`，把五种岗位——作者 `author`、发布者 `publisher`、审批人 `approver`、库管理员 `kb_admin`、运维 `ops`——按「公司 / 部门（含子部门）/ 个人」三种主体授予；`GET /duties`、`POST|DELETE /duties/{duty}/grants`（租户 admin）。岗位只**加路不夺权**：租户管理员隐式持有全部岗位，原本需要管理员的知识库治理与平台许可路由改为「管理员或库管理员/运维」，工作流的保存与发布额外接受作者/发布者岗位——员工不必提权即可干活。
 - WorkBuddy **默认可见性回填**（迁移 053）：B-02 之前创建的工作流没有权限行——列表靠 legacy 回退仍算公司可见，但权限模型本身看不到它，发布者或管理员按模型读会读不到。上线前给每一条既有工作流补齐它本来就隐含的 `enterprise` 行（`workbuddy_object_scopes`），语句幂等、可重复运行；已跳过该文件的库由 `migrate.py::_ensure_workbuddy_visibility_backfill` 补齐——上线不「丢东西」。
