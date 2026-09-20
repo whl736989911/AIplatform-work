@@ -11,6 +11,17 @@ This module owns the two business rules that must never be approximated:
   takes effect on the next statement
 * archived base        — invisible to everyone, immediately
 
+**The pinned embedding revision** — a base pins exactly one platform model
+revision, and only two shapes can carry it:
+
+* ``bge-m3`` — the hosted revision the platform constant describes;
+* a local ONNX revision — ``adapter_key='onnx'`` that declares both its width
+  and the downloaded local model id, at the storage layer's width. It reaches a
+  tenant through the same platform grant path as any other revision (publish is
+  an immutable new row, revocation only flips status);
+* anything else — refused with ``MODEL_NOT_CONFIGURED``, the code every existing
+  unpinnable model already gets.
+
 **Fail-closed dependencies** — object store, content scanner, document parser,
 embedder and the external secret backend are injected hooks. When a hook is
 missing, unproven or reports a mismatch, the caller gets ``DEPENDENCY_UNAVAILABLE``
@@ -36,6 +47,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from octop.infra.db.pool import DatabasePool
+from octop.infra.db.repos.workbuddy_catalog import ADAPTER_KEY_ONNX
 from octop.infra.db.repos.workbuddy_knowledge import (
     EMBEDDING_DIMENSIONS,
     MAX_LIST_BASES,
@@ -361,6 +373,23 @@ def require_embedder(hook: EmbeddingHook | None) -> EmbeddingHook:
             f"embedding model {BGE_M3_MODEL_KEY} is not configured or not proven",
         )
     return hook  # type: ignore[return-value]
+
+
+def _pinnable_local_model(revision: WorkBuddyPlatformModelRevisionRow) -> bool:
+    """True when a local ONNX model revision may back a knowledge base (B-11).
+
+    Three conditions, all required: the adapter is ``onnx``, the revision names
+    the downloaded local model, and the width it declares is the storage layer's
+    width. The pinned base stores the platform constant and every vector column
+    is that fixed width, so a revision declaring another width could be
+    published but never embedded into a base; it is refused with the same
+    ``MODEL_NOT_CONFIGURED`` an unpinnable model already gets.
+    """
+    return (
+        revision.adapter_key == ADAPTER_KEY_ONNX
+        and bool(revision.local_model_id)
+        and revision.embedding_dimensions == VECTOR_DIMENSIONS
+    )
 
 
 # ── pure validators (upload, archive, query, signature) ──────────────────────
@@ -1546,10 +1575,12 @@ class WorkBuddyKnowledgeService:
                 ErrorCode.WORKBUDDY_PLATFORM_REVISION_REVOKED,
                 "model revision is revoked",
             )
-        if revision.model_key != BGE_M3_MODEL_KEY:
+        if revision.model_key != BGE_M3_MODEL_KEY and not _pinnable_local_model(revision):
             raise OctopError(
                 ErrorCode.MODEL_NOT_CONFIGURED,
-                f"only {BGE_M3_MODEL_KEY} revisions can back a knowledge base",
+                f"only {BGE_M3_MODEL_KEY} or a {VECTOR_DIMENSIONS}-dimension"
+                f" {ADAPTER_KEY_ONNX} revision declaring its local model id"
+                " can back a knowledge base",
             )
         if not repo.tenant_model_granted(ctx, revision.model_revision_id):
             raise OctopError(
