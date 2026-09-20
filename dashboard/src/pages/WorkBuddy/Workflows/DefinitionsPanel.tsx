@@ -11,7 +11,7 @@ import { useCallback, useState } from "react";
 import { Button, Space, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { message } from "@/utils/antdMessage";
-import { FileCog, Pencil, RefreshCw } from "lucide-react";
+import { FileCog, Pencil, RefreshCw, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { ResizableTable } from "../../../components/ResizableTable";
 import { apiErrorMessage } from "../../../utils/apiError";
@@ -35,6 +35,7 @@ import DefinitionEditorModal, {
   type DefinitionEditorTarget,
 } from "./DefinitionEditorModal";
 import CreateWizard from "./CreateWizard";
+import AuthorWorkflowModal from "./AuthorWorkflowModal";
 import styles from "./index.module.less";
 
 const { Text } = Typography;
@@ -55,6 +56,7 @@ export default function DefinitionsPanel({
   const [target, setTarget] = useState<DefinitionEditorTarget | null>(null);
   // The guided path (A-06) runs beside the JSON editor, not instead of it.
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [authorOpen, setAuthorOpen] = useState(false);
   const [loadingDefinition, setLoadingDefinition] = useState<string | null>(
     null,
   );
@@ -250,6 +252,9 @@ export default function DefinitionsPanel({
             <Button size="small" onClick={() => setWizardOpen(true)}>
               {t("workbuddy.workflows.wizard.title")}
             </Button>
+            <Button size="small" icon={<Sparkles size={14} />} onClick={() => setAuthorOpen(true)}>
+              {t("workbuddy.workflows.author.button")}
+            </Button>
             <Button size="small" type="primary" onClick={openCreate}>
               {t("workbuddy.workflows.definitions.create")}
             </Button>
@@ -293,6 +298,18 @@ export default function DefinitionsPanel({
         onCreated={() => {
           setWizardOpen(false);
           void resource.reload();
+        }}
+      />
+
+      {/* A described draft arrives unpublished; opening it is how a person checks
+          what the compiler accepted before anything of theirs is live. */}
+      <AuthorWorkflowModal
+        open={authorOpen}
+        onClose={() => setAuthorOpen(false)}
+        onCreated={(workflowId) => {
+          setAuthorOpen(false);
+          void resource.reload();
+          onSelectWorkflow(workflowId);
         }}
       />
 

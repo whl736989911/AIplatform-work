@@ -46,6 +46,7 @@ from octop.infra.db.workbuddy_context import (
 )
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.rbac.model import RbacActor
+from octop.infra.workbuddy.authoring import UNAVAILABLE_AUTHORING, author_workflow
 from octop.infra.workbuddy.node_metadata import definition_metadata
 from octop.infra.workbuddy.semantic_diff import semantic_diff
 from octop.infra.workbuddy.workflow_compiler import (
@@ -76,6 +77,16 @@ class WorkflowCreateBody(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
     definition: dict[str, Any]
+
+
+class WorkflowAuthoringBody(BaseModel):
+    """A description, not a definition: the model describes, the compiler decides."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request: str = Field(min_length=1, max_length=4000)
+    name: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
 
 
 class WorkflowSaveBody(BaseModel):
@@ -483,6 +494,98 @@ async def create_workflow(
         ),
     }
     return workbuddy_envelope(request, payload)
+
+
+@router.post(
+    "/workflow-authoring",
+    status_code=201,
+    summary="Author a workflow draft from a description",
+)
+async def author_workflow_draft(
+    request: Request,
+    body: WorkflowAuthoringBody,
+    principal: _Principal,
+    response: Response,
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Turn a description into a draft workflow, with a person still in the loop.
+
+    The model never writes a definition: it writes a restricted authoring document,
+    which the authoring loop validates and lowers before the compiler judges it.  A
+    description that does not compile within the allowed rounds is **reported with
+    its diagnostics**, never stored — and what is stored is a *draft*, so publishing
+    stays a human decision made through the routes that already exist.
+
+    The model is consulted outside the transaction on purpose: a slow model must not
+    hold a tenant transaction open while it thinks.
+    """
+    services = getattr(server, "services", None)
+    source = getattr(services, "workbuddy_authoring_source", None) or UNAVAILABLE_AUTHORING
+    outcome = author_workflow(request=body.request, source=source)
+    if not outcome.ok or outcome.definition is None:
+        raise OctopError(
+            ErrorCode.WORKBUDDY_VALIDATION_FAILED,
+            "the description did not produce a compilable workflow",
+            details={
+                "rounds": outcome.rounds,
+                "diagnostics": [item.to_payload() for item in outcome.diagnostics],
+            },
+        )
+    repo = _repo(server)
+    try:
+        with workbuddy_transaction(
+            server.services.db,
+            WorkBuddyDbContext.for_tenant(principal.tenant_id, user_id=principal.user_id),
+        ) as conn:
+            from octop.infra.db.repos.workbuddy_workflows import (
+                PostgresWorkflowSemanticResolver,
+            )
+
+            resolver = PostgresWorkflowSemanticResolver(
+                conn, principal.tenant_id, user_id=principal.user_id
+            )
+            # The authoritative check, with this tenant's grants in hand: a draft that
+            # names a tool nobody granted is refused here rather than at run time.
+            compiled = compile_workflow_definition(
+                outcome.definition, resolver=resolver, require_semantic_resolution=True
+            )
+            bundle = repo.create_workflow(
+                principal.tenant_id,
+                name=body.name or _authored_name(body.request),
+                description=body.description,
+                definition=compiled.definition,
+                definition_sha256=compiled.definition_sha256,
+                created_by_user_id=principal.user_id,
+                created_by_membership_id=principal.member_id,
+                conn=conn,
+            )
+    except OctopError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a refusal must be coded, never a 500
+        raise _refusal(exc) from exc
+    response.headers["ETag"] = _etag(bundle.workflow)
+    payload = {
+        **_admin_payload(bundle.workflow),
+        "version": _version_payload(
+            bundle.version,
+            active_version_id=None,
+            shadow_version_id=None,
+            include_definition=True,
+        ),
+        # Why the draft looks the way it does: the model's own words per step, and
+        # how many rounds it took to satisfy the compiler.
+        "authoring": {
+            "rounds": outcome.rounds,
+            "steps": [step.to_payload() for step in outcome.steps],
+        },
+    }
+    return workbuddy_envelope(request, payload)
+
+
+def _authored_name(request_text: str) -> str:
+    """A workflow needs a name; the description's first line is the honest default."""
+    first_line = request_text.strip().splitlines()[0].strip()
+    return first_line[:200] or "未命名工作流"
 
 
 @router.get("/workflows", summary="List visible workflows")

@@ -6596,6 +6596,18 @@
           "listHint": "Enter one value per item",
           "referenceHint": "Reference an earlier step, e.g. {{ inputs.name }}"
         }
+      },
+      "author": {
+        "button": "Describe it",
+        "title": "Describe the workflow you want",
+        "hint": "Your description goes to the authoring model, whose restricted document is judged by the compiler. What comes back is a draft; publishing stays your decision.",
+        "placeholder": "For example: when a customer email arrives, extract the key details, draft a reply with the model, then ask a manager to approve it",
+        "generate": "Generate draft",
+        "cancel": "Cancel",
+        "again": "Describe again",
+        "openDraft": "Open draft",
+        "rounds": "{{count}} compile round(s)",
+        "failed": "That description did not compile into a workflow"
       }
     },
     "approvals": {

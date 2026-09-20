@@ -966,11 +966,51 @@
       "success_status": 200,
       "summary": "本人待审产出队列，200",
       "authorization": "范围默认本人；admin 的 scope=tenant 须有管理目的并审计"
+    },
+    {
+      "method": "GET",
+      "path": "/executions/{execution_id}/feedback",
+      "stage": "A5",
+      "success_status": 200,
+      "summary": "某次执行的纠正与补充事实记录，200",
+      "authorization": "发起者或受控 admin（与运行本身同一判定，读不到即 404）"
+    },
+    {
+      "method": "GET",
+      "path": "/workflows/{workflow_id}/attribution",
+      "stage": "A5",
+      "success_status": 200,
+      "summary": "某工作流的纠正归因（按版本分组，含上游范围），200",
+      "authorization": "仅受控租户 admin（这是分析器 A-14 的输入，以平台作业身份运行）"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows/{workflow_id}/improvement-analysis",
+      "stage": "A5",
+      "success_status": 202,
+      "summary": "按纠正证据生成改进提案（经既有治理链编译/策略/风险分级），202",
+      "authorization": "工作流可见的 admin；未接线分析器且确有证据时 503"
+    },
+    {
+      "method": "POST",
+      "path": "/workflow-authoring",
+      "stage": "A5",
+      "success_status": 201,
+      "summary": "用一句自然语言描述生成工作流草稿（受限 DSL + 至多两轮编译闭环），201",
+      "authorization": "与创建工作流同权；未接线作者模型时 503；两轮仍未编译通过时 400 并带回编译诊断"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows/{workflow_id}/authoring-proposals",
+      "stage": "A5",
+      "success_status": 202,
+      "summary": "用一句描述修改既有工作流：生成 JSON Patch 并走既有提案链，202",
+      "authorization": "与创建提案同权；未接线作者模型时 503；改动无法编译时 400 并带回编译器诊断"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 58,
-    "total": 120
+    "supplemental": 63,
+    "total": 125
   }
 }

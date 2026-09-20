@@ -885,3 +885,238 @@ async def test_shadow_phase_needs_recordings_and_never_goes_live(
         )
         assert canary.status_code == 200, canary.text
         assert canary.json()["data"]["status"] == "canary", canary.text
+
+
+class _StandInAnalyser:
+    """A wired analyser, so the test never depends on a live model."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def suggest(self, *, definition: Any, clusters: Any) -> list[Any]:
+        from octop.infra.workbuddy.improvement import Suggestion
+
+        self.calls += 1
+        return [
+            Suggestion(
+                node_id="hello",
+                output_key="greeting",
+                rationale="同一个值被改了两次",
+                patch=tuple(_rename_patch("Greeting builder v2")),
+            )
+        ]
+
+
+class _ExplodingAnalyser:
+    """Fails the test if it is consulted at all: evidence below the threshold."""
+
+    def suggest(self, *, definition: Any, clusters: Any) -> list[Any]:
+        raise AssertionError("the analyser must not be asked when nothing qualifies")
+
+
+async def _correct_twice(
+    client: httpx.AsyncClient, pool: Any, tenant: dict[str, Any], workflow: dict[str, Any]
+) -> None:
+    """Make the same correction twice: the evidence threshold is two, deliberately."""
+    for index in range(2):
+        accepted = await client.post(
+            f"/workflows/{workflow['workflow_id']}/execute",
+            json={"inputs": {"who": f"a14-{index}"}},
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        review = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert review.status_code == 201, review.text
+        corrected = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {"greeting": {"greeting": f"fixed-{index}"}}},
+        )
+        assert corrected.status_code == 200, corrected.text
+
+
+def _wire_source(app: FastAPI, pool: Any, source: Any) -> None:
+    from octop.api.deps import get_server
+
+    app.dependency_overrides[get_server] = lambda: SimpleNamespace(
+        services=SimpleNamespace(db=pool, workbuddy_improvement_source=source)
+    )
+
+
+async def test_repeated_corrections_become_a_proposal_through_the_chain(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """A-14: the analyser proposes, and the normal chain compiles and grades it."""
+    workflow = _publish(pool, tenant, "Analysis workflow")
+    analyser = _StandInAnalyser()
+    async with _client(app, _principal(tenant)) as client:
+        await _correct_twice(client, pool, tenant, workflow)
+        _wire_source(app, pool, analyser)
+        analysed = await client.post(f"/workflows/{workflow['workflow_id']}/improvement-analysis")
+        assert analysed.status_code == 202, analysed.text
+        data = analysed.json()["data"]
+        assert analyser.calls == 1, analyser.calls
+        assert len(data["created"]) == 1, data
+        assert data["rejected"] == [] and data["skipped"] == [], data
+        created = data["created"][0]
+        # A freshly created proposal is waiting for reviewers; the analyser cannot
+        # promote its own suggestion any more than a person can.
+        assert created["status"] == "pending", created
+        assert created["change_summary"] == "同一个值被改了两次", created
+        # It really is a proposal in the chain, not a side record the analyser keeps.
+        listed = await client.get(
+            "/improvement-proposals", params={"workflow_id": workflow["workflow_id"]}
+        )
+        assert listed.status_code == 200, listed.text
+        ids = [item["proposal_id"] for item in listed.json()["data"]["items"]]
+        assert created["proposal_id"] in ids, listed.text
+        assert data["job_id"], data
+
+
+async def test_analysis_without_a_wired_analyser_fails_closed(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """There is evidence but no analyser: refuse, do not invent a change."""
+    workflow = _publish(pool, tenant, "Analysis unconfigured")
+    async with _client(app, _principal(tenant)) as client:
+        await _correct_twice(client, pool, tenant, workflow)
+        analysed = await client.post(f"/workflows/{workflow['workflow_id']}/improvement-analysis")
+        assert analysed.status_code == 503, analysed.text
+
+
+async def test_a_single_correction_is_reported_as_skipped_and_not_analysed(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """One corrected value is a data point; the analyser is not paid to be told no."""
+    workflow = _publish(pool, tenant, "Analysis thin evidence")
+    async with _client(app, _principal(tenant)) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow['workflow_id']}/execute", json={"inputs": {"who": "a14-once"}}
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {"greeting": {"greeting": "fixed"}}},
+        )
+        _wire_source(app, pool, _ExplodingAnalyser())
+        analysed = await client.post(f"/workflows/{workflow['workflow_id']}/improvement-analysis")
+        assert analysed.status_code == 202, analysed.text
+        data = analysed.json()["data"]
+        assert data["created"] == [] and data["rejected"] == [], data
+        assert [item["reason"] for item in data["skipped"]] == ["insufficient_evidence"], data
+
+
+class _RenamingAuthor:
+    """A wired author whose answer is an edit to the step that is already there."""
+
+    def __init__(self) -> None:
+        self.saw_existing = False
+
+    def draft(self, *, request: str, metadata: Any, existing: Any) -> dict[str, Any]:
+        # The author must be handed the live definition: a patch is written
+        # against what exists, not against what the model imagines exists.
+        assert existing is not None, "editing requires the current definition"
+        self.saw_existing = True
+        return {
+            "steps": [
+                {
+                    "op": "update",
+                    "id": "hello",
+                    "kind": "transform",
+                    "purpose": "把问候写得更正式一些",
+                    "config": {
+                        "input": {"greeting": "hello {{ inputs.who }}"},
+                        "expression": "input",
+                    },
+                }
+            ]
+        }
+
+    def revise(self, **_: Any) -> dict[str, Any]:
+        raise AssertionError("a correct edit must not need a second round")
+
+
+class _StubbornAuthor:
+    """Never writes anything the compiler can accept.
+
+    Deleting the only step is straightforwardly invalid — a workflow with no steps
+    is not a workflow — which is what makes it a good stand-in for an edit that
+    must be refused rather than stored.
+    """
+
+    def draft(self, *, request: str, metadata: Any, existing: Any) -> dict[str, Any]:
+        return {"steps": [{"op": "remove", "id": "hello"}]}
+
+    def revise(self, **_: Any) -> dict[str, Any]:
+        return self.draft(request="", metadata=None, existing={})
+
+
+def _wire_authoring(app: FastAPI, pool: Any, source: Any) -> None:
+    from octop.api.deps import get_server
+
+    app.dependency_overrides[get_server] = lambda: SimpleNamespace(
+        services=SimpleNamespace(db=pool, workbuddy_authoring_source=source)
+    )
+
+
+async def test_a_described_change_becomes_a_proposal_not_a_write(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """A-15: a described edit travels the review chain, and changes nothing yet."""
+    workflow = _publish(pool, tenant, "Authoring edit")
+    author = _RenamingAuthor()
+    async with _client(app, _principal(tenant)) as client:
+        _wire_authoring(app, pool, author)
+        proposed = await client.post(
+            f"/workflows/{workflow['workflow_id']}/authoring-proposals",
+            json={"request": "把这步的说法改正式一点"},
+        )
+        assert proposed.status_code == 202, proposed.text
+        data = proposed.json()["data"]
+        assert author.saw_existing, "the author was not given the live definition"
+        assert data["status"] == "pending", data
+        assert data["risk_level"] == "low", data
+        assert data["authoring"]["rounds"] == 1, data
+        assert data["authoring"]["steps"][0]["purpose"] == "把问候写得更正式一些", data
+        assert data["job_id"], data
+
+        # A proposal, not a write: the change lives in a *candidate* version, and
+        # the live workflow keeps the version it had until somebody promotes it.
+        detail = await client.get(f"/improvement-proposals/{data['proposal_id']}")
+        body = detail.json()["data"]
+        assert body["status"] == "pending", body
+        assert body["candidate_version_id"] != body["base_version_id"], body
+        listed = await client.get(
+            "/improvement-proposals", params={"workflow_id": workflow["workflow_id"]}
+        )
+        ids = [item["proposal_id"] for item in listed.json()["data"]["items"]]
+        assert data["proposal_id"] in ids, listed.text
+
+
+async def test_a_described_change_that_does_not_compile_is_refused(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """A description that breaks the graph is reported, and nothing is proposed."""
+    workflow = _publish(pool, tenant, "Authoring broken edit")
+    broken = _StubbornAuthor()
+    async with _client(app, _principal(tenant)) as client:
+        _wire_authoring(app, pool, broken)
+        refused = await client.post(
+            f"/workflows/{workflow['workflow_id']}/authoring-proposals",
+            json={"request": "改坏它"},
+        )
+        assert refused.status_code == 400, refused.text
+        error = refused.json()["error"]
+        assert error["code"] == ErrorCode.WORKBUDDY_VALIDATION_FAILED.value, error
+        assert error["details"]["diagnostics"], error
+        listed = await client.get(
+            "/improvement-proposals", params={"workflow_id": workflow["workflow_id"]}
+        )
+        assert listed.json()["data"]["items"] == [], listed.text

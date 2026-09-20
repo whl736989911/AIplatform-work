@@ -924,6 +924,137 @@ async def test_a_rerun_starts_a_linked_execution(
         assert settled.json()["data"]["status"] == "success", settled.text
 
 
+# --------------------------------------------------------------------------- #
+# correction capture (A-12: the improvement loop's raw material)
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_correction_is_captured_with_the_version_that_produced_it(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T41: a corrected output leaves one structured row per corrected key."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Feedback runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "runtime"}}
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        review = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert review.status_code == 201, review.text
+        produced = review.json()["data"]["produced"]
+        key = sorted(produced)[0]
+
+        empty = await client.get(f"/executions/{execution_id}/feedback")
+        assert empty.status_code == 200, empty.text
+        assert empty.json()["data"]["items"] == [], empty.text
+
+        corrected = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {key: {"greeting": "hello fixed"}}},
+        )
+        assert corrected.status_code == 200, corrected.text
+
+        recorded = await client.get(f"/executions/{execution_id}/feedback")
+        assert recorded.status_code == 200, recorded.text
+        items = recorded.json()["data"]["items"]
+        assert len(items) == 1, items
+        row = items[0]
+        assert row["kind"] == "correction", row
+        assert row["source"] == "output_review", row
+        assert row["output_key"] == key, row
+        # Before and after travel together: that pair is what makes it readable.
+        assert row["before"] == produced[key], row
+        assert row["after"] == {"greeting": "hello fixed"}, row
+        # Bound to the version that produced the value, not to "the workflow".
+        assert row["workflow_id"] == workflow_id, row
+        run = await client.get(f"/executions/{execution_id}")
+        assert row["workflow_version_id"] == run.json()["data"]["workflow_version_id"], row
+
+
+async def test_an_answer_is_captured_as_a_supplied_fact(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T42: a fact a person supplied is recorded, and told apart from a correction."""
+    definition = question_definition([tenant["owner_member_id"]])
+    workflow_id = _publish(pool, tenant, definition, "Feedback question")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        listed = await client.get(f"/executions/{execution_id}/input-requests")
+        question_id = listed.json()["data"]["items"][0]["id"]
+
+        answered = await client.post(
+            f"/executions/{execution_id}/input-requests/{question_id}/answer",
+            json={"values": {"invoice": "INV-2026-7"}},
+        )
+        assert answered.status_code == 200, answered.text
+
+        recorded = await client.get(f"/executions/{execution_id}/feedback")
+        items = recorded.json()["data"]["items"]
+        assert len(items) == 1, items
+        row = items[0]
+        assert row["kind"] == "supplied_fact", row
+        assert row["source"] == "ask", row
+        assert row["node_id"] == "ask", row
+        assert row["output_key"] is None and row["before"] is None, row
+        assert row["after"] == {"invoice": "INV-2026-7"}, row
+
+
+async def test_a_refused_correction_leaves_no_feedback(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T43: capture happens inside the decision, so a rejected one records nothing."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Feedback atomicity")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        review = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert review.status_code == 201, review.text
+
+        refused = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {"invented": "x"}},
+        )
+        assert refused.status_code == 400, refused.text
+
+        recorded = await client.get(f"/executions/{execution_id}/feedback")
+        assert recorded.json()["data"]["items"] == [], recorded.text
+
+
+async def test_feedback_is_invisible_to_everyone_else(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T44: a correction belongs to the run's own history, not to the tenant at large."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Feedback visibility")
+    owner = _principal(tenant)
+    async with _client(app, owner) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+
+    reviewer = _principal(
+        tenant,
+        role="member",
+        user_id=tenant["reviewer_user_id"],
+        member_id=tenant["reviewer_member_id"],
+    )
+    async with _client(app, reviewer) as client:
+        hidden = await client.get(f"/executions/{execution_id}/feedback")
+        assert hidden.status_code == 404, hidden.text
+
+
 async def test_an_overdue_question_fails_the_run_and_escalates(
     app: FastAPI, pool: Any, tenant: dict[str, Any]
 ) -> None:
@@ -2973,3 +3104,76 @@ async def test_a_refused_event_backs_off_then_is_dead_lettered(
     assert dead["status"] == "failed", dead
     assert int(dead["attempts"]) == 2, dead
     assert "broker refused the publish" in str(dead["last_error"]), dead
+
+
+def attribution_definition() -> dict[str, Any]:
+    """greet → polish: a corrected value whose producer chain is worth naming."""
+    return {
+        "schema_version": 1,
+        "trigger": {"type": "manual", "config": {}},
+        "inputs": {"who": {"type": "string", "required": True}},
+        "nodes": [
+            {
+                "id": "greet",
+                "type": "transform",
+                "name": "Greet",
+                "config": {"input": {"who": "{{ inputs.who }}"}, "expression": "input"},
+                "save_as": "greeting",
+            },
+            {
+                "id": "polish",
+                "type": "transform",
+                "name": "Polish",
+                "config": {"input": "{{ nodes.greet.output }}", "expression": "input"},
+                "save_as": "polished",
+            },
+        ],
+        "edges": [{"from": "greet", "to": "polish"}],
+    }
+
+
+async def test_a_correction_points_upstream_at_the_step_that_feeds_it(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T43: attribution names the step a correction belongs to and what produced it."""
+    workflow_id = _publish(pool, tenant, attribution_definition(), "Attribution runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "a13"}}
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        review = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        # Both save_as keys are run outputs; correct the one the second step made.
+        assert set(review.json()["data"]["produced"]) == {"greeting", "polished"}, review.text
+        corrected = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {"polished": {"value": "fixed"}}},
+        )
+        assert corrected.status_code == 200, corrected.text
+
+        attributed = await client.get(f"/workflows/{workflow_id}/attribution")
+        assert attributed.status_code == 200, attributed.text
+        versions = attributed.json()["data"]["versions"]
+        assert len(versions) == 1, versions
+        assert versions[0]["workflow_version_id"], versions
+        clusters = versions[0]["clusters"]
+        assert len(clusters) == 1, clusters
+        cluster = clusters[0]
+        assert cluster["node_id"] == "polish", cluster
+        assert cluster["output_key"] == "polished", cluster
+        assert cluster["kind"] == "correction" and cluster["direction"] == "upstream", cluster
+        assert cluster["corrections"] == 1 and cluster["executions"] == 1, cluster
+        # The only place a fix could go: the step that fed the corrected one.
+        assert cluster["scope_node_ids"] == ["greet"], cluster
+        assert cluster["scope_output_keys"] == ["greeting"], cluster
+        assert cluster["examples"][0]["after"] == {"value": "fixed"}, cluster
+
+    member = _principal(tenant, role="member", user_id=_seed_user(pool, "rt-a13-member"))
+    async with _client(app, member) as client:
+        refused = await client.get(f"/workflows/{workflow_id}/attribution")
+        assert refused.status_code == 403, refused.text

@@ -1693,6 +1693,16 @@ class WorkBuddyProposalsService:
             raise ProposalPolicyError(exc.code, exc.message) from exc
         return self._view(record)
 
+    def current_revision(self, workflow_id: str) -> int | None:
+        """The revision a proposal would be built on, or ``None`` when not visible.
+
+        Callers use this to reject an operation before doing work whose result the
+        chain would only throw away: a proposal that names a stale revision is a
+        conflict, and finding out early is the difference between a 404 and a 409.
+        """
+        pointer = self._store.workflow_pointer(workflow_id)
+        return pointer.revision if pointer is not None else None
+
     # -- reads ------------------------------------------------------------- #
 
     def list(

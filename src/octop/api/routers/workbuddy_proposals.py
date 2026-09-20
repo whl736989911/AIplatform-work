@@ -27,7 +27,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from octop.api.deps import get_server
 from octop.api.routers.workbuddy_identity import (
@@ -36,6 +36,7 @@ from octop.api.routers.workbuddy_identity import (
     workbuddy_envelope,
     workbuddy_principal,
 )
+from octop.api.routers.workbuddy_runtime import runtime_actor
 from octop.infra.db.repos.workbuddy_catalog import WorkBuddyCatalogRepo
 from octop.infra.db.repos.workbuddy_identity import WorkBuddyError
 from octop.infra.db.repos.workbuddy_proposals import (
@@ -43,6 +44,8 @@ from octop.infra.db.repos.workbuddy_proposals import (
     WorkBuddyProposalsRepo,
 )
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.workbuddy.authoring import UNAVAILABLE_AUTHORING, author_workflow
+from octop.infra.workbuddy.improvement import UNAVAILABLE_SUGGESTIONS, analyse_and_propose
 from octop.infra.workbuddy.proposals import (
     MAX_ASSIGNED_REVIEWERS,
     MAX_PATCH_OPERATIONS,
@@ -60,6 +63,7 @@ from octop.infra.workbuddy.runtime import (
     RuntimeCanaryMetrics,
     RuntimeJobRecorder,
     RuntimeShadowRunner,
+    WorkBuddyRuntimeService,
 )
 
 router = APIRouter()
@@ -121,6 +125,15 @@ _ERROR_CODES: dict[str, ErrorCode] = {
 # frozen evidence, never the roster: an independent review must not be coloured
 # by who else was assigned.
 _REVIEWER_HIDDEN_FIELDS = ("reviews", "reviewers")
+
+
+class AuthoringEditBody(BaseModel):
+    """A description of a *change*: the model writes a patch, never the workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request: str = Field(min_length=1, max_length=4000)
+    change_summary: str | None = Field(default=None, max_length=500)
 
 
 class ProposalCreateBody(BaseModel):
@@ -361,6 +374,177 @@ async def create_improvement_proposal(
             },
         ),
     )
+
+
+@router.post(
+    "/workflows/{workflow_id}/improvement-analysis",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Analyse a workflow's corrections and propose changes",
+)
+async def analyse_workflow_improvements(
+    request: Request,
+    workflow_id: str,
+    principal: _Principal,
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    """Turn the corrections people made into proposals, through this same chain.
+
+    The analyser is the only machine in the improvement loop that *proposes*, and it
+    holds no extra power: every suggestion is compiled, policy-checked and
+    risk-graded by the service above, exactly like a person's, so a change nobody
+    could propose by hand is refused here too.  Evidence below the threshold is
+    reported as skipped, and a refusal is reported rather than worked around.
+
+    A deployment with no analyser wired answers 503 when — and only when — there is
+    something to analyse; an analysis that finds nothing is not an error.
+    """
+    public_workflow = _public_id(workflow_id)
+    service = _service(server, principal)
+    revision = service.current_revision(public_workflow)
+    if revision is None:
+        raise _not_found()
+    group = WorkBuddyRuntimeService.for_control_plane(_db(server)).attribution_for_analysis(
+        runtime_actor(principal), public_workflow
+    )
+    source = getattr(getattr(server, "services", None), "workbuddy_improvement_source", None)
+    jobs = _job_recorder(server, principal)
+    job_id = jobs.start(
+        kind="improvement_proposal",
+        request={
+            "workflow_id": public_workflow,
+            "workflow_revision": revision,
+            "trigger": "analysis",
+        },
+    )
+    try:
+        outcome = analyse_and_propose(
+            workflow_id=public_workflow,
+            definition=group.definition if group is not None else {},
+            clusters=group.clusters if group is not None else (),
+            source=source or UNAVAILABLE_SUGGESTIONS,
+            proposals=service,
+            actor=_actor(principal),
+            expect_revision=revision,
+        )
+    except OctopError as exc:
+        jobs.finish(job_id, status="failed", error_code=str(exc.code), error_message=exc.message)
+        raise
+    jobs.finish(job_id, status="succeeded", result={"created": len(outcome.created)})
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=workbuddy_envelope(
+            request,
+            {
+                "job_id": job_id,
+                "workflow_id": public_workflow,
+                "workflow_revision": revision,
+                "analysed_version_id": group.workflow_version_id if group is not None else None,
+                **outcome.to_payload(),
+            },
+        ),
+    )
+
+
+@router.post(
+    "/workflows/{workflow_id}/authoring-proposals",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Propose a change to a workflow from a description",
+)
+async def author_workflow_proposal(
+    request: Request,
+    workflow_id: str,
+    body: AuthoringEditBody,
+    principal: _Principal,
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    """A description edits a workflow as a *proposal*, never as a direct write.
+
+    The authoring document is lowered to a JSON Patch, which is the language this
+    chain already speaks — so a described change and a hand-written one are
+    compiled, policy-checked, risk-graded and promoted by exactly the same
+    machinery. The patched candidate is compiled before the chain stores anything,
+    and a description that produces a workflow the compiler refuses comes back with
+    the compiler's own diagnostics.
+    """
+    public_workflow = _public_id(workflow_id)
+    service = _service(server, principal)
+    revision = service.current_revision(public_workflow)
+    if revision is None:
+        raise _not_found()
+    base = _active_definition(server, principal, public_workflow)
+    services = getattr(server, "services", None)
+    source = getattr(services, "workbuddy_authoring_source", None) or UNAVAILABLE_AUTHORING
+    outcome = author_workflow(request=body.request, source=source, existing=base)
+    if not outcome.ok or outcome.patch is None:
+        raise OctopError(
+            ErrorCode.WORKBUDDY_VALIDATION_FAILED,
+            "the description did not produce a compilable change",
+            details={
+                "rounds": outcome.rounds,
+                "diagnostics": [item.to_payload() for item in outcome.diagnostics],
+            },
+        )
+    jobs = _job_recorder(server, principal)
+    job_id = jobs.start(
+        kind="improvement_proposal",
+        request={
+            "workflow_id": public_workflow,
+            "workflow_revision": revision,
+            "trigger": "authoring",
+        },
+    )
+    try:
+        view = service.create(
+            workflow_id=public_workflow,
+            patch=outcome.patch,
+            change_summary=body.change_summary or body.request,
+            actor=_actor(principal),
+            expect_revision=revision,
+        )
+    except ProposalPolicyError as exc:
+        jobs.finish(job_id, status="failed", error_code=exc.code, error_message=exc.message)
+        raise _refusal(exc) from exc
+    except ProposalNotFoundError as exc:
+        jobs.finish(
+            job_id, status="failed", error_code="WORKFLOW_NOT_FOUND", error_message=str(exc)
+        )
+        raise _not_found() from exc
+    record = view.proposal
+    jobs.finish(
+        job_id,
+        status="succeeded",
+        result={"proposal_id": record.proposal_id, "workflow_id": record.workflow_id},
+    )
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=workbuddy_envelope(
+            request,
+            {
+                "job_id": job_id,
+                "proposal_id": record.proposal_id,
+                "workflow_id": record.workflow_id,
+                "status": record.status.value,
+                "risk_level": record.risk_level,
+                "required_approvals": record.required_approvals,
+                "authoring": {
+                    "rounds": outcome.rounds,
+                    "steps": [step.to_payload() for step in outcome.steps],
+                },
+            },
+        ),
+    )
+
+
+def _active_definition(server: Any, principal: WorkBuddyPrincipal, workflow_id: str) -> Any:
+    """The definition a proposal would be written against: the live one."""
+    from octop.infra.db.repos.workbuddy_workflows import WorkBuddyWorkflowRepo
+
+    version = WorkBuddyWorkflowRepo(_db(server)).load_active_version(
+        principal.tenant_id, workflow_id
+    )
+    if version is None:
+        raise _not_found()
+    return version.definition
 
 
 @router.get("/improvement-proposals", summary="List visible improvement proposals")
