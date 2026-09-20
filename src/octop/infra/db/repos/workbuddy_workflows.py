@@ -37,6 +37,9 @@ from octop.infra.db.workbuddy_context import (
     workbuddy_transaction,
 )
 from octop.infra.errors import ErrorCode
+from octop.infra.rbac.model import RbacActor
+from octop.infra.rbac.repo import WorkBuddyRbacRepo
+from octop.infra.rbac.resolver import visibility_sql
 from octop.infra.workbuddy.workflow_compiler import (
     ACTIVATABLE_VERSION_ORIGINS,
     VERSION_ORIGINS,
@@ -50,6 +53,14 @@ WORKFLOW_COLUMNS = (
     "workflow_id, tenant_id, name, description, status, revision, active_version_id, "
     "shadow_version_id, created_by, created_by_membership_id, created_at, updated_at, archived_at"
 )
+
+#: The generic permission tables key workflows by this object kind.
+RBAC_OBJECT_KIND = "workflow"
+
+#: A new workflow starts company-visible: that is exactly how every workflow
+#: behaved before the permission model existed, so creating one changes nothing
+#: for a tenant until an administrator narrows its scope.
+DEFAULT_WORKFLOW_SCOPE = "enterprise"
 VERSION_COLUMNS = (
     "workflow_version_id, tenant_id, workflow_id, version_number, definition, definition_sha256, "
     "origin, base_version_id, source_version_id, change_summary, created_by, "
@@ -390,14 +401,47 @@ class WorkBuddyWorkflowRepo:
             return self._fetch_workflow(connection, tenant_id, workflow_id)
 
     def list_workflows(
-        self, tenant_id: str, *, user_id: int | None = None, conn: Any | None = None
+        self,
+        tenant_id: str,
+        *,
+        user_id: int | None = None,
+        department_id: str | None = None,
+        is_tenant_admin: bool = False,
+        conn: Any | None = None,
     ) -> list[WorkflowRecord]:
-        """Every workflow visible in this tenant, newest first."""
+        """Every workflow this actor may read in the tenant, newest first.
+
+        The four permission layers decide what is listed; a workflow that has no
+        permission row yet is treated as company-visible, which is the state every
+        workflow was in before the model existed (B-06 fills the rows in).
+        """
+        fragment, params = visibility_sql(
+            RbacActor(
+                user_id=int(user_id or 0),
+                tenant_id=tenant_id,
+                department_id=department_id,
+                is_tenant_admin=is_tenant_admin,
+            ),
+            scope_table="s",
+            acl_table="a",
+        )
+        visibility = (
+            " AND (NOT EXISTS (SELECT 1 FROM workbuddy_object_scopes s"
+            " WHERE s.tenant_id = workbuddy_workflows.tenant_id"
+            f" AND s.object_kind = '{RBAC_OBJECT_KIND}'"
+            " AND s.object_id = workbuddy_workflows.workflow_id)"
+            " OR EXISTS (SELECT 1 FROM workbuddy_object_scopes s"
+            " WHERE s.tenant_id = workbuddy_workflows.tenant_id"
+            f" AND s.object_kind = '{RBAC_OBJECT_KIND}'"
+            " AND s.object_id = workbuddy_workflows.workflow_id"
+            f" AND {fragment}))"
+        )
         with self._connection(tenant_id, user_id=user_id, conn=conn) as connection:
             rows = connection.execute(
                 f"SELECT {WORKFLOW_COLUMNS} FROM workbuddy_workflows "
-                "WHERE tenant_id = ? ORDER BY updated_at DESC, workflow_id",
-                (tenant_id,),
+                f"WHERE tenant_id = ?{visibility} "
+                "ORDER BY updated_at DESC, workflow_id",
+                (tenant_id, *params),
             ).fetchall()
         return [WorkflowRecord.from_row(row) for row in rows]
 
@@ -545,6 +589,19 @@ class WorkBuddyWorkflowRepo:
             if row is None:
                 raise WorkflowInvalid("workflow insert returned no row")
             workflow = WorkflowRecord.from_row(row)
+            if created_by_user_id is not None:
+                # Same transaction: a workflow without its permission row would be
+                # invisible to everyone the moment the model starts filtering.
+                WorkBuddyRbacRepo(self._db).set_scope(
+                    WorkBuddyDbContext.for_tenant(tenant_id, user_id=created_by_user_id),
+                    object_kind=RBAC_OBJECT_KIND,
+                    object_id=workflow.workflow_id,
+                    scope=DEFAULT_WORKFLOW_SCOPE,
+                    owner_user_id=None,
+                    department_id=None,
+                    created_by_user_id=int(created_by_user_id),
+                    conn=connection,
+                )
             version = self._insert_version(
                 connection,
                 tenant_id=tenant_id,
