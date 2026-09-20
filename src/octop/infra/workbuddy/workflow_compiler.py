@@ -48,6 +48,12 @@ WORKFLOW_SCHEMA_ENV = "WORKBUDDY_WORKFLOW_SCHEMA_PATH"
 
 MAX_TEMPLATE_PLACEHOLDERS = 32
 MAX_REFERENCE_LENGTH = 200
+#: Refusals that describe the definition are aggregated; the cap keeps a hostile
+#: draft from turning one 422 into an unbounded response body.
+MAX_DIAGNOSTICS = 20
+#: Prefix of every diagnostic hint key: clients localize them, this module never
+#: carries prose for a repair hint.
+DIAGNOSTIC_HINT_PREFIX = "workflowDiagnostics"
 
 NODE_TYPES = frozenset({"tool", "llm", "condition", "approval", "transform"})
 ACTIVATABLE_VERSION_ORIGINS = frozenset({"save", "rollback", "promotion", "import"})
@@ -84,7 +90,23 @@ WORKFLOW_VERSION_HASH_MISMATCH = "WORKFLOW_VERSION_HASH_MISMATCH"
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TEMPLATE_RE = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
-_CEL_REFERENCE_RE = re.compile(r"\b(inputs|outputs)\.([A-Za-z_][A-Za-z0-9_]*)")
+
+#: The reference grammar :func:`parse_reference` accepts, keyed by reference kind.
+#: A template placeholder carries one of these; node metadata publishes the same
+#: map instead of restating the grammar.
+REFERENCE_SYNTAX: Mapping[str, str] = {
+    "input": "inputs.<name>",
+    "node": "nodes.<node_id>.output",
+}
+#: CEL namespaces, each mapped to the reference kind :func:`iter_cel_references`
+#: reports for it and to the operand grammar that namespace follows.
+CEL_REFERENCE_NAMESPACES: Mapping[str, tuple[str, str]] = {
+    "inputs": ("input", "inputs.<name>"),
+    "outputs": ("output", "outputs.<save_as>"),
+}
+_CEL_REFERENCE_RE = re.compile(
+    rf"\b({'|'.join(CEL_REFERENCE_NAMESPACES)})\.([A-Za-z_][A-Za-z0-9_]*)"
+)
 
 _LIMIT_DEFAULTS: dict[str, int] = {
     "max_steps": 50,
@@ -119,7 +141,13 @@ _CEL_UNAVAILABLE_CODES = frozenset(
     }
 )
 
-_TEMPLATE_FIELD_PATHS: Mapping[str, str] = {
+#: A refusal that names an unreachable dependency rather than a defect of the
+#: definition; it must keep its own code at the API boundary.
+_FATAL_REFUSAL_CODES = frozenset({WORKFLOW_DEPENDENCY_UNAVAILABLE})
+
+#: The one config field of each node type where ``{{ … }}`` placeholders are read;
+#: every other field stays opaque to the template scanner.
+TEMPLATE_FIELD_PATHS: Mapping[str, str] = {
     "tool": "parameters",
     "llm": "prompt",
     "transform": "input",
@@ -127,8 +155,57 @@ _TEMPLATE_FIELD_PATHS: Mapping[str, str] = {
 }
 
 
+_NODE_PATH_RE = re.compile(r"^nodes\.([^.[\]]+)")
+
+
+def _node_id_from_path(path: str) -> str | None:
+    """The node a diagnostic points at (``nodes.<id>.…``), when its path names one."""
+    match = _NODE_PATH_RE.match(path)
+    return match.group(1) if match else None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowDiagnostic:
+    """One reason a definition was refused, with the location that carries it.
+
+    ``node_id`` is the node the path addresses and ``hint_key`` is the i18n key
+    for its repair hint — always a key, never prose, so a client localizes the
+    hint instead of guessing at the code.
+    """
+
+    code: str
+    message: str
+    path: str = ""
+    node_id: str | None = None
+    hint_key: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.hint_key is None:
+            object.__setattr__(self, "hint_key", f"{DIAGNOSTIC_HINT_PREFIX}.{self.code}")
+        if self.node_id is None:
+            object.__setattr__(self, "node_id", _node_id_from_path(self.path))
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"code": self.code, "message": self.message}
+        if self.path:
+            payload["path"] = self.path
+        if self.node_id:
+            payload["node_id"] = self.node_id
+        if self.hint_key:
+            payload["hint_key"] = self.hint_key
+        return payload
+
+
 class WorkflowCompileError(ValueError):
-    """A workflow definition that must never be persisted."""
+    """A workflow definition that must never be persisted.
+
+    One refusal may carry several diagnostics: a check phase proves everything
+    it can before raising, so a caller sees every defect of that phase at once
+    instead of one per round trip.  ``code``/``message``/``path``/``details``
+    always describe the primary diagnostic — the first in the stable
+    ``(path, code)`` order — so a definition with a single defect refuses
+    exactly as it did before this class aggregated.
+    """
 
     def __init__(
         self,
@@ -137,12 +214,23 @@ class WorkflowCompileError(ValueError):
         *,
         path: str = "",
         details: Mapping[str, Any] | None = None,
+        diagnostics: Sequence[WorkflowDiagnostic] | None = None,
     ) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.path = path
-        self.details = dict(details or {})
+        collected = tuple(diagnostics or ())
+        if not collected:
+            collected = (WorkflowDiagnostic(code=code, message=message, path=path),)
+        ordered = sorted(collected, key=lambda item: (item.path, item.code))
+        payload = dict(details or {})
+        if len(ordered) > MAX_DIAGNOSTICS:
+            payload["diagnostics_truncated"] = len(ordered)
+            ordered = ordered[:MAX_DIAGNOSTICS]
+        primary = ordered[0]
+        super().__init__(primary.message)
+        self.code = primary.code
+        self.message = primary.message
+        self.path = primary.path
+        self.details = payload
+        self.diagnostics: tuple[WorkflowDiagnostic, ...] = tuple(ordered)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"code": self.code, "message": self.message}
@@ -150,7 +238,65 @@ class WorkflowCompileError(ValueError):
             payload["path"] = self.path
         if self.details:
             payload["details"] = self.details
+        payload["diagnostics"] = [diagnostic.to_dict() for diagnostic in self.diagnostics]
         return payload
+
+
+class _DiagnosticCollector:
+    """Every refusal one check phase proved, raised together.
+
+    Phases stay sequential — each one builds the state the next one proves
+    against — but inside a phase every independent defect is collected.  An
+    infrastructure refusal (:data:`WORKFLOW_DEPENDENCY_UNAVAILABLE`) is not a
+    defect of the definition at all and aborts at once, so it keeps its own code
+    at the API boundary instead of being sorted behind a syntax error.
+    """
+
+    def __init__(self) -> None:
+        self._entries: list[tuple[WorkflowDiagnostic, dict[str, Any]]] = []
+
+    def __bool__(self) -> bool:
+        return bool(self._entries)
+
+    def add(
+        self, diagnostic: WorkflowDiagnostic, *, details: Mapping[str, Any] | None = None
+    ) -> None:
+        if diagnostic.code in _FATAL_REFUSAL_CODES:
+            raise WorkflowCompileError(
+                diagnostic.code, diagnostic.message, path=diagnostic.path, details=details
+            )
+        self._entries.append((diagnostic, dict(details or {})))
+
+    def refuse(
+        self,
+        code: str,
+        message: str,
+        *,
+        path: str = "",
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.add(WorkflowDiagnostic(code=code, message=message, path=path), details=details)
+
+    def absorb(self, exc: WorkflowCompileError) -> None:
+        """Fold a nested refusal in; the phase keeps collecting."""
+        for diagnostic in exc.diagnostics:
+            self.add(diagnostic, details=exc.details)
+
+    def raise_if_any(self, stage: str) -> None:
+        """Raise one aggregated refusal, or return when the phase proved nothing."""
+        if not self._entries:
+            return
+        ordered = sorted(self._entries, key=lambda entry: (entry[0].path, entry[0].code))
+        primary, primary_details = ordered[0]
+        details = dict(primary_details)
+        details["stage"] = stage
+        raise WorkflowCompileError(
+            primary.code,
+            primary.message,
+            path=primary.path,
+            details=details,
+            diagnostics=tuple(diagnostic for diagnostic, _ in ordered),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,7 +638,7 @@ def parse_reference(reference: str, *, path: str = "") -> tuple[str, str]:
         return "node", _require_identifier(parts[1], kind="node id", path=path)
     raise WorkflowCompileError(
         WORKFLOW_REFERENCE_INVALID,
-        "workflow references must be inputs.<name> or nodes.<node_id>.output",
+        "workflow references must be " + " or ".join(REFERENCE_SYNTAX.values()),
         path=path,
     )
 
@@ -531,7 +677,7 @@ def iter_cel_references(expression: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for match in _CEL_REFERENCE_RE.finditer(expression):
-        kind = "input" if match.group(1) == "inputs" else "output"
+        kind = CEL_REFERENCE_NAMESPACES[match.group(1)][0]
         name = match.group(2)
         key = (kind, name)
         if key not in seen:
@@ -618,21 +764,25 @@ class _Compiler:
             ) from exc
 
     def check_node_identity(self) -> None:
+        collector = _DiagnosticCollector()
         seen: dict[str, str] = {}
         for node in self.nodes:
             node_id = str(node["id"])
             if node_id in seen:
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_NODE_DUPLICATE_ID,
                     f"node id {node_id!r} is used more than once",
                     path=f"nodes.{node_id}.id",
                 )
+                # A repeated node repeats its save_as as well; reporting that
+                # second defect would only bury the one that can be fixed.
+                continue
             seen[node_id] = node_id
             save_as = node.get("save_as")
             output_key = str(save_as) if save_as is not None else node_id
             producer = self.output_key_to_node.get(output_key)
             if producer is not None:
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_SAVE_AS_DUPLICATE,
                     f"output key {output_key!r} is produced by both {producer!r} and {node_id!r}",
                     path=f"nodes.{node_id}.save_as",
@@ -640,6 +790,7 @@ class _Compiler:
             self.output_key_to_node[output_key] = node_id
             if save_as is not None:
                 self.save_as_by_node[node_id] = str(save_as)
+        collector.raise_if_any("identity")
 
     def _approval_target(self, node: Mapping[str, Any]) -> str | None:
         config = node.get("config") or {}
@@ -647,40 +798,51 @@ class _Compiler:
         return str(target) if target else None
 
     def check_edges(self) -> None:
+        collector = _DiagnosticCollector()
         seen_pairs: set[tuple[str, str]] = set()
         for index, edge in enumerate(self.edge_specs):
             source = str(edge["from"])
             target = str(edge["to"])
             when = edge.get("when")
             path = f"edges[{index}]"
-            if source not in self.node_by_id:
-                raise WorkflowCompileError(
-                    WORKFLOW_EDGE_UNKNOWN_NODE, f"edge source {source!r} is not a node", path=path
-                )
-            if target not in self.node_by_id:
-                raise WorkflowCompileError(
-                    WORKFLOW_EDGE_UNKNOWN_NODE, f"edge target {target!r} is not a node", path=path
-                )
+            if source not in self.node_by_id or target not in self.node_by_id:
+                if source not in self.node_by_id:
+                    collector.refuse(
+                        WORKFLOW_EDGE_UNKNOWN_NODE,
+                        f"edge source {source!r} is not a node",
+                        path=path,
+                    )
+                if target not in self.node_by_id:
+                    collector.refuse(
+                        WORKFLOW_EDGE_UNKNOWN_NODE,
+                        f"edge target {target!r} is not a node",
+                        path=path,
+                    )
+                # Without both endpoints the edge has no type and no place in
+                # the graph, so nothing below can be checked against it.
+                continue
             if source == target:
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_EDGE_SELF_LOOP, f"node {source!r} cannot point at itself", path=path
                 )
+                continue
             if (source, target) in seen_pairs:
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_EDGE_DUPLICATE,
                     f"edge {source!r} -> {target!r} is duplicated",
                     path=path,
                 )
+                continue
             seen_pairs.add((source, target))
             node_type = str(self.node_by_id[source].get("type"))
             if when is None and node_type == "condition":
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_CONDITION_EDGES,
                     f"condition node {source!r} needs both a true and a false edge",
                     path=path,
                 )
             if when is not None and node_type != "condition":
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_EDGE_UNEXPECTED_WHEN,
                     f"only condition nodes may branch on when=; {source!r} is a {node_type} node",
                     path=path,
@@ -694,7 +856,7 @@ class _Compiler:
             if node_type == "condition":
                 whens = sorted(edge.when or "" for edge in explicit)
                 if whens != ["false", "true"]:
-                    raise WorkflowCompileError(
+                    collector.refuse(
                         WORKFLOW_CONDITION_EDGES,
                         f"condition node {node_id!r} needs exactly one true and one false edge",
                         path=f"nodes.{node_id}.config.expression",
@@ -706,23 +868,28 @@ class _Compiler:
             if approval_target is None:
                 continue
             if node_type != "approval":
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_APPROVAL_TARGET,
                     f"node {node_id!r} is not an approval node and cannot declare target_node_id",
                     path=f"nodes.{node_id}.config.target_node_id",
                 )
+                # The field is meaningless here, so neither the edge conflict nor
+                # the target itself is worth a second diagnostic.
+                continue
             if explicit:
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_APPROVAL_EDGES,
                     f"approval node {node_id!r} declares target_node_id and an outgoing edge",
                     path=f"nodes.{node_id}.config.target_node_id",
                 )
+                continue
             if approval_target not in self.node_by_id:
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_APPROVAL_TARGET,
                     f"approval target {approval_target!r} is not a node",
                     path=f"nodes.{node_id}.config.target_node_id",
                 )
+                continue
             self.effective_edges.append(
                 CompiledEdge(node_id, approval_target, when=None, implicit=True)
             )
@@ -730,15 +897,20 @@ class _Compiler:
         for compiled_edge in self.effective_edges:
             self.outgoing[compiled_edge.from_node_id].append(compiled_edge)
             self.incoming[compiled_edge.to_node_id].append(compiled_edge)
+        collector.raise_if_any("edges")
 
     def check_topology(self) -> None:
+        collector = _DiagnosticCollector()
         entries = sorted(node_id for node_id in self.node_ids if not self.incoming[node_id])
         if len(entries) != 1:
-            raise WorkflowCompileError(
+            collector.refuse(
                 WORKFLOW_ENTRY_COUNT,
                 f"workflow needs exactly one entry node; found {len(entries)}",
                 details={"entry_candidates": entries},
             )
+            # Reachability and ancestry are defined relative to that one entry.
+            collector.raise_if_any("topology")
+            return
         self.entry_node_id = entries[0]
 
         indegree = {node_id: len(self.incoming[node_id]) for node_id in self.node_ids}
@@ -758,11 +930,14 @@ class _Compiler:
 
         if len(order) != len(self.node_ids):
             blocked = sorted(set(self.node_ids) - set(order))
-            raise WorkflowCompileError(
+            collector.refuse(
                 WORKFLOW_CYCLE,
                 "workflow graph contains a cycle",
                 details={"cycle_nodes": blocked},
             )
+            # Without a topological order there are no ancestors to check against.
+            collector.raise_if_any("topology")
+            return
         self.topological_order = tuple(order)
 
         reached = {self.entry_node_id}
@@ -775,7 +950,7 @@ class _Compiler:
                     pending.append(edge.to_node_id)
         unreachable = sorted(set(self.node_ids) - reached)
         if unreachable:
-            raise WorkflowCompileError(
+            collector.refuse(
                 WORKFLOW_UNREACHABLE,
                 "workflow has nodes that are not reachable from the entry node",
                 details={"unreachable_nodes": unreachable},
@@ -796,20 +971,28 @@ class _Compiler:
             if target is None:
                 continue
             if target == node_id or target in self.ancestors[node_id]:
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_APPROVAL_TARGET,
                     f"approval target {target!r} is not downstream of {node_id!r}",
                     path=f"nodes.{node_id}.config.target_node_id",
                 )
+        collector.raise_if_any("topology")
 
     # -- references -------------------------------------------------------- #
 
     def _check_reference(
-        self, kind: str, name: str, *, node_id: str, path: str, scope: str
+        self,
+        collector: _DiagnosticCollector,
+        kind: str,
+        name: str,
+        *,
+        node_id: str,
+        path: str,
+        scope: str,
     ) -> None:
         if kind == "input":
             if name not in self.input_names:
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_REFERENCE_UNKNOWN,
                     f"reference inputs.{name} is not a declared input",
                     path=path,
@@ -819,24 +1002,26 @@ class _Compiler:
         if kind == "node":
             producer = self.node_by_id.get(name)
             if producer is None:
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_REFERENCE_UNKNOWN,
                     f"reference nodes.{name}.output is not a node in this workflow",
                     path=path,
                     details={"scope": scope},
                 )
+                return
             owner: str | None = name
         else:
             owner = self.output_key_to_node.get(name)
             if owner is None:
-                raise WorkflowCompileError(
+                collector.refuse(
                     WORKFLOW_REFERENCE_UNKNOWN,
                     f"reference outputs.{name} has no unique producer",
                     path=path,
                     details={"scope": scope},
                 )
+                return
         if owner not in self.ancestors[node_id]:
-            raise WorkflowCompileError(
+            collector.refuse(
                 WORKFLOW_REFERENCE_NOT_UPSTREAM,
                 f"reference to {name!r} is not upstream of node {node_id!r}",
                 path=path,
@@ -844,34 +1029,49 @@ class _Compiler:
             )
 
     def check_references(self) -> None:
+        collector = _DiagnosticCollector()
         for node in self.nodes:
             node_id = str(node["id"])
             node_type = str(node.get("type"))
             config = node.get("config") or {}
-            field = _TEMPLATE_FIELD_PATHS.get(node_type)
+            field = TEMPLATE_FIELD_PATHS.get(node_type)
             if field is not None and field in config:
-                for kind, name in iter_template_references(
-                    config[field], path=f"nodes.{node_id}.config.{field}"
-                ):
+                field_path = f"nodes.{node_id}.config.{field}"
+                try:
+                    references = iter_template_references(config[field], path=field_path)
+                except WorkflowCompileError as exc:
+                    collector.absorb(exc)
+                    references = []
+                for kind, name in references:
                     self._check_reference(
+                        collector,
                         kind,
                         name,
                         node_id=node_id,
-                        path=f"nodes.{node_id}.config.{field}",
+                        path=field_path,
                         scope="template",
                     )
             if node_type in {"condition", "transform"}:
                 expression = str(config.get("expression") or "")
                 expression_path = f"nodes.{node_id}.config.expression"
-                self.cel_evidence[expression_path] = _probe_cel(expression, path=expression_path)
-                self._check_embedded_schema(
-                    config.get("output_schema"),
-                    path=f"nodes.{node_id}.config.output_schema",
-                )
+                try:
+                    self.cel_evidence[expression_path] = _probe_cel(
+                        expression, path=expression_path
+                    )
+                except WorkflowCompileError as exc:
+                    collector.absorb(exc)
+                try:
+                    self._check_embedded_schema(
+                        config.get("output_schema"),
+                        path=f"nodes.{node_id}.config.output_schema",
+                    )
+                except WorkflowCompileError as exc:
+                    collector.absorb(exc)
                 for kind, name in iter_cel_references(expression):
                     self._check_reference(
-                        kind, name, node_id=node_id, path=expression_path, scope="cel"
+                        collector, kind, name, node_id=node_id, path=expression_path, scope="cel"
                     )
+        collector.raise_if_any("references")
 
     # -- semantics --------------------------------------------------------- #
 
@@ -891,12 +1091,14 @@ class _Compiler:
                     "workflow definition needs semantic resolution but no resolver is configured",
                 )
             return "skipped"
+        collector = _DiagnosticCollector()
         for node in self.nodes:
             node_id = str(node["id"])
             node_type = str(node.get("type"))
             config = node.get("config") or {}
             if node_type == "tool":
                 self._apply_decision(
+                    collector,
                     resolver.check_tool(
                         str(config.get("tool_name")), config.get("parameters") or {}
                     ),
@@ -906,6 +1108,7 @@ class _Compiler:
                 )
             elif node_type == "llm":
                 self._apply_decision(
+                    collector,
                     resolver.check_model(config.get("model")),
                     fallback_code=WORKFLOW_MODEL_NOT_CONFIGURED,
                     fallback_message="no tenant model is configured for this llm node",
@@ -913,6 +1116,7 @@ class _Compiler:
                 )
                 for index, knowledge_base_id in enumerate(config.get("knowledge_base_ids") or []):
                     self._apply_decision(
+                        collector,
                         resolver.check_knowledge_base(str(knowledge_base_id)),
                         fallback_code=WORKFLOW_KNOWLEDGE_BASE_UNKNOWN,
                         fallback_message="knowledge base is not visible in this tenant",
@@ -928,15 +1132,17 @@ class _Compiler:
                     if decision is None or decision.ok:
                         valid += 1
                 if not valid:
-                    raise WorkflowCompileError(
+                    collector.refuse(
                         ErrorCode.APPROVAL_NO_VALID_APPROVER.value,
                         f"approval node {node_id!r} has no valid approver in this tenant",
                         path=f"nodes.{node_id}.config.approver_user_ids",
                     )
+        collector.raise_if_any("semantics")
         return "passed"
 
     @staticmethod
     def _apply_decision(
+        collector: _DiagnosticCollector,
         decision: SemanticDecision | None,
         *,
         fallback_code: str,
@@ -945,7 +1151,7 @@ class _Compiler:
     ) -> None:
         if decision is None or decision.ok:
             return
-        raise WorkflowCompileError(
+        collector.refuse(
             decision.code or fallback_code,
             decision.message or fallback_message,
             path=path,
@@ -1012,6 +1218,23 @@ def _schema_errors(definition: Any) -> list[ValidationError]:
     return sorted(errors, key=lambda error: (list(error.absolute_path), error.message))
 
 
+def _schema_diagnostics(errors: Sequence[ValidationError]) -> tuple[WorkflowDiagnostic, ...]:
+    """Every schema error as a diagnostic, in the aggregate's stable order."""
+    return tuple(
+        sorted(
+            (
+                WorkflowDiagnostic(
+                    WORKFLOW_SCHEMA_INVALID,
+                    error.message,
+                    path=".".join(str(part) for part in error.absolute_path),
+                )
+                for error in errors
+            ),
+            key=lambda diagnostic: (diagnostic.path, diagnostic.code),
+        )
+    )
+
+
 def compile_workflow_definition(
     definition: Any,
     *,
@@ -1030,21 +1253,23 @@ def compile_workflow_definition(
         )
     errors = _schema_errors(definition)
     if errors:
-        first = errors[0]
-        path = ".".join(str(part) for part in first.absolute_path)
+        diagnostics = _schema_diagnostics(errors)
+        primary = diagnostics[0]
         raise WorkflowCompileError(
-            WORKFLOW_SCHEMA_INVALID,
-            first.message,
-            path=path,
+            primary.code,
+            primary.message,
+            path=primary.path,
             details={
+                "stage": "schema",
                 "errors": [
                     {
                         "path": ".".join(str(part) for part in error.absolute_path),
                         "message": error.message,
                     }
-                    for error in errors[:20]
-                ]
+                    for error in errors[:MAX_DIAGNOSTICS]
+                ],
             },
+            diagnostics=diagnostics,
         )
     compiler = _Compiler(definition)
     compiler.check_node_identity()
@@ -1091,19 +1316,25 @@ def compile_stored_definition(
 __all__ = [
     "ACTIVATABLE_VERSION_ORIGINS",
     "CANDIDATE_VERSION_ORIGINS",
+    "CEL_REFERENCE_NAMESPACES",
     "CompiledEdge",
     "CompiledNode",
     "CompiledWorkflow",
+    "DIAGNOSTIC_HINT_PREFIX",
+    "MAX_DIAGNOSTICS",
     "MAX_REFERENCE_LENGTH",
     "MAX_TEMPLATE_PLACEHOLDERS",
     "NODE_TYPES",
+    "REFERENCE_SYNTAX",
     "SemanticDecision",
+    "TEMPLATE_FIELD_PATHS",
     "VERSION_ORIGINS",
     "WORKFLOW_COMPILER_VERSION",
     "WORKFLOW_SCHEMA_ENV",
     "WORKFLOW_SCHEMA_FILENAME",
     "WORKFLOW_SCHEMA_VERSION",
     "WorkflowCompileError",
+    "WorkflowDiagnostic",
     "WorkflowSemanticResolver",
     "canonical_definition_json",
     "compile_stored_definition",

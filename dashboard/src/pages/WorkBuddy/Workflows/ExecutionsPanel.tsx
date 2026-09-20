@@ -19,7 +19,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { message } from "@/utils/antdMessage";
-import { Eye, PlayCircle, RefreshCw, XCircle } from "lucide-react";
+import { Eye, PlayCircle, RefreshCw, RotateCcw, XCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { ResizableTable } from "../../../components/ResizableTable";
 import { apiErrorMessage } from "../../../utils/apiError";
@@ -72,6 +72,7 @@ export default function ExecutionsPanel({
     executionId: string;
   } | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [rerunningId, setRerunningId] = useState<string | null>(null);
 
   const executions = useWorkBuddyResource<Execution[]>(
     [],
@@ -116,6 +117,65 @@ export default function ExecutionsPanel({
       }
     },
     [executions, t],
+  );
+
+  /**
+   * A re-run replays a row's recorded inputs through the execute route, which
+   * starts the workflow's *active* version — that route has no version pin, so
+   * the confirm text says so instead of promising the original definition. The
+   * action is only offered when the row carries the workflow id, the version it
+   * ran and the inputs it used; otherwise the operator is told which part is
+   * missing rather than the panel guessing one.
+   */
+  const rerunBlocker = useCallback(
+    (row: Execution): string | null => {
+      if (!row.workflow_id) {
+        return t("workbuddy.workflows.executions.rerunMissingWorkflow");
+      }
+      if (!row.workflow_version_id) {
+        return t("workbuddy.workflows.executions.rerunMissingVersion");
+      }
+      const inputs = row.inputs;
+      if (
+        inputs === null ||
+        typeof inputs !== "object" ||
+        Array.isArray(inputs)
+      ) {
+        return t("workbuddy.workflows.executions.rerunMissingInputs");
+      }
+      return null;
+    },
+    [t],
+  );
+
+  const rerun = useCallback(
+    async (row: Execution) => {
+      setRerunningId(row.id);
+      try {
+        const execution = await workbuddyRuntimeApi.executeWorkflow(
+          row.workflow_id,
+          { inputs: row.inputs },
+        );
+        message.success(
+          t("workbuddy.workflows.executions.rerunStarted", {
+            id: execution.id.slice(0, 8),
+          }),
+        );
+        await executions.reload();
+        onExecutionAccepted();
+      } catch (err) {
+        message.error(
+          apiErrorMessage(
+            err,
+            t("workbuddy.workflows.executions.rerunFailed"),
+            t,
+          ),
+        );
+      } finally {
+        setRerunningId(null);
+      }
+    },
+    [executions, onExecutionAccepted, t],
   );
 
   const columns: ColumnsType<Execution> = [
@@ -183,52 +243,88 @@ export default function ExecutionsPanel({
     {
       title: t("workbuddy.workflows.executions.column.actions"),
       key: "actions",
-      width: 280,
+      width: 360,
       fixed: "right",
-      render: (_value, row) => (
-        <Space size={4} wrap>
+      render: (_value, row) => {
+        const blocker = rerunBlocker(row);
+        const rerunButton = (
           <Button
             type="link"
             size="small"
-            icon={<Eye size={13} />}
-            onClick={() => setDetailId(row.id)}
+            icon={<RotateCcw size={13} />}
+            disabled={blocker !== null}
+            loading={rerunningId === row.id}
           >
-            {t("workbuddy.workflows.executions.detail")}
+            {t("workbuddy.workflows.executions.rerun")}
           </Button>
-          {row.status === "waiting_approval" && (
+        );
+        return (
+          <Space size={4} wrap>
             <Button
               type="link"
               size="small"
-              onClick={() =>
-                setDecideTarget({
-                  approvalRequestId: "",
-                  executionId: row.id,
-                })
-              }
+              icon={<Eye size={13} />}
+              onClick={() => setDetailId(row.id)}
             >
-              {t("workbuddy.workflows.executions.decide")}
+              {t("workbuddy.workflows.executions.detail")}
             </Button>
-          )}
-          {CANCELLABLE_EXECUTION_STATUSES.includes(row.status) && (
-            <Popconfirm
-              title={t("workbuddy.workflows.executions.cancelConfirm", {
-                id: row.id.slice(0, 8),
-              })}
-              onConfirm={() => void cancel(row)}
-            >
+            {blocker !== null ? (
+              <Tooltip title={blocker}>
+                <span>{rerunButton}</span>
+              </Tooltip>
+            ) : (
+              <Popconfirm
+                title={t("workbuddy.workflows.executions.rerunConfirm", {
+                  workflow: workflowName(row.workflow_id),
+                  id: row.id.slice(0, 8),
+                })}
+                description={t(
+                  "workbuddy.workflows.executions.rerunVersionNotice",
+                  {
+                    id: row.id.slice(0, 8),
+                    version: row.workflow_version_id.slice(0, 8),
+                  },
+                )}
+                onConfirm={() => void rerun(row)}
+              >
+                {rerunButton}
+              </Popconfirm>
+            )}
+            {row.status === "waiting_approval" && (
               <Button
                 type="link"
                 size="small"
-                danger
-                icon={<XCircle size={13} />}
-                loading={cancellingId === row.id}
+                onClick={() =>
+                  setDecideTarget({
+                    approvalRequestId: "",
+                    executionId: row.id,
+                  })
+                }
               >
-                {t("workbuddy.workflows.executions.cancel")}
+                {t("workbuddy.workflows.executions.decide")}
               </Button>
-            </Popconfirm>
-          )}
-        </Space>
-      ),
+            )}
+            {CANCELLABLE_EXECUTION_STATUSES.includes(row.status) && (
+              <Popconfirm
+                title={t("workbuddy.workflows.executions.cancelConfirm", {
+                  id: row.id.slice(0, 8),
+                })}
+                onConfirm={() => void cancel(row)}
+              >
+                <Button
+                  type="link"
+                  size="small"
+                  danger
+                  icon={<XCircle size={13} />}
+                  loading={cancellingId === row.id}
+                >
+                  {t("workbuddy.workflows.executions.cancel")}
+                </Button>
+              </Popconfirm>
+            )}
+          </Space>
+        );
+      },
     },
   ];
 
@@ -338,7 +434,7 @@ export default function ExecutionsPanel({
           columns={columns}
           dataSource={executions.data}
           pagination={false}
-          scroll={{ x: 1300 }}
+          scroll={{ x: 1400 }}
           storageKey="workbuddy-workflows-executions"
         />
       )}

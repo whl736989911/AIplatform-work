@@ -7,6 +7,7 @@ import json
 import pytest
 
 from octop.infra.workbuddy.workflow_compiler import (
+    MAX_DIAGNOSTICS,
     WORKFLOW_APPROVER_INVALID,
     WORKFLOW_CONDITION_EDGES,
     WORKFLOW_CYCLE,
@@ -27,6 +28,7 @@ from octop.infra.workbuddy.workflow_compiler import (
     WORKFLOW_VERSION_HASH_MISMATCH,
     SemanticDecision,
     WorkflowCompileError,
+    WorkflowDiagnostic,
     canonical_definition_json,
     compile_stored_definition,
     compile_workflow_definition,
@@ -635,3 +637,125 @@ def test_only_the_published_schema_version_can_be_saved() -> None:
 
     assert caught.value.code == WORKFLOW_SCHEMA_INVALID
     assert caught.value.path == "schema_version"
+
+
+# --------------------------------------------------------------------------- #
+# aggregated diagnostics
+# --------------------------------------------------------------------------- #
+
+
+def test_a_phase_reports_every_defect_and_sorts_them_stably() -> None:
+    """Two broken nodes cost one round trip, in an order the client can rely on."""
+    definition = condition_definition()
+    definition["nodes"][2]["config"]["input"] = {"text": "{{ nodes.ghost.output }}"}
+    definition["nodes"][3]["config"]["input"] = {"text": "{{ inputs.missing }}"}
+
+    with pytest.raises(WorkflowCompileError) as caught:
+        compile_workflow_definition(definition)
+    error = caught.value
+
+    assert [diagnostic.code for diagnostic in error.diagnostics] == [
+        WORKFLOW_REFERENCE_UNKNOWN,
+        WORKFLOW_REFERENCE_UNKNOWN,
+    ]
+    # ``(path, code)`` order: farewell is before greet, and both before fetch.
+    assert [diagnostic.path for diagnostic in error.diagnostics] == [
+        "nodes.farewell.config.input",
+        "nodes.greet.config.input",
+    ]
+    assert [diagnostic.node_id for diagnostic in error.diagnostics] == ["farewell", "greet"]
+    assert [diagnostic.hint_key for diagnostic in error.diagnostics] == [
+        f"workflowDiagnostics.{WORKFLOW_REFERENCE_UNKNOWN}"
+    ] * 2
+    # The primary diagnostic is what the single-error fields describe.
+    assert error.code == WORKFLOW_REFERENCE_UNKNOWN
+    assert error.path == "nodes.farewell.config.input"
+    assert error.message == error.diagnostics[0].message
+    assert error.details["stage"] == "references"
+    assert error.to_dict()["diagnostics"][1]["node_id"] == "greet"
+
+    with pytest.raises(WorkflowCompileError) as again:
+        compile_workflow_definition(definition)
+    assert [diagnostic.to_dict() for diagnostic in again.value.diagnostics] == [
+        diagnostic.to_dict() for diagnostic in error.diagnostics
+    ]
+
+
+def test_broken_edges_are_reported_together() -> None:
+    """One self-loop and one unknown endpoint are both named, with their edge index."""
+    definition = two_node_definition()
+    definition["edges"].extend(
+        [
+            {"from": "alpha", "to": "alpha"},
+            {"from": "alpha", "to": "ghost"},
+        ]
+    )
+
+    with pytest.raises(WorkflowCompileError) as caught:
+        compile_workflow_definition(definition)
+    error = caught.value
+
+    assert [(diagnostic.path, diagnostic.code) for diagnostic in error.diagnostics] == [
+        ("edges[0]", WORKFLOW_EDGE_SELF_LOOP),
+        ("edges[2]", WORKFLOW_EDGE_UNKNOWN_NODE),
+    ]
+    # An edge diagnostic names an edge, not a node.
+    assert [diagnostic.node_id for diagnostic in error.diagnostics] == [None, None]
+    assert error.code == WORKFLOW_EDGE_SELF_LOOP
+
+
+def test_a_single_defect_refuses_exactly_as_before() -> None:
+    """One error keeps its code, message and path; the aggregate has one entry."""
+    definition = two_node_definition()
+    definition["edges"].append({"from": "alpha", "to": "ghost"})
+
+    with pytest.raises(WorkflowCompileError) as caught:
+        compile_workflow_definition(definition)
+    error = caught.value
+
+    assert error.code == WORKFLOW_EDGE_UNKNOWN_NODE
+    assert error.message == "edge target 'ghost' is not a node"
+    assert error.path == "edges[1]"
+    assert len(error.diagnostics) == 1
+    assert error.diagnostics[0].code == error.code
+    assert error.diagnostics[0].path == error.path
+    assert error.diagnostics[0].message == error.message
+    assert error.diagnostics[0].hint_key == f"workflowDiagnostics.{WORKFLOW_EDGE_UNKNOWN_NODE}"
+
+
+def test_diagnostics_derive_their_node_and_hint_key() -> None:
+    diagnostic = WorkflowDiagnostic(
+        code=WORKFLOW_CYCLE, message="cycle", path="nodes.loop.config.expression"
+    )
+    assert diagnostic.node_id == "loop"
+    assert diagnostic.hint_key == f"workflowDiagnostics.{WORKFLOW_CYCLE}"
+    assert diagnostic.to_dict() == {
+        "code": WORKFLOW_CYCLE,
+        "message": "cycle",
+        "path": "nodes.loop.config.expression",
+        "node_id": "loop",
+        "hint_key": f"workflowDiagnostics.{WORKFLOW_CYCLE}",
+    }
+    assert WorkflowDiagnostic(code="X", message="m").to_dict() == {
+        "code": "X",
+        "message": "m",
+        "hint_key": "workflowDiagnostics.X",
+    }
+
+    # A directly constructed error is normalized to one diagnostic, and the
+    # aggregate is capped so a hostile draft cannot inflate the response body.
+    single = WorkflowCompileError(WORKFLOW_CYCLE, "cycle", path="")
+    assert [item.code for item in single.diagnostics] == [WORKFLOW_CYCLE]
+    assert single.details == {}
+
+    crowded = WorkflowCompileError(
+        "X",
+        "m",
+        diagnostics=tuple(
+            WorkflowDiagnostic(code="X", message=f"m{index}", path=f"p{index:02d}")
+            for index in range(MAX_DIAGNOSTICS + 5)
+        ),
+    )
+    assert len(crowded.diagnostics) == MAX_DIAGNOSTICS
+    assert crowded.details["diagnostics_truncated"] == MAX_DIAGNOSTICS + 5
+    assert crowded.path == "p00"

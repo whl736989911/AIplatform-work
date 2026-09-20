@@ -91,14 +91,27 @@ export const EXECUTION_TRIGGER_TYPES = [
 ] as const;
 export type ExecutionTriggerType = (typeof EXECUTION_TRIGGER_TYPES)[number];
 
+/**
+ * Step-run states, mirroring ``workbuddy_step_runs_status_check`` as migration
+ * 023 restated it from the published contract. Migration 018 had invented
+ * ``succeeded`` / ``cancelled`` and had no ``waiting_reconciliation``, so a step
+ * parked on an unknown external write had no state to occupy.
+ */
 export const STEP_STATUSES = [
+  "queued",
   "running",
-  "succeeded",
+  "waiting_approval",
+  "waiting_reconciliation",
+  "success",
   "failed",
   "skipped",
-  "waiting_approval",
+  "canceled",
 ] as const;
 export type StepStatus = (typeof STEP_STATUSES)[number];
+
+/** Why a skipped step produced nothing (mirrors the step_runs CHECK constraint). */
+export const STEP_SKIP_REASONS = ["not_selected", "upstream_failed"] as const;
+export type StepSkipReason = (typeof STEP_SKIP_REASONS)[number];
 
 export const WORKFLOW_NODE_TYPES = [
   "tool",
@@ -131,19 +144,32 @@ export type ApprovalCandidateStatus =
 export const APPROVAL_DECISIONS = ["approve", "reject"] as const;
 export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number];
 
-export const RECONCILIATION_STATUSES = [
-  "pending",
-  "matched",
-  "mismatched",
-  "unresolved",
+/**
+ * The only outcomes an operator may record for a parked external write; the
+ * step either produced the write (``confirmed_success``) or it did not
+ * (``confirmed_failed``). An undecidable outcome is not a row at all.
+ */
+export const RECONCILIATION_DECISIONS = [
+  "confirmed_success",
+  "confirmed_failed",
 ] as const;
-export type ReconciliationStatus = (typeof RECONCILIATION_STATUSES)[number];
+export type ReconciliationDecision =
+  (typeof RECONCILIATION_DECISIONS)[number];
 
 /** Row visibility filter shared by the execution and approval list routes. */
 export const WORKBUDDY_SCOPES = ["self", "tenant"] as const;
 export type WorkBuddyScope = (typeof WORKBUDDY_SCOPES)[number];
 
 // --- executions ------------------------------------------------------------
+
+/**
+ * The token counters a model adapter reported for one step, stored verbatim:
+ * the keys are the adapter's own, so the console reads ``total_tokens`` /
+ * ``input_tokens`` / ``output_tokens`` and tolerates the OpenAI
+ * ``prompt_tokens`` / ``completion_tokens`` aliases. A deployment whose adapter
+ * reported nothing sends ``null`` here instead of a zero-filled mapping.
+ */
+export type TokenUsage = Record<string, unknown>;
 
 export interface Execution {
   id: string;
@@ -169,6 +195,22 @@ export interface ExecutionStep {
   status: StepStatus;
   save_as: string | null;
   error_code: string | null;
+  /**
+   * The activation recorded when the node was dispatched: the run payloads, the
+   * resolved node definition and the input this node was handed. ``null`` for a
+   * step that never dispatched (skipped, or decided without running).
+   */
+  input?: JsonObject | null;
+  /** Whatever the node recorded — any JSON value, not only an object. */
+  output?: unknown;
+  /** Step time the engine measured; ``null`` while the step has not finished. */
+  duration_ms?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  /** Set on ``skipped``, the only status the server attaches a reason to. */
+  skip_reason?: StepSkipReason | null;
+  /** Adapter-reported usage: model nodes only, ``null`` on every other type. */
+  token_usage?: TokenUsage | null;
 }
 
 export interface ExecutionEdge {
@@ -181,6 +223,19 @@ export interface ExecutionEdge {
 export interface ExecutionDetail extends Execution {
   steps: ExecutionStep[];
   edges: ExecutionEdge[];
+  /**
+   * Milliseconds the run spent inside its steps. The server sums every attempt's
+   * measured step time, so approval and reconciliation waits are excluded; ``0``
+   * means nothing was measured yet.
+   */
+  active_duration_ms?: number | null;
+  /**
+   * Total tokens the run's model adapters reported, as the runtime keeps it: one
+   * integer for the execution (``workbuddy_executions.token_usage``, migration
+   * 025), not the per-node mapping a step carries. ``0`` means nothing was
+   * reported.
+   */
+  token_usage?: number | null;
 }
 
 export interface ExecutionCreateRequest {
@@ -195,32 +250,57 @@ export interface ExecutionResumeRequest {
   token: string;
 }
 
+/** One recorded decision, as ``GET /v1/executions/{id}/reconciliations`` answers. */
 export interface Reconciliation {
   id: string;
-  node_id: string;
-  status: ReconciliationStatus;
-  external_ref: string | null;
-  evidence_sha256: string;
+  /** The step run that was settled. The list route returns no node id with it. */
+  step_run_id: string;
+  decision: ReconciliationDecision;
+  /** The evidence payload the caller submitted — by reference, never inline. */
+  evidence_ref: string;
+  evidence_hash: string;
+  external_request_id: string | null;
+  /** The payload holding the verified result; set on ``confirmed_success`` only. */
+  result_payload_ref: string | null;
+  /** The operator's reason, stored verbatim. */
+  note: string;
+  decided_by_user_id: number | null;
   /** ISO-8601. */
   created_at: string | null;
-  resolved_at: string | null;
 }
 
+/**
+ * One decision about an unknown external write.
+ *
+ * ``step_id`` is the node id of the step being settled — the route resolves it
+ * with ``find_step_run(..., node_id, status="waiting_reconciliation")`` and
+ * refuses any other step. ``evidence_ref`` must already be a payload of this
+ * execution, so the caller submits a reference, not a payload.
+ */
 export interface ReconciliationCreateRequest {
-  node_id: string;
-  status: ReconciliationStatus;
-  evidence?: JsonObject;
-  external_ref?: string | null;
+  step_id: string;
+  decision: ReconciliationDecision;
+  evidence_ref: string;
+  /** Required: the server rejects a decision without the operator's reason. */
+  reason: string;
+  external_reference?: string | null;
 }
 
+/** The record response: the decision, plus the execution it moved. */
 export interface ReconciliationRecorded {
   id: string;
   execution_id: string;
   node_id: string;
-  status: ReconciliationStatus;
-  external_ref: string | null;
-  evidence_sha256: string;
+  step_run_id: string;
+  decision: ReconciliationDecision;
+  external_reference: string | null;
+  evidence_ref: string;
+  evidence_hash: string;
+  result_payload_ref: string | null;
+  /** How many decisions this execution carries now. */
   reconciliations: number;
+  /** The execution after the decision: re-queued, or canceled if it was asked for. */
+  execution: Execution;
 }
 
 // --- approvals -------------------------------------------------------------

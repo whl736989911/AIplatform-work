@@ -6191,7 +6191,9 @@
         "saveFailed": "Failed to save the workflow",
         "revisionConflict": "The workflow changed on the server since it was loaded. Reload and try again.",
         "closeWarning": "Closing discards the current validation result.",
-        "jsonObjectRequired": "The definition must be a JSON object."
+        "jsonObjectRequired": "The definition must be a JSON object.",
+        "diagnosticCount": "{{count}} problem(s)",
+        "diagnosticNode": "Node"
       },
       "versions": {
         "title": "Version history",
@@ -6235,7 +6237,29 @@
           "promotion": "Promotion",
           "import": "Import"
         },
-        "candidateLocked": "A proposal candidate cannot be published directly."
+        "candidateLocked": "A proposal candidate cannot be published directly.",
+        "diff": {
+          "hint": "Tick two versions to compare their definitions.",
+          "compare": "Compare selected",
+          "title": "Definition diff {{from}} → {{to}}",
+          "empty": "The two versions have no definition-level differences.",
+          "missingChanges": "The response carried no change list, so the two definitions cannot be compared.",
+          "loadFailed": "Failed to compare the two versions",
+          "groupCount": "{{count}} change(s)",
+          "old": "Before",
+          "new": "After",
+          "noValue": "No value on this side",
+          "kind": {
+            "added": "Added",
+            "removed": "Removed",
+            "replaced": "Replaced"
+          },
+          "summary": {
+            "added": "Added {{count}}",
+            "removed": "Removed {{count}}",
+            "replaced": "Replaced {{count}}"
+          }
+        }
       },
       "executions": {
         "title": "Executions",
@@ -6280,7 +6304,15 @@
           "webhook": "Webhook",
           "event": "Event",
           "api": "API"
-        }
+        },
+        "rerun": "Run again",
+        "rerunConfirm": "This starts a new run on the workflow's currently active version, which may differ from the version this row ran.",
+        "rerunStarted": "Re-run submitted",
+        "rerunFailed": "Failed to start the re-run",
+        "rerunVersionNotice": "Version this run used: {{version}}",
+        "rerunMissingWorkflow": "This row carries no workflow id, so it cannot be re-run",
+        "rerunMissingVersion": "This row records no version, so a re-run may not use the same definition",
+        "rerunMissingInputs": "This row records no inputs, so a re-run would be missing its parameters"
       },
       "run": {
         "title": "Run {{name}}",
@@ -6360,7 +6392,31 @@
         "recordFailed": "Failed to record the reconciliation",
         "evidenceInvalid": "The evidence must be a JSON object.",
         "nodeRequired": "Select the node this evidence belongs to.",
-        "noPayload": "This execution recorded no payload."
+        "noPayload": "This execution recorded no payload.",
+        "activeDuration": "Active time for this run",
+        "tokenUsage": "Total tokens for this run",
+        "stepInput": "Input handed to this node",
+        "stepOutput": "Output this node produced",
+        "stepDuration": "Duration of this node",
+        "stepSkipReason": "Skip reason",
+        "skipReason": "Skip reason",
+        "tokensInput": "Input tokens",
+        "tokensOutput": "Output tokens",
+        "tokensTotal": "Total tokens",
+        "reconcileDecision": "Reconciliation decision",
+        "reconcileDecisionValue": "Confirm success or confirm failure",
+        "reconcileStepRun": "Parked step",
+        "reconcileEvidenceRef": "Evidence reference",
+        "reconcileEvidenceRefHint": "Identifier of the evidence (≤64 characters, usually a ticket or external reference).",
+        "reconcileReason": "Reason",
+        "reconcileNote": "Note",
+        "reconcileExternalRequest": "External request",
+        "reconcileDecidedBy": "Decided by",
+        "reconcileNoSteps": "This run has no step waiting for reconciliation.",
+        "decisionRequired": "Choose a reconciliation decision",
+        "reasonRequired": "A reason is required",
+        "evidenceRefRequired": "An evidence reference is required",
+        "evidenceRefInvalid": "The evidence reference may be at most 64 characters"
       },
       "triggers": {
         "title": "Trigger registrations",
@@ -7324,6 +7380,80 @@
       "columnTrigger": "Trigger",
       "columnStarted": "Started",
       "columnFinished": "Finished"
+    }
+  },
+  "workflowDiagnostics": {
+    "WORKFLOW_SCHEMA_INVALID": {
+      "hint": "The definition does not match the workflow-v1 schema: fix the field at the reported path — add the required value, correct its type, or drop the unknown field."
+    },
+    "WORKFLOW_NODE_DUPLICATE_ID": {
+      "hint": "Node ids must be unique: rename the duplicate node or merge the two into one."
+    },
+    "WORKFLOW_SAVE_AS_DUPLICATE": {
+      "hint": "Duplicate save_as key: each result key may have exactly one producer — rename the conflicting save_as."
+    },
+    "WORKFLOW_EDGE_UNKNOWN_NODE": {
+      "hint": "An edge points at a node that does not exist: check that source/target name a declared node id."
+    },
+    "WORKFLOW_EDGE_DUPLICATE": {
+      "hint": "The same edge is declared twice: remove the duplicate."
+    },
+    "WORKFLOW_EDGE_SELF_LOOP": {
+      "hint": "A node points at itself: remove the self-loop or express it as a condition branch."
+    },
+    "WORKFLOW_EDGE_UNEXPECTED_WHEN": {
+      "hint": "Only a condition node's outgoing edges may carry when: drop the field or change the node type to condition."
+    },
+    "WORKFLOW_CONDITION_EDGES": {
+      "hint": "A condition node needs exactly one when=true and one when=false edge: add the missing one and remove the extra."
+    },
+    "WORKFLOW_APPROVAL_EDGES": {
+      "hint": "An approval node cannot declare both target_node_id and explicit outgoing edges: keep one."
+    },
+    "WORKFLOW_APPROVAL_TARGET": {
+      "hint": "An approval's target_node_id must be a downstream node and not itself: point it at a successor or drop the field."
+    },
+    "WORKFLOW_APPROVER_INVALID": {
+      "hint": "No valid approver: designate at least one active member of this tenant as approver."
+    },
+    "WORKFLOW_ENTRY_COUNT": {
+      "hint": "A workflow needs exactly one entry (a node with no incoming edge): merge the extra roots into the main chain or add the missing edge."
+    },
+    "WORKFLOW_CYCLE": {
+      "hint": "The workflow must be acyclic: remove the edge that closes the cycle reported at the path."
+    },
+    "WORKFLOW_UNREACHABLE": {
+      "hint": "A node is unreachable from the entry: connect it to the reachable chain or delete it."
+    },
+    "WORKFLOW_REFERENCE_INVALID": {
+      "hint": "Malformed reference: use only inputs.<name> or nodes.<node_id>.output, with identifiers starting lowercase and limited to lowercase letters, digits and underscores (≤64)."
+    },
+    "WORKFLOW_REFERENCE_UNKNOWN": {
+      "hint": "The reference names an input or node that does not exist: use a declared input or an existing node id."
+    },
+    "WORKFLOW_REFERENCE_NOT_UPSTREAM": {
+      "hint": "A node may only read upstream outputs: point the reference at an earlier step or reorder the edges."
+    },
+    "WORKFLOW_TEMPLATE_INVALID": {
+      "hint": "Malformed template: every {{...}} must be closed and a field may hold at most 32 placeholders."
+    },
+    "WORKFLOW_CEL_INVALID": {
+      "hint": "CEL syntax error: fix the expression; inputs.<name> and outputs.<save_as> are the referenceable namespaces."
+    },
+    "WORKFLOW_TOOL_UNAVAILABLE": {
+      "hint": "The tool is not reachable for this tenant: have an admin grant it or switch to a granted tool."
+    },
+    "WORKFLOW_KNOWLEDGE_BASE_UNKNOWN": {
+      "hint": "The knowledge base is unknown or not reachable: point at one this tenant can read or drop the reference."
+    },
+    "WORKBUDDY_MODEL_NOT_CONFIGURED": {
+      "hint": "The model is not configured: have an admin register and grant it for this tenant."
+    },
+    "WORKBUDDY_DEPENDENCY_UNAVAILABLE": {
+      "hint": "A dependency is unavailable (schema file or CEL sandbox): a deployment problem — changing the definition will not help."
+    },
+    "WORKFLOW_VERSION_HASH_MISMATCH": {
+      "hint": "A published version's definition no longer matches its hash: an integrity alarm — do not publish; have operations check storage."
     }
   }
 }

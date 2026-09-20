@@ -314,6 +314,15 @@ async def test_hello_execution_runs_to_completion(
     assert data["status"] == "success", data
     assert data["outputs"] == {"greeting": {"greeting": "hello runtime"}}, data
     assert data["workflow_version_id"]
+    # A run is debuggable node by node: the transform records the context it was
+    # evaluated against and its own output, and no model usage (it called none).
+    step = next(step for step in data["steps"] if step["node_id"] == "hello")
+    assert step["input"]["inputs"] == {"who": "runtime"}, step
+    assert step["input"]["input"] == {"greeting": "hello runtime"}, step
+    assert step["input_sha256"], step
+    assert step["output"] == {"greeting": "hello runtime"}, step
+    assert step["token_usage"] is None, step
+    assert step["duration_ms"] is not None, step
 
 
 async def test_condition_branches_and_joins_once(
@@ -342,6 +351,10 @@ async def test_condition_branches_and_joins_once(
             assert steps[untaken]["status"] == "skipped", steps
             # A branch nobody selected was not chosen, not blocked.
             assert steps[untaken]["skip_reason"] == "not_selected", steps
+            # The branch that ran records the context it was evaluated against;
+            # the one that never ran has no input to report.
+            assert steps[taken]["input"]["inputs"] == {"approved": approved}, steps
+            assert steps[untaken]["input"] is None, steps
             # The join merges both branches and must run once, not twice.
             assert [s for s in data["steps"] if s["node_id"] == "join"].__len__() == 1, steps
 
@@ -530,7 +543,9 @@ class _LostResponsePort:
     def execute_tool(self, *, node: Any, activation: Any, idempotency_key: str) -> Any:
         from octop.infra.workbuddy.runtime import UnresolvedToolOutcome
 
-        self.calls.append({"node_id": node.id, "key": idempotency_key})
+        self.calls.append(
+            {"node_id": node.id, "key": idempotency_key, "activation": dict(activation)}
+        )
         raise UnresolvedToolOutcome(
             operation_key=idempotency_key,
             external_request_id="provider-operation-20260918-001",
@@ -688,6 +703,11 @@ async def test_unknown_external_write_parks_and_reconciles(
         assert detail["wait_reasons"] == ["reconciliation"], detail
         assert detail["waiting_steps"] == ["submit"], detail
         assert detail["cancel_requested"] is False, detail
+        # A parked call is exactly where an operator needs the input: it is the
+        # activation the adapter was handed, recorded while the outcome is unknown.
+        assert steps["submit"]["input"] == lost_response.calls[0]["activation"], steps
+        assert steps["submit"]["input_sha256"], steps
+        assert steps["submit"]["token_usage"] is None, steps
         # The write was dispatched exactly once and never re-sent.
         assert len(lost_response.calls) == 1, lost_response.calls
 
@@ -854,9 +874,13 @@ class _UsagePort:
     def __init__(self, *, total_tokens: int) -> None:
         self.total_tokens = total_tokens
         self.calls = 0
+        # What each call was handed, so a test can compare the recorded input
+        # with the input the model actually saw.
+        self.activations: list[dict[str, Any]] = []
 
     def execute_llm(self, *, node: Any, activation: Any) -> Any:
         self.calls += 1
+        self.activations.append(dict(activation))
         return {"text": "hello", "usage": {"total_tokens": self.total_tokens}}
 
     def execute_tool(
@@ -913,6 +937,14 @@ async def test_model_tokens_are_recorded_for_the_metrics(
     assert execution["status"] == "success", execution
     assert execution["token_usage"] == 42, execution
     assert execution["active_duration_ms"] >= 0, execution
+    # The same call is visible node by node: the input the model was handed, the
+    # output it produced and the usage it reported, all as recorded facts.
+    step = next(step for step in execution["steps"] if step["node_id"] == "summarise")
+    assert step["input"] == port.activations[0], step
+    assert step["input"]["inputs"] == {"who": "tokens"}, step
+    assert step["input_sha256"], step
+    assert step["output"] == {"text": "hello", "usage": {"total_tokens": 42}}, step
+    assert step["token_usage"] == {"total_tokens": 42}, step
 
 
 async def test_a_superseded_runner_cannot_commit(pool: Any, tenant: dict[str, Any]) -> None:

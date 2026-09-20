@@ -249,6 +249,14 @@ class StepRunRow:
     tool_id: str | None = None
     tool_call_key: str | None = None
     dispatch_intent_at: Any = None
+    # The input this attempt was dispatched with: its digest on the step row and
+    # the payload row that holds it (kind ``step_input``). A step whose payload
+    # exceeded the ledger ceiling keeps the digest alone.
+    input_sha256: str | None = None
+    input_payload_id: str | None = None
+    # The usage object the model adapter reported for this call, or None for a
+    # node that called no model (and for a run whose adapter reported none).
+    token_usage: Any = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> StepRunRow:
@@ -271,6 +279,9 @@ class StepRunRow:
             tool_id=row["tool_id"],
             tool_call_key=row["tool_call_key"],
             dispatch_intent_at=row["dispatch_intent_at"],
+            input_sha256=row["input_sha256"],
+            input_payload_id=(str(row["input_payload_id"]) if row["input_payload_id"] else None),
+            token_usage=row["token_usage"],
         )
 
 
@@ -1088,8 +1099,10 @@ class WorkBuddyRuntimeRepo:
         attempt: int = 1,
         save_as: str | None = None,
         input_sha256: str | None = None,
+        input_payload_id: str | None = None,
         output_sha256: str | None = None,
         output: Any = None,
+        token_usage: Any = None,
         error_code: str | None = None,
         error_message: str | None = None,
         duration_ms: int | None = None,
@@ -1109,9 +1122,10 @@ class WorkBuddyRuntimeRepo:
                 f"""
                 INSERT INTO workbuddy_step_runs(
                     id, tenant_id, execution_id, node_id, node_type, attempt, status, save_as,
-                    input_sha256, output_sha256, output, error_code, error_message,
-                    fence, duration_ms, skip_reason, started_at, finished_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {started}, {finished_at})
+                    input_sha256, input_payload_id, output_sha256, output, token_usage,
+                    error_code, error_message, fence, duration_ms, skip_reason,
+                    started_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {started}, {finished_at})
                 """,
                 (
                     rid,
@@ -1123,8 +1137,10 @@ class WorkBuddyRuntimeRepo:
                     status,
                     save_as,
                     input_sha256,
+                    input_payload_id,
                     output_sha256,
                     _jsonb(output),
+                    _jsonb(token_usage) if token_usage is not None else None,
                     error_code,
                     error_message,
                     fence,
@@ -1219,8 +1235,11 @@ class WorkBuddyRuntimeRepo:
         fence: int,
         status: str,
         save_as: str | None = None,
+        input_sha256: str | None = None,
+        input_payload_id: str | None = None,
         output_sha256: str | None = None,
         output: Any = None,
+        token_usage: Any = None,
         error_code: str | None = None,
         error_message: str | None = None,
         duration_ms: int | None = None,
@@ -1238,8 +1257,11 @@ class WorkBuddyRuntimeRepo:
         params: list[Any] = [
             status,
             save_as,
+            input_sha256,
+            input_payload_id,
             output_sha256,
             _jsonb(output),
+            _jsonb(token_usage) if token_usage is not None else None,
             error_code,
             error_message,
             duration_ms,
@@ -1252,8 +1274,10 @@ class WorkBuddyRuntimeRepo:
             cursor = c.execute(
                 f"""
                 UPDATE workbuddy_step_runs
-                SET status = ?, save_as = ?, output_sha256 = ?, output = ?, error_code = ?,
-                    error_message = ?, duration_ms = ?, skip_reason = ?, finished_at = {finished_at}
+                SET status = ?, save_as = ?, input_sha256 = ?, input_payload_id = ?,
+                    output_sha256 = ?, output = ?, token_usage = ?, error_code = ?,
+                    error_message = ?, duration_ms = ?, skip_reason = ?,
+                    finished_at = {finished_at}
                     {started}
                 WHERE execution_id = ? AND node_id = ? AND attempt = ? AND fence = ?
                   AND status IN ('queued', 'running')
@@ -1626,6 +1650,23 @@ class WorkBuddyRuntimeRepo:
                 ),
             )
         return rid
+
+    def list_step_inputs(
+        self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
+    ) -> dict[str, Any]:
+        """The recorded per-step dispatch inputs of one execution, by payload id.
+
+        Read by id, not by node: a node retried inside one attempt and a node
+        revisited by a later attempt each have their own row, and each points at
+        the input that attempt actually used.
+        """
+        with runtime_transaction(self._db, ctx, conn) as c:
+            rows = c.execute(
+                "SELECT id, content FROM workbuddy_execution_payloads "
+                "WHERE execution_id = ? AND kind = 'step_input'",
+                (execution_id,),
+            ).fetchall()
+        return {str(row["id"]): row["content"] for row in rows}
 
     def get_payload(
         self,

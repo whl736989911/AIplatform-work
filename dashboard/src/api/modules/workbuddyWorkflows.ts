@@ -8,6 +8,7 @@
  *   GET    /v1/workflows/{id}                           PUT /v1/workflows/{id}
  *   POST   /v1/workflows/{id}/activate                  POST /v1/workflows/{id}/rollback
  *   GET    /v1/workflows/{id}/versions                  GET /v1/workflows/{id}/versions/{version_id}
+ *   GET    /v1/workflows/{id}/versions/diff?from=&to=
  *   POST   /v1/workflow-definitions/validate
  *   POST   /v1/workflows/{id}/trigger-registrations     GET /v1/workflows/{id}/trigger-registrations
  *   DELETE /v1/workflows/{id}/trigger-registrations/{registration_id}
@@ -30,6 +31,7 @@
  */
 
 import { request } from "../request";
+import { parseApiError } from "../../utils/apiError";
 
 const BASE = "/v1";
 
@@ -204,6 +206,126 @@ export interface WorkflowVersion {
   definition?: JsonObject;
 }
 
+// --- version comparison (definition-level diff) ----------------------------
+
+/** The three kinds the keyed semantic diff emits. */
+export type WorkflowDefinitionChangeKind = "added" | "removed" | "replaced";
+
+/** One difference between two definitions, at one JSON-pointer path. */
+export interface WorkflowDefinitionChange {
+  path: string;
+  /** One of ``WorkflowDefinitionChangeKind``; wider on purpose so a kind a
+   * newer server adds still renders instead of being dropped. */
+  kind: WorkflowDefinitionChangeKind | string;
+  old: unknown;
+  new: unknown;
+}
+
+/** One compared side. Every field is nullable: a partial payload must not
+ * fabricate a version number, an origin or a digest. */
+export interface WorkflowVersionDiffSide {
+  version_id: string | null;
+  version_number: number | null;
+  definition_sha256: string | null;
+  origin: string | null;
+}
+
+export interface WorkflowVersionDiffSummary {
+  added: number;
+  removed: number;
+  replaced: number;
+}
+
+/** ``GET /workflows/{id}/versions/diff?from=&to=``. */
+export interface WorkflowVersionDiff {
+  workflow_id: string | null;
+  from: WorkflowVersionDiffSide | null;
+  to: WorkflowVersionDiffSide | null;
+  /** ``null`` when the response carried no usable change list. An empty array
+   * is a real answer ("the two definitions agree") and is never conflated
+   * with a missing one. */
+  changes: WorkflowDefinitionChange[] | null;
+  summary: WorkflowVersionDiffSummary | null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asPositiveCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
+function diffSide(raw: unknown): WorkflowVersionDiffSide | null {
+  const record = asRecord(raw);
+  if (record === null) return null;
+  const number = record.version_number;
+  const sha = record.definition_sha256;
+  const origin = record.origin;
+  const versionId = record.version_id;
+  return {
+    version_id: typeof versionId === "string" && versionId ? versionId : null,
+    version_number: typeof number === "number" && Number.isFinite(number) ? number : null,
+    definition_sha256: typeof sha === "string" && sha ? sha : null,
+    origin: typeof origin === "string" && origin ? origin : null,
+  };
+}
+
+function diffChange(raw: unknown): WorkflowDefinitionChange | null {
+  const record = asRecord(raw);
+  if (record === null) return null;
+  const path = record.path;
+  if (typeof path !== "string" || !path.trim()) return null;
+  const kind = record.kind;
+  return {
+    path,
+    kind: typeof kind === "string" && kind.trim() ? kind : "unknown",
+    old: record.old ?? null,
+    new: record.new ?? null,
+  };
+}
+
+function diffSummary(raw: unknown): WorkflowVersionDiffSummary | null {
+  const record = asRecord(raw);
+  if (record === null) return null;
+  const added = asPositiveCount(record.added);
+  const removed = asPositiveCount(record.removed);
+  const replaced = asPositiveCount(record.replaced);
+  if (added === null || removed === null || replaced === null) return null;
+  return { added, removed, replaced };
+}
+
+/**
+ * Tolerant reader for the diff route. A response that is not an object, or
+ * whose ``changes`` is not a list of usable entries, reads as ``changes:
+ * null`` — the caller then reports "the response carried no change list"
+ * instead of pretending the versions are identical.
+ */
+export function parseWorkflowVersionDiff(raw: unknown): WorkflowVersionDiff {
+  const record = asRecord(raw);
+  let changes: WorkflowDefinitionChange[] | null = null;
+  if (record !== null && Array.isArray(record.changes)) {
+    const parsed = record.changes.map(diffChange);
+    changes = parsed.every(
+      (change): change is WorkflowDefinitionChange => change !== null,
+    )
+      ? parsed
+      : null;
+  }
+  const workflowId = record?.workflow_id;
+  return {
+    workflow_id: typeof workflowId === "string" && workflowId ? workflowId : null,
+    from: diffSide(record?.from),
+    to: diffSide(record?.to),
+    changes,
+    summary: diffSummary(record?.summary),
+  };
+}
+
 export interface WorkflowCreateRequest {
   name: string;
   description?: string | null;
@@ -256,6 +378,128 @@ export interface DefinitionValidation {
   save_as: Record<string, string>;
   semantic_checks: string;
   compiler_version: string;
+}
+
+// --- definition diagnostics (the compiler aggregates per phase) -------------
+
+/**
+ * One reason the compiler refused a definition. `node_id` is derived from
+ * `path` server-side, and `hint_key` names the i18n key of its repair hint —
+ * never prose, so a code without a translation shows the server message rather
+ * than an invented suggestion.
+ */
+export interface WorkflowDiagnostic {
+  code: string;
+  message: string;
+  path?: string;
+  node_id?: string | null;
+  hint_key?: string | null;
+}
+
+/**
+ * The diagnostics of a refusal, read from the error envelope's `details`.
+ * Tolerant by design: a store refusal, or any response that predates
+ * aggregation, carries none and the caller falls back to the message alone.
+ */
+export function parseWorkflowDiagnostics(error: unknown): WorkflowDiagnostic[] {
+  const raw = parseApiError(error)?.details?.diagnostics;
+  if (!Array.isArray(raw)) return [];
+  const diagnostics: WorkflowDiagnostic[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const candidate = item as Record<string, unknown>;
+    if (
+      typeof candidate.code !== "string" ||
+      typeof candidate.message !== "string"
+    ) {
+      continue;
+    }
+    diagnostics.push({
+      code: candidate.code,
+      message: candidate.message,
+      path: typeof candidate.path === "string" ? candidate.path : undefined,
+      node_id:
+        typeof candidate.node_id === "string" ? candidate.node_id : undefined,
+      hint_key:
+        typeof candidate.hint_key === "string" ? candidate.hint_key : undefined,
+    });
+  }
+  return diagnostics;
+}
+
+// --- definition metadata (derived from the one JSON Schema) -----------------
+
+/** One form field: its JSON type, whether it is required, and its bounds. */
+export interface WorkflowFieldMetadata {
+  name: string;
+  type: string | string[];
+  required: boolean;
+  enum?: unknown[];
+  const?: unknown;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  minItems?: number;
+  maxItems?: number;
+  minProperties?: number;
+  maxProperties?: number;
+  pattern?: string;
+  format?: string;
+  default?: unknown;
+  items?: Record<string, unknown>;
+  fields?: WorkflowFieldMetadata[];
+}
+
+export interface WorkflowFieldBlock {
+  required: string[];
+  optional: string[];
+  fields: WorkflowFieldMetadata[];
+}
+
+export interface WorkflowNodeTypeMetadata {
+  type: string;
+  required: string[];
+  optional: string[];
+  config_fields: WorkflowFieldMetadata[];
+  /** Config fields where `{{ … }}` placeholders are read. */
+  template_fields: string[];
+}
+
+export interface WorkflowTriggerTypeMetadata extends WorkflowFieldBlock {
+  type: string;
+}
+
+export interface WorkflowReferenceSyntax {
+  identifier: { pattern: string | null };
+  template: {
+    open: string;
+    close: string;
+    examples: string[];
+    max_placeholders: number;
+    fields: Record<string, string>;
+  };
+  references: { kind: string; syntax: string }[];
+  max_reference_length: number;
+}
+
+/** `GET /workflow-definitions/metadata`: the contract an editor builds forms from. */
+export interface WorkflowDefinitionMetadata {
+  schema_version: number;
+  compiler_version: string;
+  node_types: WorkflowNodeTypeMetadata[];
+  node: WorkflowFieldBlock;
+  inputs: WorkflowFieldBlock & { types: string[] };
+  edges: WorkflowFieldBlock;
+  trigger_types: WorkflowTriggerTypeMetadata[];
+  limits: WorkflowFieldBlock;
+  output: WorkflowFieldBlock;
+  reference_syntax: WorkflowReferenceSyntax;
+  cel_reference_namespaces: {
+    namespace: string;
+    kind: string;
+    syntax: string;
+  }[];
 }
 
 // --- trigger registrations -------------------------------------------------
@@ -409,6 +653,23 @@ export const workbuddyWorkflowsApi = {
         id,
       )}/versions/${encodeURIComponent(versionId)}`,
     ),
+  /**
+   * Definition-level comparison of two versions of the same workflow. The
+   * server answers with the keyed semantic diff, so a node reorder alone is
+   * not reported as a change; the payload is parsed tolerantly because a
+   * missing change list must not read as "no differences".
+   */
+  compareWorkflowVersions: (
+    id: string,
+    fromVersionId: string,
+    toVersionId: string,
+  ) =>
+    unwrap<unknown>(
+      withQuery(`${BASE}/workflows/${encodeURIComponent(id)}/versions/diff`, {
+        from: fromVersionId,
+        to: toVersionId,
+      }),
+    ).then(parseWorkflowVersionDiff),
 
   // Definition validation — canonicalizes a draft without persisting it.
   validateDefinition: (definition: JsonObject) =>
@@ -416,6 +677,10 @@ export const workbuddyWorkflowsApi = {
       `${BASE}/workflow-definitions/validate`,
       jsonInit("POST", { definition }),
     ),
+
+  // Definition metadata — the compiler contract a form is rendered from.
+  getDefinitionMetadata: () =>
+    unwrap<WorkflowDefinitionMetadata>(`${BASE}/workflow-definitions/metadata`),
 
   // Trigger registrations (tenant admins). No response carries a secret.
   listTriggerRegistrations: (workflowId: string) =>

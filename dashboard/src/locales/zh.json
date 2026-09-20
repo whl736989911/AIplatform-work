@@ -6330,7 +6330,9 @@
         "saveFailed": "保存工作流失败",
         "revisionConflict": "工作流自加载后在服务端已变更，请刷新后重试。",
         "closeWarning": "关闭将丢弃当前的校验结果。",
-        "jsonObjectRequired": "定义必须是 JSON 对象。"
+        "jsonObjectRequired": "定义必须是 JSON 对象。",
+        "diagnosticCount": "共 {{count}} 条问题",
+        "diagnosticNode": "节点"
       },
       "versions": {
         "title": "版本历史",
@@ -6374,7 +6376,29 @@
           "promotion": "晋级",
           "import": "导入"
         },
-        "candidateLocked": "提案候选版本不能直接发布。"
+        "candidateLocked": "提案候选版本不能直接发布。",
+        "diff": {
+          "hint": "勾选两个版本后即可比较它们的定义差异。",
+          "compare": "比较所选版本",
+          "title": "定义差异 {{from}} → {{to}}",
+          "empty": "两个版本的定义没有差异。",
+          "missingChanges": "服务端响应未包含差异列表，无法比较这两个定义。",
+          "loadFailed": "比较两个版本失败",
+          "groupCount": "{{count}} 处变更",
+          "old": "旧值",
+          "new": "新值",
+          "noValue": "此侧没有值",
+          "kind": {
+            "added": "新增",
+            "removed": "删除",
+            "replaced": "替换"
+          },
+          "summary": {
+            "added": "新增 {{count}}",
+            "removed": "删除 {{count}}",
+            "replaced": "替换 {{count}}"
+          }
+        }
       },
       "executions": {
         "title": "执行",
@@ -6419,7 +6443,15 @@
           "webhook": "Webhook",
           "event": "事件",
           "api": "API"
-        }
+        },
+        "rerun": "重新运行",
+        "rerunConfirm": "将用该工作流当前已发布的版本重新运行一次（与本次运行所用版本可能不同）。",
+        "rerunStarted": "已提交重新运行",
+        "rerunFailed": "重新运行失败",
+        "rerunVersionNotice": "本次运行使用的版本：{{version}}",
+        "rerunMissingWorkflow": "该行没有工作流 id，无法重新运行",
+        "rerunMissingVersion": "该行没有记录版本，重新运行可能不是同一套定义",
+        "rerunMissingInputs": "该行没有记录输入，重新运行会缺少参数"
       },
       "run": {
         "title": "运行 {{name}}",
@@ -6499,7 +6531,31 @@
         "recordFailed": "登记对账失败",
         "evidenceInvalid": "证据必须是 JSON 对象。",
         "nodeRequired": "请选择该证据对应的节点。",
-        "noPayload": "该执行未记录内容。"
+        "noPayload": "该执行未记录内容。",
+        "activeDuration": "本次运行的活跃耗时",
+        "tokenUsage": "本次运行的 token 总量",
+        "stepInput": "该节点的输入",
+        "stepOutput": "该节点的产出",
+        "stepDuration": "该节点耗时",
+        "stepSkipReason": "跳过原因",
+        "skipReason": "跳过原因",
+        "tokensInput": "输入 token",
+        "tokensOutput": "输出 token",
+        "tokensTotal": "总 token",
+        "reconcileDecision": "对账结论",
+        "reconcileDecisionValue": "确认成功或确认失败",
+        "reconcileStepRun": "被挂起的步骤",
+        "reconcileEvidenceRef": "证据引用",
+        "reconcileEvidenceRefHint": "填写证据的来源标识（≤64 字符，通常是工单号或外部单号）。",
+        "reconcileReason": "判定理由",
+        "reconcileNote": "备注",
+        "reconcileExternalRequest": "外部请求号",
+        "reconcileDecidedBy": "判定人",
+        "reconcileNoSteps": "本次运行没有处于“等待对账”的步骤，无需对账。",
+        "decisionRequired": "请选择对账结论",
+        "reasonRequired": "请填写判定理由",
+        "evidenceRefRequired": "请填写证据引用",
+        "evidenceRefInvalid": "证据引用最长 64 个字符"
       },
       "triggers": {
         "title": "触发器注册",
@@ -7463,6 +7519,80 @@
       "columnTrigger": "触发方式",
       "columnStarted": "开始时间",
       "columnFinished": "结束时间"
+    }
+  },
+  "workflowDiagnostics": {
+    "WORKFLOW_SCHEMA_INVALID": {
+      "hint": "定义不符合 workflow-v1 schema：按 path 指的字段补必填项、改类型或去掉多余字段。"
+    },
+    "WORKFLOW_NODE_DUPLICATE_ID": {
+      "hint": "节点 id 必须唯一：把重复的节点改名，或合并成一个节点。"
+    },
+    "WORKFLOW_SAVE_AS_DUPLICATE": {
+      "hint": "save_as 键重复：每个节点写入的结果键只允许一个产出者，改掉冲突的 save_as。"
+    },
+    "WORKFLOW_EDGE_UNKNOWN_NODE": {
+      "hint": "边指向了不存在的节点：检查 source/target 是否是已声明节点的 id（或该节点已被删除）。"
+    },
+    "WORKFLOW_EDGE_DUPLICATE": {
+      "hint": "同一条边重复声明：删掉重复的边。"
+    },
+    "WORKFLOW_EDGE_SELF_LOOP": {
+      "hint": "节点连到了自己：删掉自环，或改成条件分支。"
+    },
+    "WORKFLOW_EDGE_UNEXPECTED_WHEN": {
+      "hint": "只有 condition 节点的出边可以带 when：去掉该字段，或把节点类型改成 condition。"
+    },
+    "WORKFLOW_CONDITION_EDGES": {
+      "hint": "condition 节点必须恰好有一条 when=true 和一条 when=false 的出边：补齐或缺的边，删掉多余的。"
+    },
+    "WORKFLOW_APPROVAL_EDGES": {
+      "hint": "approval 节点不能同时声明 target_node_id 和显式出边：二选一。"
+    },
+    "WORKFLOW_APPROVAL_TARGET": {
+      "hint": "approval 的 target_node_id 必须是它的下游节点且不能是自己：改成本节点的后继，或去掉该字段。"
+    },
+    "WORKFLOW_APPROVER_INVALID": {
+      "hint": "没有有效的审批人：把至少一名同租户的 active 成员设为审批人（或让管理员先授权）。"
+    },
+    "WORKFLOW_ENTRY_COUNT": {
+      "hint": "工作流必须恰好一个入口（没有上游的节点）：把多余的入口并入主链，或补上连边。"
+    },
+    "WORKFLOW_CYCLE": {
+      "hint": "工作流必须是有向无环图：按 path 给出的环节点删掉构成环的那条边。"
+    },
+    "WORKFLOW_UNREACHABLE": {
+      "hint": "有节点从入口不可达：把它接到可达链路上，或删除该节点。"
+    },
+    "WORKFLOW_REFERENCE_INVALID": {
+      "hint": "引用写法不对：只允许 inputs.<name> 或 nodes.<node_id>.output，标识符用小写字母开头、只含小写字母/数字/下划线、≤64 字符。"
+    },
+    "WORKFLOW_REFERENCE_UNKNOWN": {
+      "hint": "引用的输入或节点不存在：改成已声明的 input 名或已存在的节点 id。"
+    },
+    "WORKFLOW_REFERENCE_NOT_UPSTREAM": {
+      "hint": "只能引用上游节点的输出：把引用改到该节点之前的步骤，或调整连边顺序。"
+    },
+    "WORKFLOW_TEMPLATE_INVALID": {
+      "hint": "模板写法不对：{{...}} 必须闭合，且一个字段最多 32 个占位符。"
+    },
+    "WORKFLOW_CEL_INVALID": {
+      "hint": "CEL 表达式语法错误：修好表达式（可用 inputs.<name> 与 outputs.<save_as> 引用）。"
+    },
+    "WORKFLOW_TOOL_UNAVAILABLE": {
+      "hint": "工具在本租户不可达：让管理员授权该工具，或换用已授权的工具。"
+    },
+    "WORKFLOW_KNOWLEDGE_BASE_UNKNOWN": {
+      "hint": "知识库不可达或不存在：改成本租户可见的知识库，或去掉该引用。"
+    },
+    "WORKBUDDY_MODEL_NOT_CONFIGURED": {
+      "hint": "模型未配置：让管理员在模型目录里为该租户配置并授权该模型。"
+    },
+    "WORKBUDDY_DEPENDENCY_UNAVAILABLE": {
+      "hint": "依赖不可用（如 schema 文件或 CEL 沙箱）：这是部署问题，请联系运维，改定义不会有帮助。"
+    },
+    "WORKFLOW_VERSION_HASH_MISMATCH": {
+      "hint": "已发布版本的定义与其哈希不一致：这是完整性告警，不要继续发布，请联系运维核对存储。"
     }
   }
 }
