@@ -5,7 +5,7 @@ import { message } from "@/utils/antdMessage";
 
 import { KeyRound, Lock, User } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { clearAuthToken, setAuthToken } from "../../api";
+import { clearAuthToken, setAuthToken, setRefreshToken } from "../../api";
 import { authApi, type OauthProviderStatus } from "../../api/modules/auth";
 import { apiErrorMessage } from "../../utils/apiError";
 import { refreshServerLabels } from "../../i18n";
@@ -202,6 +202,7 @@ export default function LoginPage() {
       const token = await captchaRef.current?.getToken();
       const res = await authApi.login(username, password, token);
       setAuthToken(res.access_token);
+      setRefreshToken(res.refresh_token ?? null);
       await applyUserLocale(res.user.locale);
       void refreshServerLabels(res.user.locale);
       navigate("/chat", { replace: true });

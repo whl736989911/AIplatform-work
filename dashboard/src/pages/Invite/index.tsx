@@ -11,7 +11,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { setAuthToken } from "../../api";
+import { setAuthToken, setRefreshToken } from "../../api";
 import { invitesApi } from "../../api/modules/invites";
 import { message } from "@/utils/antdMessage";
 import { apiErrorMessage } from "../../utils/apiError";
@@ -119,6 +119,7 @@ export default function InvitePage() {
         email: values.email?.trim() || null,
       });
       setAuthToken(res.access_token);
+      setRefreshToken(res.refresh_token ?? null);
       await applyUserLocale(res.user.locale);
       void refreshServerLabels(res.user.locale);
       setStep(2);

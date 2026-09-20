@@ -3,7 +3,7 @@ import { Button, Result, Spin } from "antd";
 import { message } from "@/utils/antdMessage";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { setAuthToken } from "../../api";
+import { setAuthToken, setRefreshToken } from "../../api";
 import { authApi } from "../../api/modules/auth";
 import { refreshServerLabels } from "../../i18n";
 import { apiErrorMessage } from "../../utils/apiError";
@@ -77,6 +77,7 @@ export default function OidcComplete() {
       .exchangeOidcCode(code)
       .then(async (res) => {
         setAuthToken(res.access_token);
+        setRefreshToken(res.refresh_token ?? null);
         await applyUserLocale(res.user.locale);
         void refreshServerLabels(res.user.locale);
         const dest = safeRedirect(redirect);

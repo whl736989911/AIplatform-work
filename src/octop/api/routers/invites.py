@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
-from octop.api.deps import get_server, require_permission, sign_token
+from octop.api.deps import get_server, require_permission
 from octop.api.routers.auth import _user_json
 from octop.infra.users.identity import User
 from octop.infra.users.invites import (
@@ -145,14 +145,7 @@ async def redeem_invite(
     from octop.infra.agents.default_agent import try_bootstrap_default_agent
 
     await try_bootstrap_default_agent(server, user_id=user.id, locale=user.locale)
-    secret = server.services.secret_repo.get("jwt")
-    ttl = server.services.config.access_token_ttl_seconds
-    token = sign_token(
-        secret, sub=user.id, uname=user.username, role=user.role.value, ttl_seconds=ttl
-    )
-    return {
-        "access_token": token,
-        "token_type": "Bearer",
-        "expires_in": ttl,
-        "user": _user_json(user, locale=user.locale),
-    }
+    # An invited member gets the same renewable session as anyone else.
+    from octop.api.routers.auth import issue_session
+
+    return {**issue_session(server, user), "user": _user_json(user, locale=user.locale)}

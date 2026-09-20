@@ -29,7 +29,7 @@ import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { authApi } from "../api/modules/auth";
 import { preferencesApi } from "../api/modules/preferences";
-import { clearAuthToken } from "../api/request";
+import { clearAuthToken, getRefreshToken } from "../api/request";
 import { applyGuestLocale, applyUserLocale } from "../utils/locale";
 import { apiErrorMessage } from "../utils/apiError";
 import { isSsoPopupMessage, openSsoPopup } from "../utils/ssoPopup";
@@ -110,7 +110,7 @@ export default function AvatarDropdown({
 
   const handleLogout = useCallback(async () => {
     setMenuOpen(false);
-    await authApi.logout();
+    await authApi.logout(getRefreshToken());
     clearAuthToken();
     await applyGuestLocale();
     navigate("/login", { replace: true });

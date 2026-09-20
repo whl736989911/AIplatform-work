@@ -52,7 +52,7 @@ def _refresh_token_hash(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _issue_session(server: Any, user: Any, *, family_id: str | None = None) -> dict[str, Any]:
+def issue_session(server: Any, user: Any, *, family_id: str | None = None) -> dict[str, Any]:
     """The token pair a sign-in (or a renewal) hands out.
 
     The plaintext refresh token leaves here and is never stored; only its hash is,
@@ -168,7 +168,7 @@ async def login(
     user = await server.user_manager.authenticate(body.username, body.password)
     if user is None:
         raise OctopError(ErrorCode.AUTH_FAILED, "invalid credentials")
-    session = _issue_session(server, user)
+    session = issue_session(server, user)
     return {**session, "user": _user_json(user, locale=user.locale)}
 
 
@@ -194,7 +194,7 @@ async def refresh(body: RefreshBody, server: Any = Depends(get_server)) -> dict[
     if user is None:
         repo.revoke_family(row.family_id)
         raise OctopError(ErrorCode.USER_DISABLED, "user not active")
-    session = _issue_session(server, user, family_id=row.family_id)
+    session = issue_session(server, user, family_id=row.family_id)
     return {**session, "user": _user_json(user, locale=user.locale)}
 
 

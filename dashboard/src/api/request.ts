@@ -16,6 +16,9 @@ export const FORBIDDEN_EVENT = "octop:forbidden";
 /** Response header used by the server for JWT sliding renewal. */
 export const ACCESS_TOKEN_RESPONSE_HEADER = "X-Octop-Access-Token";
 
+/** Where the refresh token lives; it is only ever sent back to ``/auth/refresh``. */
+export const REFRESH_TOKEN_KEY = "octop:refresh-token";
+
 /** Quiet error thrown when setup lockdown blocks a non-wizard API call. */
 export class SetupRequiredError extends Error {
   constructor() {
@@ -53,9 +56,24 @@ export function getAuthToken(): string {
   return localStorage.getItem(AUTH_TOKEN_KEY) || "";
 }
 
+/** Save the refresh token (the server stores only its hash). */
+export function setRefreshToken(token: string | null) {
+  if (token) {
+    localStorage.setItem(REFRESH_TOKEN_KEY, token);
+  } else {
+    localStorage.removeItem(REFRESH_TOKEN_KEY);
+  }
+}
+
+/** Get the refresh token, or "" when this browser has no session renewal stored. */
+export function getRefreshToken(): string {
+  return localStorage.getItem(REFRESH_TOKEN_KEY) || "";
+}
+
 /** Remove JWT token from localStorage */
 export function clearAuthToken() {
   localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
   localStorage.removeItem("octop:active-agent");
   setActiveAgentId(null);
 }
@@ -66,6 +84,69 @@ export function applyRenewedAccessToken(response: Response): void {
   if (renewed) {
     setAuthToken(renewed);
   }
+}
+
+/**
+ * True when a 401 is worth renewing for: only our own API, and never the auth
+ * endpoints themselves (a failed refresh must not recurse into another refresh).
+ *
+ * It takes the resolved URL, not the caller's path: callers pass paths like
+ * ``/agents`` and ``getApiUrl`` adds the ``/api`` prefix, so testing the raw path
+ * would silently never match.
+ */
+function mayRenewAfter401(url: string, response: Response): boolean {
+  return (
+    response.status === 401 &&
+    url.startsWith("/api/") &&
+    !url.startsWith("/api/auth/")
+  );
+}
+
+let _refreshInFlight: Promise<boolean> | null = null;
+
+/**
+ * Exchange the stored refresh token for a fresh pair — at most one at a time.
+ *
+ * The server rotates on every use and treats a second presentation of the same
+ * token as a replay, which revokes the whole family. Two requests that hit a 401
+ * together must therefore share one exchange instead of racing each other into a
+ * sign-out. On failure the local session is cleared, exactly like any other 401.
+ */
+export function refreshSession(): Promise<boolean> {
+  if (_refreshInFlight) return _refreshInFlight;
+  const token = getRefreshToken();
+  if (!token) return Promise.resolve(false);
+  _refreshInFlight = (async () => {
+    try {
+      const response = await fetch(getApiUrl("/auth/refresh"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: token }),
+      });
+      if (!response.ok) {
+        clearAuthToken();
+        return false;
+      }
+      const body = (await response.json()) as {
+        access_token?: string;
+        refresh_token?: string;
+      };
+      if (!body.access_token || !body.refresh_token) {
+        clearAuthToken();
+        return false;
+      }
+      setAuthToken(body.access_token);
+      setRefreshToken(body.refresh_token);
+      return true;
+    } catch {
+      // A network failure is not proof the session is dead: keep what we have and
+      // let the caller surface the original error.
+      return false;
+    } finally {
+      _refreshInFlight = null;
+    }
+  })();
+  return _refreshInFlight;
 }
 
 let _redirectingToSetup = false;
@@ -298,6 +379,7 @@ async function throwIfUnauthorized(
 export async function request<T = unknown>(
   path: string,
   options: RequestInit = {},
+  allowRenewal = true,
 ): Promise<T> {
   assertNotSetupLocked(path);
 
@@ -305,10 +387,16 @@ export async function request<T = unknown>(
 
   const headers = buildHeaders(path, options.headers);
 
-  const response = await fetch(url, {
+  let response = await fetch(url, {
     ...options,
     headers,
   });
+
+  // One renewal attempt per call: a session that is still refused after a fresh
+  // token is a real 401, and retrying again could only spin.
+  if (allowRenewal && mayRenewAfter401(url, response) && (await refreshSession())) {
+    response = await fetch(url, { ...options, headers });
+  }
 
   if (await check503ForSetupRequired(path, response)) {
     throw new SetupRequiredError();
@@ -354,15 +442,22 @@ export async function requestBlob(
   path: string,
   options: RequestInit = {},
   onProgress?: (loaded: number, total: number) => void,
+  allowRenewal = true,
 ): Promise<Blob> {
   assertNotSetupLocked(path);
 
   const url = getApiUrl(path);
   const headers = buildAuthHeaders(path);
-  const response = await fetch(url, {
+  let response = await fetch(url, {
     ...options,
     headers: { ...headers, ...(options.headers as Record<string, string>) },
   });
+  if (allowRenewal && mayRenewAfter401(url, response) && (await refreshSession())) {
+    response = await fetch(url, {
+      ...options,
+      headers: { ...headers, ...(options.headers as Record<string, string>) },
+    });
+  }
 
   if (await check503ForSetupRequired(path, response)) {
     throw new SetupRequiredError();
@@ -407,15 +502,22 @@ export async function requestBlob(
 export async function probeAuthResource(
   path: string,
   options: RequestInit = {},
+  allowRenewal = true,
 ): Promise<void> {
   assertNotSetupLocked(path);
 
   const url = getApiUrl(path);
   const headers = buildAuthHeaders(path);
-  const response = await fetch(url, {
+  let response = await fetch(url, {
     ...options,
     headers: { ...headers, ...(options.headers as Record<string, string>) },
   });
+  if (allowRenewal && mayRenewAfter401(url, response) && (await refreshSession())) {
+    response = await fetch(url, {
+      ...options,
+      headers: { ...headers, ...(options.headers as Record<string, string>) },
+    });
+  }
 
   if (await check503ForSetupRequired(path, response)) {
     throw new SetupRequiredError();
@@ -447,15 +549,22 @@ export async function probeAuthResource(
 export async function requestStream(
   path: string,
   options: RequestInit = {},
+  allowRenewal = true,
 ): Promise<{ contentType: string; body: ReadableStream<Uint8Array> }> {
   assertNotSetupLocked(path);
 
   const url = getApiUrl(path);
   const headers = buildAuthHeaders(path);
-  const response = await fetch(url, {
+  let response = await fetch(url, {
     ...options,
     headers: { ...headers, ...(options.headers as Record<string, string>) },
   });
+  if (allowRenewal && mayRenewAfter401(url, response) && (await refreshSession())) {
+    response = await fetch(url, {
+      ...options,
+      headers: { ...headers, ...(options.headers as Record<string, string>) },
+    });
+  }
 
   if (await check503ForSetupRequired(path, response)) {
     throw new SetupRequiredError();
