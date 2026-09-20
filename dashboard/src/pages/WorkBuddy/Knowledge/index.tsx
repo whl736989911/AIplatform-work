@@ -12,7 +12,7 @@
  * red failure (see ``isSliceUnavailable``).
  */
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Alert, Button, Select, Space, Spin, Tag } from "antd";
 import {
@@ -35,6 +35,7 @@ import {
   useKnowledgeResource,
   type KnowledgeResource,
 } from "./useKnowledgeResource";
+import type { KnowledgeLayer } from "./visibility";
 import BasesPanel from "./BasesPanel";
 import DocumentsPanel from "./DocumentsPanel";
 import AclPanel from "./AclPanel";
@@ -140,6 +141,9 @@ function BaseGate({
 export default function KnowledgePage() {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
+  // The visibility layers survive a tab switch because the page owns them; the
+  // URL contract (``?base=`` / ``?tab=``) stays exactly as it was.
+  const [layers, setLayers] = useState<KnowledgeLayer[]>([]);
 
   const basesResource = useKnowledgeResource<KnowledgeBase[]>(
     [],
@@ -215,6 +219,8 @@ export default function KnowledgePage() {
           resource={basesResource}
           selectedId={selectedBase?.kb_id ?? null}
           onSelect={selectBase}
+          layers={layers}
+          onLayersChange={setLayers}
         />
       )}
       {activeTab === "documents" &&

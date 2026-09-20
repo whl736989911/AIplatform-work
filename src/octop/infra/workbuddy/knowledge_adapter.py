@@ -142,7 +142,9 @@ def mirror_base(server: Any, *, user_id: int, base: Any) -> str | None:
         existing = _matched_base(repo, ctx, user_id=user_id, name=str(base.name))
         if existing is not None:
             return existing.kb_id
-        model = _usable_model_revision(db, ctx)
+        model = _usable_model_revision(
+            db, ctx, preferred_key=getattr(base, "embedding_model", None)
+        )
         if model is None:
             logger.warning(
                 "knowledge mirror: tenant %s has no granted embedding revision; base %r stays personal",
@@ -259,16 +261,26 @@ def _matched_base(
     return None
 
 
-def _usable_model_revision(db: DatabasePool, ctx: WorkBuddyDbContext) -> Any | None:
-    """A published embedding revision the tenant granted, newest key first.
+def _usable_model_revision(
+    db: DatabasePool, ctx: WorkBuddyDbContext, *, preferred_key: str | None = None
+) -> Any | None:
+    """A published embedding revision the tenant granted.
 
-    The personal base's own ``embedding_model`` is preferred when it maps onto a
-    granted revision, so a mirrored base keeps the vectors it already has.
+    The personal base's own ``embedding_model`` is preferred when the tenant
+    granted a revision of that key, so a mirrored base keeps the vectors it
+    already has; otherwise the first granted revision is used.
     """
     catalog = WorkBuddyCatalogRepo(db)
-    for revision in catalog.list_public_models():
+    granted = [
+        revision
+        for revision in catalog.list_public_models()
         if catalog.granted_tenant_wide(
             str(ctx.tenant_id), kind=CAPABILITY_MODEL, revision_id=revision.model_revision_id
-        ):
-            return revision
-    return None
+        )
+    ]
+    wanted = str(preferred_key or "").strip()
+    if wanted:
+        for revision in granted:
+            if revision.model_key == wanted:
+                return revision
+    return granted[0] if granted else None

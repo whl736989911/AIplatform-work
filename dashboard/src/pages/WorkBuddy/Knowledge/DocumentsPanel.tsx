@@ -27,13 +27,16 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
+  Check,
   Download,
   FileText,
   FileUp,
   MoveRight,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Trash2,
+  X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { message } from "@/utils/antdMessage";
@@ -366,6 +369,9 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
     useState<KnowledgeDocument | null>(null);
   const [moveTarget, setMoveTarget] = useState<KnowledgeDocument | null>(null);
   const [folder, setFolder] = useState(KNOWLEDGE_ROOT_PATH);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [savingRenameId, setSavingRenameId] = useState<string | null>(null);
   const canWrite = base.permission === "write" || base.permission === "admin";
 
   const documents = useKnowledgeResource<KnowledgeDocument[]>(
@@ -400,6 +406,13 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
     setMoveTarget(null);
   }, [base.kb_id]);
 
+  // An open inline rename belongs to a row on screen; leaving the folder (or the
+  // base) closes it instead of leaving an editor bound to a row nobody sees.
+  useEffect(() => {
+    setRenamingId(null);
+    setRenameValue("");
+  }, [base.kb_id, folder]);
+
   // A folder exists while a document sits in it; emptying one by moving its last
   // document away must not strand the reader in a folder the tree no longer has.
   useEffect(() => {
@@ -433,6 +446,54 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
       }
     },
     [base.kb_id, refreshAll, t],
+  );
+
+  const startRename = useCallback((row: KnowledgeDocument) => {
+    setRenamingId(row.document_id);
+    setRenameValue(row.title);
+  }, []);
+
+  const cancelRename = useCallback(() => {
+    setRenamingId(null);
+    setRenameValue("");
+  }, []);
+
+  const submitRename = useCallback(
+    async (row: KnowledgeDocument) => {
+      const title = renameValue.trim();
+      if (title.length === 0) {
+        message.warning(t("workbuddy.knowledge.documents.renameRequired"));
+        return;
+      }
+      setSavingRenameId(row.document_id);
+      try {
+        const renamed = await workbuddyKnowledgeApi.renameDocument(
+          base.kb_id,
+          row.document_id,
+          { title },
+        );
+        message.success(
+          t("workbuddy.knowledge.documents.renameSuccess", {
+            title: renamed.title,
+          }),
+        );
+        cancelRename();
+        await refreshDocuments();
+      } catch (err) {
+        // The editor stays open: the reader keeps the typed title and can
+        // correct it instead of retyping it after the server refused.
+        message.error(
+          apiErrorMessage(
+            err,
+            t("workbuddy.knowledge.documents.renameFailed"),
+            t,
+          ),
+        );
+      } finally {
+        setSavingRenameId(null);
+      }
+    },
+    [base.kb_id, cancelRename, refreshDocuments, renameValue, t],
   );
 
   const onDownload = useCallback(
@@ -531,20 +592,50 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
       dataIndex: "title",
       key: "title",
       width: 240,
-      render: (value: string, row) => (
-        <Tooltip title={row.document_id}>
-          <Button
-            type="link"
-            size="small"
-            onClick={() => {
-              setPreviewDocument(row);
-              setPreviewOpen(true);
-            }}
-          >
-            {value}
-          </Button>
-        </Tooltip>
-      ),
+      render: (value: string, row) =>
+        renamingId === row.document_id ? (
+          <Space size={4}>
+            <Input
+              size="small"
+              autoFocus
+              maxLength={255}
+              className={styles.renameInput}
+              value={renameValue}
+              aria-label={t("workbuddy.knowledge.documents.renameField")}
+              onChange={(event) => setRenameValue(event.target.value)}
+              onPressEnter={() => void submitRename(row)}
+            />
+            <Button
+              type="text"
+              size="small"
+              icon={<Check size={14} />}
+              aria-label={t("workbuddy.knowledge.documents.renameConfirm")}
+              disabled={renameValue.trim().length === 0}
+              loading={savingRenameId === row.document_id}
+              onClick={() => void submitRename(row)}
+            />
+            <Button
+              type="text"
+              size="small"
+              icon={<X size={14} />}
+              aria-label={t("workbuddy.knowledge.documents.renameCancel")}
+              onClick={cancelRename}
+            />
+          </Space>
+        ) : (
+          <Tooltip title={row.document_id}>
+            <Button
+              type="link"
+              size="small"
+              onClick={() => {
+                setPreviewDocument(row);
+                setPreviewOpen(true);
+              }}
+            >
+              {value}
+            </Button>
+          </Tooltip>
+        ),
     },
     {
       title: t("workbuddy.knowledge.documents.columnFolder"),
@@ -622,6 +713,16 @@ export default function DocumentsPanel({ base }: { base: KnowledgeBase }) {
           >
             {t("workbuddy.knowledge.documents.download")}
           </Button>
+          {canWrite && (
+            <Button
+              type="link"
+              size="small"
+              icon={<Pencil size={14} />}
+              onClick={() => startRename(row)}
+            >
+              {t("workbuddy.knowledge.documents.rename")}
+            </Button>
+          )}
           {canWrite && (
             <Button
               type="link"

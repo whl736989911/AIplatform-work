@@ -175,14 +175,10 @@ def test_folders_are_created_by_moving_a_document(
     ]
 
 
-def test_the_document_payload_carries_its_folder(
-    pool: PostgresPool, world: dict[str, Any]
-) -> None:
+def test_the_document_payload_carries_its_folder(pool: PostgresPool, world: dict[str, Any]) -> None:
     """A client renders the tree from the documents it already lists."""
     service = _service(pool)
-    service.move_document(
-        _actor(world), world["kb_id"], world["documents"][1], folder_path="Ops"
-    )
+    service.move_document(_actor(world), world["kb_id"], world["documents"][1], folder_path="Ops")
     payloads = service.list_documents(_actor(world), world["kb_id"])
     by_id = {item["document_id"]: item for item in payloads}
     assert by_id[world["documents"][1]]["folder_path"] == "Ops"

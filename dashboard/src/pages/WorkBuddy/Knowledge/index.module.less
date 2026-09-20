@@ -62,6 +62,32 @@
   width: 120px;
 }
 
+/* Bases: the four visibility layers, unioned by chip. */
+
+.layerBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.layerBarLabel {
+  font-size: 12px;
+  color: var(--fn-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+.layerBarCount {
+  font-size: 12px;
+}
+
+.layerBarHint {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .searchForm {
   row-gap: 8px;
   margin-bottom: 16px;
@@ -137,6 +163,11 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 12px;
+}
+
+/* Inline rename: the editor must read as one line inside the title cell. */
+.renameInput {
+  width: 160px;
 }
 
 .pathBreadcrumb {

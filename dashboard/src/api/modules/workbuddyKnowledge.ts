@@ -51,6 +51,14 @@ export interface KnowledgeEmbeddingPin extends KnowledgeEmbeddingDescriptor {
   model_revision_id: string;
 }
 
+/**
+ * Why the calling member may read one base, in the resolver's own words:
+ * ``owner`` / ``department-member`` / ``enterprise-member`` / ``tenant-admin``
+ * and ``acl:<permission>`` for an explicit grant. A base may carry several
+ * sources; the list is the backend's answer, never a client-side guess.
+ */
+export type KnowledgeAccessSource = string;
+
 export interface KnowledgeBase {
   kb_id: string;
   name: string;
@@ -60,6 +68,8 @@ export interface KnowledgeBase {
   owner_user_id: number | null;
   archived_at: number | null;
   permission: KnowledgePermission | null;
+  /** Why this caller can read the base; the four-point source list above. */
+  access_sources: KnowledgeAccessSource[];
   embedding: KnowledgeEmbeddingPin;
   created_at: number;
   updated_at: number;
@@ -270,6 +280,18 @@ export interface KnowledgeDocumentReindexed {
   reindexed: boolean;
 }
 
+/** The new title of one document (1–255 characters, trimmed server-side). */
+export interface KnowledgeDocumentRename {
+  title: string;
+}
+
+/** The document row's title after a successful PATCH. */
+export interface KnowledgeDocumentRenamed {
+  document_id: string;
+  kb_id: string;
+  title: string;
+}
+
 /** One document a base-wide reindex refused, with the server's error code. */
 export interface KnowledgeReindexFailure {
   document_id: string;
@@ -442,6 +464,17 @@ export const workbuddyKnowledgeApi = {
         kbId,
       )}/documents/${encodeURIComponent(documentId)}`,
       { method: "DELETE" },
+    ),
+  renameDocument: (
+    kbId: string,
+    documentId: string,
+    body: KnowledgeDocumentRename,
+  ) =>
+    unwrap<KnowledgeDocumentRenamed>(
+      `${BASE}/knowledge-bases/${encodeURIComponent(
+        kbId,
+      )}/documents/${encodeURIComponent(documentId)}`,
+      jsonInit("PATCH", body),
     ),
 
   // Folders

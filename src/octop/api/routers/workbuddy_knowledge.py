@@ -806,3 +806,32 @@ async def move_knowledge_document(
         folder_path=body.folder_path,
     )
     return workbuddy_envelope(request, payload)
+
+
+class DocumentRenameBody(BaseModel):
+    """The document's new title; the 1–255 bound matches the row constraint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=255)
+
+
+@router.patch(
+    "/knowledge-bases/{id}/documents/{document_id}",
+    summary="Rename one document",
+)
+async def rename_knowledge_document(
+    request: Request,
+    id: str,
+    document_id: str,
+    body: DocumentRenameBody,
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    payload = _knowledge(server).rename_document(
+        _actor(principal),
+        _require_uuid(id, "knowledge base id"),
+        _require_uuid(document_id, "document id"),
+        title=body.title,
+    )
+    return workbuddy_envelope(request, payload)
