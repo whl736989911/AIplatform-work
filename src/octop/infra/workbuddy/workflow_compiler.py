@@ -1131,8 +1131,7 @@ class _Compiler:
         require_semantic_resolution: bool,
     ) -> str:
         needed = any(
-            str(node.get("type")) in {"tool", "llm", "approval", "knowledge"}
-            for node in self.nodes
+            str(node.get("type")) in {"tool", "llm", "approval", "knowledge"} for node in self.nodes
         )
         if not needed:
             return "not_required"
