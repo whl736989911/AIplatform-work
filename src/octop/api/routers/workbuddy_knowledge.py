@@ -24,7 +24,7 @@ import logging
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -631,6 +631,28 @@ class ChatMessageBody(BaseModel):
 
     message_id: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=8000)
+
+
+@router.get(
+    "/conversations/{conversation_id}/deliveries",
+    summary="What this conversation has triggered",
+)
+async def list_conversation_deliveries(
+    request: Request,
+    conversation_id: str,
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """The deliveries a conversation produced, so a message's effect is visible.
+
+    Read-only: it answers "did my message run anything, and what became of it",
+    which is the question a chat flow has to be able to answer to be trustworthy.
+    """
+    payload = _triggers(server).list_chat_deliveries(
+        _actor(principal), conversation_id=conversation_id, limit=limit
+    )
+    return workbuddy_envelope(request, payload)
 
 
 @router.post(

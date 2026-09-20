@@ -1030,11 +1030,19 @@
       "success_status": 202,
       "summary": "发一条消息，可能触发绑定到该会话的工作流（Chatflow），202",
       "authorization": "租户内登录成员；绑定由事件注册的 event_filter 决定，未命中即正常受理"
+    },
+    {
+      "method": "GET",
+      "path": "/conversations/{conversation_id}/deliveries",
+      "stage": "A6",
+      "success_status": 200,
+      "summary": "该会话触发过的投递（消息触发的运行归属，含拒绝原因），200",
+      "authorization": "租户内登录成员；按投递事件键前缀（chat:<会话>:<消息>）检索"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 66,
-    "total": 128
+    "supplemental": 67,
+    "total": 129
   }
 }

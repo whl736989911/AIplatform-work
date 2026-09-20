@@ -1909,6 +1909,36 @@ class WorkBuddyTriggerService:
             "deliveries": deliveries,
         }
 
+    def list_chat_deliveries(
+        self, actor: WorkBuddyKnowledgeActor, *, conversation_id: str, limit: int = 100
+    ) -> dict[str, Any]:
+        """What one conversation has triggered, so a person can see their message's effect.
+
+        The read is by the delivery's own event key, which is why the key carries
+        the conversation: a run stays attributable to the message that caused it
+        long after the request that sent it has gone.
+        """
+        ctx = self.context(actor)
+        rows = self._repository().list_chat_deliveries(
+            ctx, conversation_id=conversation_id, limit=limit
+        )
+        return {
+            "conversation_id": conversation_id,
+            "items": [
+                {
+                    "delivery_id": row.delivery_id,
+                    "registration_id": row.registration_id,
+                    "event_key": row.event_key,
+                    "status": row.status,
+                    "execution_id": row.execution_id,
+                    "rejection_code": row.rejection_code,
+                    "received_at": row.received_at,
+                    "completed_at": row.completed_at,
+                }
+                for row in rows
+            ],
+        }
+
     def test_delivery(self, actor: WorkBuddyKnowledgeActor, registration_id: str) -> dict[str, Any]:
         """Admin replay: dispatch a synthetic event and record the audit row."""
         ctx = self.context(actor)
