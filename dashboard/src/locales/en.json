@@ -6543,6 +6543,55 @@
       "proposals": {
         "title": "Improvement proposals for this workflow",
         "empty": "No improvement proposals for this workflow yet."
+      },
+      "wizard": {
+        "title": "Create with the wizard",
+        "back": "Back",
+        "next": "Next",
+        "save": "Save and publish",
+        "name": "Workflow name",
+        "step": {
+          "inputs": "1 Inputs",
+          "steps": "2 Steps",
+          "data": "3 Data",
+          "output": "4 Output"
+        },
+        "input": {
+          "name": "Input name",
+          "required": "Required",
+          "default": "Default (optional)",
+          "add": "Add input"
+        },
+        "type": {
+          "input": "Read an input",
+          "knowledge": "Search knowledge",
+          "llm": "Ask a model",
+          "tool": "Call a tool",
+          "transform": "Reshape data",
+          "condition": "Branch on a condition",
+          "approval": "Wait for approval",
+          "output": "Produce the result"
+        },
+        "data": {
+          "resultKey": "Result name",
+          "referenceTitle": "Steps can reference an earlier result like this (in the fields that accept templates)"
+        },
+        "output": {
+          "title": "Output",
+          "hint": "Publishing makes the workflow runnable; its runs appear in the runs list."
+        },
+        "diagnostics": "{{count}} thing(s) still need fixing",
+        "saveFailed": "Could not save",
+        "saved": "Saved and published: {{id}}",
+        "dryRun": {
+          "label": "Dry run",
+          "started": "Dry run submitted (status {{status}}, run {{execution}})",
+          "failed": "Could not submit the dry run"
+        },
+        "field": {
+          "listHint": "Enter one value per item",
+          "referenceHint": "Reference an earlier step, e.g. {{ inputs.name }}"
+        }
       }
     },
     "approvals": {
@@ -7454,6 +7503,15 @@
     },
     "WORKFLOW_VERSION_HASH_MISMATCH": {
       "hint": "A published version's definition no longer matches its hash: an integrity alarm — do not publish; have operations check storage."
+    },
+    "WORKFLOW_INPUT_NODE_UNKNOWN": {
+      "hint": "The input node names an input the workflow does not declare: declare it in the input step (lowercase start, letters/digits/underscores only) or point the node at a declared name."
+    },
+    "WORKFLOW_OUTPUT_NOT_TERMINAL": {
+      "hint": "Something runs after the output node: an output node must be the last step — remove its outgoing edge, or move the following node upstream of it."
+    },
+    "WORKFLOW_OUTPUT_DUPLICATE": {
+      "hint": "A workflow declares at most one output node: remove the extra one or merge them into a single result."
     }
   }
 }

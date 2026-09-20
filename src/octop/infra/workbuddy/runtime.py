@@ -831,6 +831,7 @@ def run_graph(
     should_stop: Callable[[], bool] | None = None,
     on_step_dispatch: Callable[[GraphNode], None] | None = None,
     resolve_tool_declaration: Callable[[GraphNode], ToolDeclaration | None] | None = None,
+    retrieve_knowledge: Callable[[GraphNode, Mapping[str, Any]], Any] | None = None,
 ) -> GraphRun:
     """Execute the graph once, deterministically, and aggregate the outcome.
 
@@ -1024,6 +1025,89 @@ def run_graph(
 
         if on_step_start is not None:
             on_step_start(node)
+
+        if node.type in {"input", "output"}:
+            # Both are local: an input node hands one declared input to the graph,
+            # an output node renders the run's result.  Neither leaves the process,
+            # so neither needs a retry or a dispatch intent.
+            local_input: Mapping[str, Any] | None = None
+            try:
+                if node.type == "input":
+                    declared = str(node.config.get("input"))
+                    if declared not in inputs:
+                        raise OctopError(
+                            ErrorCode.WORKBUDDY_VALIDATION_FAILED,
+                            f"input node '{node.id}' names input '{declared}'"
+                            " which this run did not provide",
+                        )
+                    value = inputs[declared]
+                else:
+                    value = render_template(
+                        node.config.get("value"), inputs=inputs, node_results=node_results
+                    )
+                local_input = _activation(
+                    graph, node, inputs=inputs, bindings=bindings, input_value=value
+                )
+            except OctopError as exc:
+                node_failures.append(
+                    record(
+                        node,
+                        "failed",
+                        error_code=exc.code.value,
+                        error_message=exc.message,
+                        timing=elapsed(),
+                        input=local_input,
+                    )
+                )
+                propagate_skip(node, failed=True)
+                continue
+            store(node, value)
+            record(node, "success", output=value, timing=elapsed(), input=local_input)
+            propagate_taken(node)
+            continue
+
+        if node.type == "knowledge":
+            knowledge_input = None
+            if retrieve_knowledge is None:
+                # Retrieval is a deployment capability (like the model and tool
+                # adapters): without one the node fails closed instead of quietly
+                # producing "no passages found", which would read as an empty answer.
+                node_failures.append(
+                    record(
+                        node,
+                        "failed",
+                        error_code=ErrorCode.WORKBUDDY_DEPENDENCY_UNAVAILABLE.value,
+                        error_message=("no knowledge retriever is configured for this deployment"),
+                        timing=elapsed(),
+                    )
+                )
+                propagate_skip(node, failed=True)
+                continue
+            try:
+                rendered_query = render_template(
+                    node.config.get("query"), inputs=inputs, node_results=node_results
+                )
+                knowledge_input = _activation(
+                    graph, node, inputs=inputs, bindings=bindings, input_value=rendered_query
+                )
+                value = retrieve_knowledge(node, knowledge_input)
+            except OctopError as exc:
+                node_failures.append(
+                    record(
+                        node,
+                        "failed",
+                        error_code=exc.code.value,
+                        error_message=exc.message,
+                        timing=elapsed(),
+                        input=knowledge_input,
+                    )
+                )
+                propagate_skip(node, failed=True)
+                continue
+            store(node, value)
+            record(node, "success", output=value, timing=elapsed(), input=knowledge_input)
+            propagate_taken(node)
+            continue
 
         if node.type in {"transform", "condition"}:
             expression = node.expression

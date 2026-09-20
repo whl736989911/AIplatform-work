@@ -119,6 +119,10 @@ export const WORKFLOW_NODE_TYPES = [
   "condition",
   "approval",
   "transform",
+  // 显式节点（A-07）：输入、检索、输出各自成为图里的一步
+  "input",
+  "knowledge",
+  "output",
 ] as const;
 export type WorkflowNodeType = (typeof WORKFLOW_NODE_TYPES)[number];
 

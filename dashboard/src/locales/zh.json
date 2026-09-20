@@ -6682,6 +6682,55 @@
       "proposals": {
         "title": "该工作流的改进提案",
         "empty": "该工作流还没有改进提案。"
+      },
+      "wizard": {
+        "title": "用向导创建",
+        "back": "上一步",
+        "next": "下一步",
+        "save": "保存并发布",
+        "name": "工作流名称",
+        "step": {
+          "inputs": "① 输入",
+          "steps": "② 步骤",
+          "data": "③ 数据",
+          "output": "④ 输出"
+        },
+        "input": {
+          "name": "输入名",
+          "required": "必填",
+          "default": "默认值（可选）",
+          "add": "添加输入"
+        },
+        "type": {
+          "input": "读取输入",
+          "knowledge": "查知识库",
+          "llm": "问模型",
+          "tool": "调用工具",
+          "transform": "整理数据",
+          "condition": "条件分支",
+          "approval": "人工审批",
+          "output": "输出结果"
+        },
+        "data": {
+          "resultKey": "结果名",
+          "referenceTitle": "可以在步骤里这样引用上一步的结果（在支持模板的字段里填写）"
+        },
+        "output": {
+          "title": "输出",
+          "hint": "保存并发布后即可试运行；运行结果会出现在运行列表里。"
+        },
+        "diagnostics": "还有 {{count}} 处需要修改",
+        "saveFailed": "保存失败",
+        "saved": "已保存并发布：{{id}}",
+        "dryRun": {
+          "label": "试运行",
+          "started": "已提交试运行（状态 {{status}}，运行 {{execution}}）",
+          "failed": "试运行提交失败"
+        },
+        "field": {
+          "listHint": "可填多个，回车确认",
+          "referenceHint": "可引用上一步，如 {{ inputs.name }}"
+        }
       }
     },
     "approvals": {
@@ -7593,6 +7642,15 @@
     },
     "WORKFLOW_VERSION_HASH_MISMATCH": {
       "hint": "已发布版本的定义与其哈希不一致：这是完整性告警，不要继续发布，请联系运维核对存储。"
+    },
+    "WORKFLOW_INPUT_NODE_UNKNOWN": {
+      "hint": "输入节点指向了未声明的输入：在第 1 步「输入」里声明该输入（名字用小写字母开头、只含小写字母/数字/下划线），或改成本节点已有的输入名。"
+    },
+    "WORKFLOW_OUTPUT_NOT_TERMINAL": {
+      "hint": "输出节点后面还有节点：输出节点必须是最后一步——删掉它的出边，或把后续节点改成输出节点的上游。"
+    },
+    "WORKFLOW_OUTPUT_DUPLICATE": {
+      "hint": "一个工作流只能有一个输出节点：删掉多余的那个，或把两个输出合并成一个。"
     }
   }
 }

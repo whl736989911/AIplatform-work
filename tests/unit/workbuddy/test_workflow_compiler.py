@@ -311,6 +311,28 @@ def test_cycles_and_multiple_roots_are_rejected() -> None:
     assert caught.value.code == WORKFLOW_ENTRY_COUNT
 
 
+def test_a_cycle_with_no_source_reports_the_cycle_instead_of_crashing() -> None:
+    """Every node has an incoming edge, so the graph has no entry node at all.
+
+    The topology pass read the entry before it looked for a cycle, so this shape
+    raised ``IndexError`` — and the validate endpoint answered 503 instead of the
+    cycle diagnostic the caller needs in order to fix the definition.
+    """
+    definition = two_node_definition()
+    definition["nodes"] = [
+        transform("alpha", "1", save_as="first"),
+        transform("beta", "1", save_as="second"),
+    ]
+    definition["edges"] = [
+        {"from": "alpha", "to": "beta"},
+        {"from": "beta", "to": "alpha"},
+    ]
+    with pytest.raises(WorkflowCompileError) as caught:
+        compile_workflow_definition(definition)
+    assert caught.value.code == WORKFLOW_CYCLE
+    assert sorted(caught.value.details["cycle_nodes"]) == ["alpha", "beta"]
+
+
 def test_condition_node_requires_exactly_one_true_and_false_edge() -> None:
     definition = condition_definition()
     definition["edges"] = [edge for edge in definition["edges"] if edge.get("when") != "false"]
