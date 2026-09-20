@@ -1,16 +1,16 @@
 {
   "machine": "machine-B",
   "line": "B",
-  "owner": "对端机器（权限与知识库）",
-  "updated": "2026-09-20T00:00:00Z",
+  "owner": "machine-B（权限与知识库）",
+  "updated": "2026-09-20T07:40:00Z",
   "batches": {
     "1": {
-      "state": "pending",
+      "state": "done",
       "tasks": ["B-01", "B-08", "B-09"],
-      "pr": null,
-      "commits": [],
-      "evidence": "",
-      "notes": "待对端机器按 docs/plan/two-machine-workstreams.md 第 5.2 节循环推进"
+      "pr": 30,
+      "commits": ["dcd40828"],
+      "evidence": "静态：ruff check src tests scripts 通过；ruff format --check 1086 文件已格式化；mypy src/octop 542 文件 0 错。迁移三态（专用临时库一次性脚本）：全新 SQLite 水位→51；既有 SQLite 旧水位重升→51 且探针数据保留；全新 PG 水位→51，新表 workbuddy_object_scopes/workbuddy_object_acl 存在且 RLS enabled+forced，documents.file_ref_id 可空、source NOT NULL 默认 'upload'、两条 source CHECK 与部分唯一索引 wb_knowledge_documents_file_ref_unique(... WHERE file_ref_id IS NOT NULL) 均生效；050+051 二次应用无错（幂等）。测试：pytest tests/unit/db tests/unit/workbuddy tests/integration/test_workbuddy_business_smoke.py tests/integration/test_workbuddy_runtime_postgres.py -q -p no:randomly → 486 passed, 3 skipped。本批次新增 52 项测试（rbac 模型 22、rbac PostgreSQL 9、文本-only 服务 6、文本-only PostgreSQL 6、迁移脚本 9）",
+      "notes": "B-01 提供通用 scope+ACL 骨架（迁移 050 + 新 src/octop/infra/rbac/，含列表可见性谓词与单对象判定的一致性矩阵测试；该矩阵在本批次内抓到并修复了两处真实漂移：SQL 漏管理员对部门级对象的读权限、仓库层重建 actor 时丢 is_tenant_admin）。B-09 以 source 判别列 + 可空 file_ref_id + 部分唯一索引实现文本-only 通道，服务新增 index_text_document（不触碰对象存储），路由接受 source/text。B-08 的 scripts/migrate_kb.py 只做只读对账与 A/B/C 判定，本批次不写入目标库。未新增错误码，未改 errors.py 与 i18n。未把知识库既有权限实现迁入 rbac/（B-10/B-13 合流时收敛）。"
     },
     "2": { "state": "pending", "tasks": ["B-02", "B-03", "B-04"], "pr": null, "commits": [], "evidence": "", "notes": "" },
     "3": { "state": "pending", "tasks": ["B-05", "B-06", "B-07"], "pr": null, "commits": [], "evidence": "", "notes": "" },
