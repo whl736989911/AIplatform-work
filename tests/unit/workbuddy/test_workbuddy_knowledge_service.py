@@ -1389,7 +1389,7 @@ def test_a_chat_message_fires_the_flow_bound_to_that_conversation() -> None:
         _actor(), conversation_id="conv-1", message_id="m-1", text="帮我查一下报价"
     )
     assert result["matched"] == 1, result
-    assert dispatcher.calls == ["chat:m-1"], dispatcher.calls
+    assert dispatcher.calls == ["chat:conv-1:m-1"], dispatcher.calls
     delivery = result["deliveries"][0]
     assert delivery["execution_id"] == "exec-1", delivery
     assert delivery["status"] == "executed", delivery
@@ -1426,8 +1426,8 @@ def test_a_retried_message_does_not_run_the_flow_twice() -> None:
     assert first["deliveries"][0]["duplicate"] is False, first
     assert second["deliveries"][0]["duplicate"] is True, second
     assert second["deliveries"][0]["execution_id"] == "exec-1", second
-    # The message id is the dedupe key: one delivery, one run.
-    assert dispatcher.calls == ["chat:m-1"], dispatcher.calls
+    # The conversation + message id is the dedupe key: one delivery, one run.
+    assert dispatcher.calls == ["chat:conv-1:m-1"], dispatcher.calls
 
 
 def test_a_chat_message_without_a_dispatcher_fails_closed() -> None:

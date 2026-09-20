@@ -1841,7 +1841,7 @@ class WorkBuddyTriggerService:
         raises the message as an event and lets the shared matcher choose, which
         keeps "消息可触发流程" and the webhook path from drifting apart.
 
-        ``message_id`` is the dedupe key. A client that retries a send (or a
+        The dedupe key is the conversation *and* the message id. A client that retries a send (or a
         transport that delivers twice) does not run the workflow twice — the
         delivery ledger already knows how to refuse that, and reuses it here.
 
@@ -1861,7 +1861,10 @@ class WorkBuddyTriggerService:
             )
             if event_matches_filter(event, dict(registration.event_filter or {}))
         ]
-        event_key = f"chat:{message_id}"
+        # The message id is unique inside its conversation, not globally, so the
+        # dedupe key carries both — and the prefix is what lets the delivery
+        # ledger be read back per conversation.
+        event_key = f"chat:{conversation_id}:{message_id}"
         body_sha256 = sha256_hex(f"{conversation_id}:{message_id}:{text}".encode())
         deliveries: list[dict[str, Any]] = []
         for registration in registrations:
