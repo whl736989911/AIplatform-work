@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-20T14:55:00Z",
+  "updated": "2026-09-20T15:20:00Z",
   "batches": {
     "1": {
       "state": "done",
@@ -105,7 +105,7 @@
       "merge": "已合入 main（PR #39，squash，2026-09-20T06:15:34Z）；合入前把 main 同步进来一次（-X ours，理由同批次 4：main 相对分支的分歧就是前序批次的 squash，而分支里的对应内容与之逐字节等价）"
     },
     "6": {
-      "state": "pending",
+      "state": "in_progress",
       "tasks": [
         "A-16",
         "A-17",
@@ -115,8 +115,17 @@
       ],
       "pr": null,
       "commits": [],
-      "evidence": "",
-      "notes": ""
+      "evidence": "A-23：新增 Redis 传输实体 `RedisOutboxPublisher`（LPUSH 每主题一队列、事件 id 随正文走、未配置即无 publisher 而非假装能投递）与 `resolve_redis_publisher()`；`GET /outbox/dead-letters` 按租户显式过滤、仅 admin、只读不可重放。单测 3 例 + 端到端 2 例（死信带错误可读、待投递的算死信、跨租户为空、成员 403）；静态门禁全绿。A-22：核实为**已实现且已覆盖**，本轮未改代码——`/webhooks/{webhook_path}`（唯一免认证路由，HMAC+时间窗+去重+事件过滤）经 `_dispatch` 调 `dispatcher.dispatch(...)` 真正启动执行，缺端口时 fail-closed 并记录拒绝原因；既有单测覆盖验收点（`test_webhook_replay_never_executes_twice` 断言 dispatcher 恰被调用一次、签名/时间窗/篡改、未证明依赖即拒绝、未知路径不可见、过滤不匹配只记录不派发）。",
+      "notes": "A-22 的代码与测试均在前序批次交付，本批次仅做核实（未新增代码）；A-23 为本批次新增。",
+      "tasks_done": [
+        "A-22",
+        "A-23"
+      ],
+      "tasks_pending": [
+        "A-16",
+        "A-17",
+        "A-24"
+      ]
     }
   },
   "next_batch": 6
