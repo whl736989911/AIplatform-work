@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-20T16:45:00Z",
+  "updated": "2026-09-20T17:05:00Z",
   "batches": {
     "1": {
       "state": "done",
@@ -125,9 +125,10 @@
         "A-17"
       ],
       "tasks_pending": [],
-      "tasks_partial": {}
+      "tasks_partial": {},
+      "merge": "已合入 main（PR #42，squash，2026-09-20T07:00:21Z）；合入前并入 B 线批次 3（冲突仅在清单与变更日志，清单计数按并集重算为 62/70/132，语言包为并集且无键冲突）"
     }
   },
   "next_batch": null,
-  "notes": "A 线 24 项（A-01…A-24）全部落地；批次 1–5 已合入 main，批次 6 待开 PR 合入。"
+  "notes": "A 线 24 项（A-01…A-24）全部落地并合入 main：批次 1–2 PR #29/#31，批次 3 PR #35，批次 4 PR #38（原 #37 因基分支被删而重开），批次 5 PR #39，批次 6 PR #42。批次 6 后端门禁 tests/unit + 业务冒烟 3236 passed / 101 skipped / 0 failed；前端 tsc exit 0、lint 0 error、相关 vitest 套件全过。"
 }
