@@ -34,6 +34,7 @@ import {
 import DefinitionEditorModal, {
   type DefinitionEditorTarget,
 } from "./DefinitionEditorModal";
+import CreateWizard from "./CreateWizard";
 import styles from "./index.module.less";
 
 const { Text } = Typography;
@@ -52,6 +53,8 @@ export default function DefinitionsPanel({
   const { t } = useTranslation();
   const timeZone = useServerTimezone();
   const [target, setTarget] = useState<DefinitionEditorTarget | null>(null);
+  // The guided path (A-06) runs beside the JSON editor, not instead of it.
+  const [wizardOpen, setWizardOpen] = useState(false);
   const [loadingDefinition, setLoadingDefinition] = useState<string | null>(
     null,
   );
@@ -244,6 +247,9 @@ export default function DefinitionsPanel({
             >
               {t("common.refresh")}
             </Button>
+            <Button size="small" onClick={() => setWizardOpen(true)}>
+              {t("workbuddy.workflows.wizard.title")}
+            </Button>
             <Button size="small" type="primary" onClick={openCreate}>
               {t("workbuddy.workflows.definitions.create")}
             </Button>
@@ -280,6 +286,15 @@ export default function DefinitionsPanel({
           })}
         />
       )}
+
+      <CreateWizard
+        open={wizardOpen}
+        onClose={() => setWizardOpen(false)}
+        onCreated={() => {
+          setWizardOpen(false);
+          void resource.reload();
+        }}
+      />
 
       <DefinitionEditorModal
         open={target !== null}
