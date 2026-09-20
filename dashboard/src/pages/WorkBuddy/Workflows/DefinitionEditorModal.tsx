@@ -17,9 +17,11 @@ import { useTranslation } from "react-i18next";
 import { parseApiError, apiErrorMessage } from "../../../utils/apiError";
 import {
   workbuddyWorkflowsApi,
+  parseWorkflowDiagnostics,
   workflowEtag,
   type DefinitionValidation,
   type JsonObject,
+  type WorkflowDiagnostic,
   type WorkflowManagerDetail,
   type WorkflowVersion,
   type WorkflowWithVersion,
@@ -27,6 +29,38 @@ import {
 import styles from "./index.module.less";
 
 const { Text } = Typography;
+
+/**
+ * One refused defect: the compiler's code, the location it points at, the
+ * server's message, and — only when the key exists — the localized repair hint.
+ * An untranslated code shows the location instead of an invented suggestion.
+ */
+function DiagnosticItem({ diagnostic }: { diagnostic: WorkflowDiagnostic }) {
+  const { t, i18n } = useTranslation();
+  const hintKey =
+    diagnostic.hint_key ?? `workflowDiagnostics.${diagnostic.code}`;
+  const hint = i18n.exists(hintKey) ? t(hintKey) : "";
+
+  return (
+    <Space direction="vertical" size={0}>
+      <Space size={8} wrap>
+        <Text code>{diagnostic.code}</Text>
+        {diagnostic.node_id ? (
+          <Text type="secondary">
+            {t("workbuddy.workflows.editor.diagnosticNode", {
+              node: diagnostic.node_id,
+            })}
+          </Text>
+        ) : null}
+        {diagnostic.path ? (
+          <Text type="secondary">{diagnostic.path}</Text>
+        ) : null}
+      </Space>
+      <Text>{diagnostic.message}</Text>
+      {hint ? <Text type="warning">{hint}</Text> : null}
+    </Space>
+  );
+}
 
 export type DefinitionEditorTarget =
   | { mode: "create" }
@@ -199,6 +233,8 @@ export default function DefinitionEditorModal({
     }
   };
 
+  const validationDiagnostics = parseWorkflowDiagnostics(validationError);
+
   return (
     <Modal
       open={open}
@@ -343,11 +379,33 @@ export default function DefinitionEditorModal({
             showIcon
             className={styles.notice}
             message={t("workbuddy.workflows.editor.invalidTitle")}
-            description={apiErrorMessage(
-              validationError,
-              t("workbuddy.workflows.editor.validateFailed"),
-              t,
-            )}
+            description={
+              validationDiagnostics.length > 0 ? (
+                <Space direction="vertical" size={4}>
+                  <Text type="secondary">
+                    {t("workbuddy.workflows.editor.diagnosticCount", {
+                      count: validationDiagnostics.length,
+                    })}
+                  </Text>
+                  {validationDiagnostics.map((diagnostic, index) => (
+                    <DiagnosticItem
+                      // The compiler emits one entry per defect, in a stable
+                      // order, so the index is a stable identity for the list.
+                      key={`${index}-${diagnostic.code}-${
+                        diagnostic.path ?? ""
+                      }`}
+                      diagnostic={diagnostic}
+                    />
+                  ))}
+                </Space>
+              ) : (
+                apiErrorMessage(
+                  validationError,
+                  t("workbuddy.workflows.editor.validateFailed"),
+                  t,
+                )
+              )
+            }
           />
         )}
       </Form>

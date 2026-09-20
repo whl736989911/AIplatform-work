@@ -47,3 +47,15 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* Execution drawer: the collapse header is the payload's label, so the panel
+   body drops antd's inline indent and the JSON lines up with the other blocks. */
+.payloadPanels {
+  :global(.ant-collapse-header) {
+    padding-inline: 0;
+  }
+
+  :global(.ant-collapse-content-box) {
+    padding-inline: 0;
+  }
+}

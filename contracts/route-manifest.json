@@ -104,6 +104,14 @@
       "authorization": "创建者/admin；版本必须属于路径中的工作流"
     },
     {
+      "method": "GET",
+      "path": "/workflows/{id}/versions/diff",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "比较同一工作流的两个版本，200，返回按路径键控的 added/removed/replaced 变更与计数",
+      "authorization": "创建者/admin（与版本读同族，不可见即统一 404）；from/to 为两个不同的版本 id，相同或缺失即拒绝"
+    },
+    {
       "method": "POST",
       "path": "/workflows/{id}/execute",
       "stage": "source",
@@ -382,6 +390,14 @@
       "success_status": 200,
       "summary": "撤销注册与后续授权，200",
       "authorization": "工作流管理者"
+    },
+    {
+      "method": "GET",
+      "path": "/workflow-definitions/metadata",
+      "stage": "source",
+      "success_status": 200,
+      "summary": "节点/字段与引用语法元数据，200，由唯一 JSON Schema 与编译器常量导出",
+      "authorization": "当前成员；租户取自登录主体；描述编译器契约，不含租户数据"
     },
     {
       "method": "POST",

@@ -169,6 +169,12 @@ class StepOutcome:
     # How many extra calls this attempt made before the step settled (0 = the
     # declared retry budget was never needed).
     retries: int = 0
+    # What this attempt was dispatched with, and what the model call reported for
+    # it. ``None`` means the engine had no such fact: a skipped or replayed row
+    # dispatched nothing, an approval node calls nothing, and an adapter that
+    # reports no usage stores no usage.
+    input: Mapping[str, Any] | None = None
+    token_usage: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -907,6 +913,8 @@ def run_graph(
         timing: tuple[float, int] | None = None,
         tokens: int = 0,
         retries: int = 0,
+        input: Mapping[str, Any] | None = None,
+        token_usage: Mapping[str, Any] | None = None,
     ) -> StepOutcome:
         started_at, duration_ms = timing if timing is not None else (None, None)
         outcome = StepOutcome(
@@ -923,6 +931,8 @@ def run_graph(
             duration_ms=duration_ms,
             tokens=int(tokens or 0),
             retries=int(retries or 0),
+            input=input,
+            token_usage=token_usage,
         )
         steps.append(outcome)
         if on_step_settled is not None and not replayed:
@@ -1029,6 +1039,9 @@ def run_graph(
                 )
                 propagate_skip(node, failed=True)
                 continue
+            # The context the expression is resolved against is what this node was
+            # given; a node whose input could not be rendered has none to record.
+            node_input: Mapping[str, Any] | None = None
             try:
                 rendered = (
                     render_template(
@@ -1037,13 +1050,10 @@ def run_graph(
                     if node.type == "transform"
                     else None
                 )
-                value = _evaluate(
-                    expression,
-                    _activation(
-                        graph, node, inputs=inputs, bindings=bindings, input_value=rendered
-                    ),
-                    node,
+                node_input = _activation(
+                    graph, node, inputs=inputs, bindings=bindings, input_value=rendered
                 )
+                value = _evaluate(expression, node_input, node)
             except OctopError as exc:
                 node_failures.append(
                     record(
@@ -1052,6 +1062,7 @@ def run_graph(
                         error_code=exc.code.value,
                         error_message=exc.message,
                         timing=elapsed(),
+                        input=node_input,
                     )
                 )
                 propagate_skip(node, failed=True)
@@ -1067,6 +1078,7 @@ def run_graph(
                                 f"condition node '{node.id}' did not evaluate to a boolean"
                             ),
                             timing=elapsed(),
+                            input=node_input,
                         )
                     )
                     # A condition that cannot choose marks both edges failed.
@@ -1084,16 +1096,23 @@ def run_graph(
                                 f"condition node '{node.id}' has no unique '{branch}' branch"
                             ),
                             timing=elapsed(),
+                            input=node_input,
                         )
                     )
                     propagate_skip(node, failed=True)
                     continue
                 store(node, {"branch": branch})
-                record(node, "success", output={"branch": branch}, timing=elapsed())
+                record(
+                    node,
+                    "success",
+                    output={"branch": branch},
+                    timing=elapsed(),
+                    input=node_input,
+                )
                 propagate_branch(node, branch)
                 continue
             store(node, value)
-            record(node, "success", output=value, timing=elapsed())
+            record(node, "success", output=value, timing=elapsed(), input=node_input)
             propagate_taken(node)
             continue
 
@@ -1172,7 +1191,7 @@ def run_graph(
             dispatched += 1
             call_error = None
             try:
-                activation = _activation(graph, node, inputs=inputs, bindings=bindings)
+                node_input = _activation(graph, node, inputs=inputs, bindings=bindings)
                 if on_step_dispatch is not None:
                     # Durable before the call leaves the process: a worker that
                     # dies here leaves the operation key, not a mystery.
@@ -1180,13 +1199,13 @@ def run_graph(
                 if node.type == "tool":
                     call_value = port.execute_tool(
                         node=node,
-                        activation=activation,
+                        activation=node_input,
                         # The same logical operation key on every attempt: an
                         # idempotent provider de-duplicates on it.
                         idempotency_key=f"{execution_id}:{node.id}",
                     )
                 else:
-                    call_value = port.execute_llm(node=node, activation=activation)
+                    call_value = port.execute_llm(node=node, activation=node_input)
                 break
             except UnresolvedToolOutcome as outcome:
                 parked = outcome
@@ -1208,7 +1227,13 @@ def run_graph(
             # The write may or may not have happened. Park the step: downstream
             # stays unrunnable until an operator reconciles the evidence, and the
             # tool is never called again for this attempt.
-            record(node, "waiting_reconciliation", output=parked.facts(), timing=elapsed())
+            record(
+                node,
+                "waiting_reconciliation",
+                output=parked.facts(),
+                timing=elapsed(),
+                input=node_input,
+            )
             reconciliation_node = node.id
             break
         if call_error is not None:
@@ -1220,6 +1245,7 @@ def run_graph(
                     error_message=call_error.message,
                     timing=elapsed(),
                     retries=dispatched - 1,
+                    input=node_input,
                 )
             )
             propagate_skip(node, failed=True)
@@ -1240,6 +1266,7 @@ def run_graph(
                         ),
                         timing=elapsed(),
                         retries=dispatched - 1,
+                        input=node_input,
                     )
                 )
                 propagate_skip(node, failed=True)
@@ -1252,6 +1279,10 @@ def run_graph(
             timing=elapsed(),
             tokens=_reported_tokens(call_value) if node.type == "llm" else 0,
             retries=dispatched - 1,
+            input=node_input,
+            # Only a model call has usage to report, and only when its adapter
+            # reported one: a tool step records none rather than a zero.
+            token_usage=_reported_usage(call_value) if node.type == "llm" else None,
         )
         propagate_taken(node)
 
@@ -1615,6 +1646,14 @@ class StepRunView:
     tool_id: str | None = None
     tool_call_key: str | None = None
     dispatch_intent_at: str | None = None
+    # What the node was dispatched with, its output, and the usage the call
+    # reported. A fact this deployment never recorded stays ``None`` rather than
+    # disappearing: an operator has to be able to tell "nothing was recorded"
+    # from "the field is not part of the answer".
+    input: Mapping[str, Any] | None = None
+    input_sha256: str | None = None
+    output: Any = None
+    token_usage: Mapping[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -1627,6 +1666,12 @@ class StepRunView:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "duration_ms": self.duration_ms,
+            "input": _json_safe(self.input),
+            # The digest of that input, kept even when the payload itself was
+            # too large for the ledger to hold.
+            "input_sha256": self.input_sha256,
+            "output": _json_safe(self.output),
+            "token_usage": _json_safe(self.token_usage),
             "error_code": self.error_code,
             # The operation key an operator quotes when reconciling a lost answer.
             "tool_id": self.tool_id,
@@ -1733,6 +1778,18 @@ class AuditLogView:
             "details": _json_safe(self.details),
             "created_at": self.created_at,
         }
+
+
+def _reported_usage(value: Any) -> dict[str, Any] | None:
+    """The usage object a model adapter reported, or None when it reported none.
+
+    Kept in the shape the adapter sent, because the platform's model adapters
+    name their own counters; nothing is added for a count nobody reported.
+    """
+    usage = value.get("usage") if isinstance(value, Mapping) else None
+    if not isinstance(usage, Mapping) or not usage:
+        return None
+    return dict(_json_safe(usage))
 
 
 def _reported_tokens(value: Any) -> int:
@@ -2652,57 +2709,93 @@ class WorkBuddyRuntimeService:
     def _persist_step(
         self, actor: RuntimeActor, claim: ExecutionClaim, step: StepOutcome, attempt: int
     ) -> None:
-        """Persist one settled step immediately, under the claim's fence."""
+        """Persist one settled step immediately, under the claim's fence.
+
+        The input travels with the settlement: the activation the node was
+        dispatched with is written to the execution's append-only payload ledger
+        (kind ``step_input``) and referenced from the step row, so one read of the
+        detail shows what every node was actually given.
+        """
         ctx = self._ctx(actor)
         output_sha, _ = _hash_json(step.output) if step.output is not None else (None, 0)
-        if self._repo.settle_attempt_step(
-            ctx,
-            execution_id=claim.execution_id,
-            node_id=step.node_id,
-            attempt=attempt,
-            fence=claim.fence,
-            status=step.status,
-            save_as=step.save_as,
-            output_sha256=output_sha,
-            output=step.output,
-            error_code=step.error_code,
-            error_message=step.error_message,
-            duration_ms=step.duration_ms,
-            skip_reason=step.skip_reason,
-            started_at=step.started_at,
-        ):
-            return
-        if not self._repo.verify_fence(
-            ctx,
-            tenant_id=claim.tenant_id,
-            lease_name=execution_lease_name(claim.execution_id),
-            holder=claim.worker_id,
-            fence=claim.fence,
-        ):
-            raise OctopError(
-                ErrorCode.WORKBUDDY_FENCE_STALE,
-                "the execution lease moved to another runner",
+        input_sha: str | None = None
+        input_size = 0
+        if step.input is not None:
+            input_sha, input_size = _hash_json(step.input)
+        with runtime_transaction(self._db, ctx) as conn:
+            # An input over the platform's per-payload ceiling is pinned by its
+            # digest alone: the ledger keeps facts, not unbounded copies of them.
+            input_payload_id = (
+                self._repo.insert_payload(
+                    ctx,
+                    tenant_id=claim.tenant_id,
+                    execution_id=claim.execution_id,
+                    kind="step_input",
+                    node_id=step.node_id,
+                    content=step.input,
+                    sha256=input_sha,
+                    size_bytes=input_size,
+                    conn=conn,
+                )
+                if input_sha is not None and input_size <= DEFAULT_MAX_OUTPUT_BYTES
+                else None
             )
-        # The lease is ours, so this step simply had no pending row (an outcome
-        # the engine decided without announcing a start): record it outright.
-        self._repo.insert_step_run(
-            ctx,
-            tenant_id=claim.tenant_id,
-            execution_id=claim.execution_id,
-            node_id=step.node_id,
-            node_type=step.node_type or "transform",
-            status=step.status,
-            fence=claim.fence,
-            attempt=attempt,
-            save_as=step.save_as,
-            output_sha256=output_sha,
-            output=step.output,
-            error_code=step.error_code,
-            error_message=step.error_message,
-            duration_ms=step.duration_ms,
-            skip_reason=step.skip_reason,
-            started_at=step.started_at,
-        )
+            if self._repo.settle_attempt_step(
+                ctx,
+                execution_id=claim.execution_id,
+                node_id=step.node_id,
+                attempt=attempt,
+                fence=claim.fence,
+                status=step.status,
+                save_as=step.save_as,
+                input_sha256=input_sha,
+                input_payload_id=input_payload_id,
+                output_sha256=output_sha,
+                output=step.output,
+                token_usage=step.token_usage,
+                error_code=step.error_code,
+                error_message=step.error_message,
+                duration_ms=step.duration_ms,
+                skip_reason=step.skip_reason,
+                started_at=step.started_at,
+                conn=conn,
+            ):
+                return
+            if not self._repo.verify_fence(
+                ctx,
+                tenant_id=claim.tenant_id,
+                lease_name=execution_lease_name(claim.execution_id),
+                holder=claim.worker_id,
+                fence=claim.fence,
+            ):
+                raise OctopError(
+                    ErrorCode.WORKBUDDY_FENCE_STALE,
+                    "the execution lease moved to another runner",
+                )
+            # The lease is ours, so this step simply had no pending row (an outcome
+            # the engine decided without announcing a start): record it outright.
+            self._repo.insert_step_run(
+                ctx,
+                tenant_id=claim.tenant_id,
+                execution_id=claim.execution_id,
+                node_id=step.node_id,
+                node_type=step.node_type or "transform",
+                status=step.status,
+                fence=claim.fence,
+                attempt=attempt,
+                save_as=step.save_as,
+                input_sha256=input_sha,
+                input_payload_id=input_payload_id,
+                output_sha256=output_sha,
+                output=step.output,
+                token_usage=step.token_usage,
+                error_code=step.error_code,
+                error_message=step.error_message,
+                duration_ms=step.duration_ms,
+                skip_reason=step.skip_reason,
+                started_at=step.started_at,
+                conn=conn,
+            )
 
     def _close_claim(self, claim: ExecutionClaim, lease_name: str) -> None:
         """Give back a claim whose execution no longer needs running."""
@@ -3062,6 +3155,9 @@ class WorkBuddyRuntimeService:
         self._require_postgres()
         execution = self._load_execution(actor, execution_id)
         ctx = self._ctx(actor)
+        # One read for the whole execution: each step points at the payload that
+        # holds the input it was dispatched with.
+        step_inputs = self._repo.list_step_inputs(ctx, execution_id)
         steps = [
             StepRunView(
                 node_id=step.node_id,
@@ -3077,6 +3173,14 @@ class WorkBuddyRuntimeService:
                 tool_id=step.tool_id,
                 tool_call_key=step.tool_call_key,
                 dispatch_intent_at=_iso(step.dispatch_intent_at),
+                input=(
+                    step_inputs.get(step.input_payload_id)
+                    if step.input_payload_id is not None
+                    else None
+                ),
+                input_sha256=step.input_sha256,
+                output=step.output,
+                token_usage=step.token_usage,
             )
             for step in self._repo.list_step_runs(ctx, execution_id)
         ]

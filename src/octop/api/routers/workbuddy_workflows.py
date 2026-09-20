@@ -23,7 +23,7 @@ import logging
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from octop.api.deps import get_server
@@ -46,6 +46,8 @@ from octop.infra.db.workbuddy_context import (
 )
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.rbac.model import RbacActor
+from octop.infra.workbuddy.node_metadata import definition_metadata
+from octop.infra.workbuddy.semantic_diff import semantic_diff
 from octop.infra.workbuddy.workflow_compiler import (
     CompiledWorkflow,
     WorkflowCompileError,
@@ -60,6 +62,7 @@ _Principal = Annotated[WorkBuddyPrincipal, Depends(workbuddy_principal)]
 
 _WORKFLOW_NOT_FOUND = "workflow not found"
 _VERSION_NOT_FOUND = "workflow version not found"
+_DIFF_SAME_VERSION = "from and to must be two different workflow versions"
 _IF_MATCH_REQUIRED = "If-Match header with the workflow ETag is required"
 _IF_MATCH_STALE = "workflow revision does not match the If-Match header"
 _STORE_UNAVAILABLE = "workflow store is unavailable"
@@ -140,14 +143,30 @@ def _refusal(exc: Exception) -> OctopError:
     if isinstance(exc, WorkBuddyContextError):
         return OctopError(ErrorCode.WF_INVALID_SCHEMA, message)
     if isinstance(exc, (WorkBuddyWorkflowError, WorkflowCompileError)):
+        details = _compiler_details(exc) if isinstance(exc, WorkflowCompileError) else {}
         try:
-            return OctopError(ErrorCode(code), message)
+            return OctopError(ErrorCode(code), message, details=details)
         except ValueError:
-            return OctopError(ErrorCode.WF_INVALID_SCHEMA, message)
+            # A compiler-level code that names no ErrorCode member is still a
+            # definition refusal; it must reach the client, not vanish.
+            return OctopError(ErrorCode.WF_INVALID_SCHEMA, message, details=details)
     # Anything unexpected still fails closed, but it must not disappear: an
     # opaque 503 once hid a jsonb binding error from every test.
     logger.exception("unhandled workflow store failure", exc_info=exc)
     return OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, _STORE_UNAVAILABLE)
+
+
+def _compiler_details(exc: WorkflowCompileError) -> dict[str, Any]:
+    """The refusal a client repairs from: its original code and every diagnostic.
+
+    The mapped ``ErrorCode`` is coarse (several compiler codes collapse onto
+    ``WF_INVALID_SCHEMA``), so the compiler's own code and the per-defect list
+    travel in ``details`` where an editor can list them.
+    """
+    details: dict[str, Any] = dict(exc.details)
+    details["compiler_code"] = exc.code
+    details["diagnostics"] = [diagnostic.to_dict() for diagnostic in exc.diagnostics]
+    return details
 
 
 def _etag(record: WorkflowRecord) -> str:
@@ -325,6 +344,28 @@ def _version_payload(
     return payload
 
 
+def _version_ref(version: WorkflowVersionRecord) -> dict[str, Any]:
+    """One side of a comparison: identity and hash, never the definition."""
+    return {
+        "version_id": version.workflow_version_id,
+        "version_number": version.version_number,
+        "definition_sha256": version.definition_sha256,
+        "origin": version.origin,
+    }
+
+
+def _load_version(
+    repo: Any, principal: WorkBuddyPrincipal, workflow_id: str, version_id: str
+) -> WorkflowVersionRecord:
+    """A version of *this* workflow, or the same 404 an invisible workflow gets."""
+    version: WorkflowVersionRecord | None = repo.get_version(
+        principal.tenant_id, workflow_id, _public_id(version_id, _VERSION_NOT_FOUND)
+    )
+    if version is None:
+        raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, _VERSION_NOT_FOUND)
+    return version
+
+
 def _validate_payload(compiled: CompiledWorkflow) -> dict[str, Any]:
     return {
         "valid": True,
@@ -370,6 +411,23 @@ async def validate_workflow_definition(
     except Exception as exc:  # noqa: BLE001 - a refusal must be coded, never a 500
         raise _refusal(exc) from exc
     return workbuddy_envelope(request, _validate_payload(compiled))
+
+
+@router.get(
+    "/workflow-definitions/metadata",
+    summary="Node, field and reference metadata for the workflow editor",
+)
+async def workflow_definition_metadata(
+    request: Request,
+    principal: _Principal,
+) -> dict[str, Any]:
+    """The schema-derived contract an editor renders definition forms from.
+
+    Tenant-scoped like every other route (the caller must hold a membership), but
+    the payload is the frozen contract itself: it describes what the compiler
+    accepts, never what one tenant may use.
+    """
+    return workbuddy_envelope(request, definition_metadata())
 
 
 # --------------------------------------------------------------------------- #
@@ -668,6 +726,53 @@ async def list_workflow_versions(
     return workbuddy_envelope(request, {"items": items})
 
 
+@router.get("/workflows/{workflow_id}/versions/diff", summary="Compare two workflow versions")
+async def diff_workflow_versions(
+    request: Request,
+    workflow_id: str,
+    principal: _Principal,
+    source_id: str = Query(alias="from"),
+    target_id: str = Query(alias="to"),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Definition-level diff between two versions of the same workflow.
+
+    Declared before ``/versions/{version_id}`` so ``diff`` is a path segment of
+    its own, never read as a version id.  The comparison is the keyed one
+    proposals already use: nodes are matched by ``id``, so a pure reorder
+    reports nothing while every real value change is reported as ``replaced``.
+    Comparing a version with itself is refused — an empty change list would
+    look like "nothing changed" even though nothing was compared.
+    """
+    repo = _repo(server)
+    source_uuid = _public_id(source_id, _VERSION_NOT_FOUND)
+    target_uuid = _public_id(target_id, _VERSION_NOT_FOUND)
+    if source_uuid == target_uuid:
+        raise OctopError(ErrorCode.WORKBUDDY_INVALID_ARGUMENT, _DIFF_SAME_VERSION)
+    try:
+        record = _load_managed_workflow(repo, principal, workflow_id)
+        source = _load_version(repo, principal, record.workflow_id, source_uuid)
+        target = _load_version(repo, principal, record.workflow_id, target_uuid)
+    except OctopError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _refusal(exc) from exc
+    changes = semantic_diff(source.definition, target.definition)
+    summary = {"added": 0, "removed": 0, "replaced": 0}
+    for change in changes:
+        summary[change.kind] += 1
+    return workbuddy_envelope(
+        request,
+        {
+            "workflow_id": record.workflow_id,
+            "from": _version_ref(source),
+            "to": _version_ref(target),
+            "changes": [change.to_dict() for change in changes],
+            "summary": summary,
+        },
+    )
+
+
 @router.get("/workflows/{workflow_id}/versions/{version_id}", summary="Read one version")
 async def get_workflow_version(
     request: Request,
@@ -680,13 +785,7 @@ async def get_workflow_version(
     repo = _repo(server)
     try:
         record = _load_managed_workflow(repo, principal, workflow_id, server=server)
-        version = repo.get_version(
-            principal.tenant_id,
-            record.workflow_id,
-            _public_id(version_id, _VERSION_NOT_FOUND),
-        )
-        if version is None:
-            raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, _VERSION_NOT_FOUND)
+        version = _load_version(repo, principal, record.workflow_id, version_id)
     except OctopError:
         raise
     except Exception as exc:  # noqa: BLE001
