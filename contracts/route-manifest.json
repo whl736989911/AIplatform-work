@@ -721,6 +721,22 @@
     },
     {
       "method": "POST",
+      "path": "/tenant-capabilities/{kind}/{revision_id}/grants",
+      "stage": "A2",
+      "success_status": 201,
+      "summary": "为部门或成员授予已批准的工具/模型修订；租户级为默认可见范围",
+      "authorization": "租户 admin；修订必须已批准且未撤销"
+    },
+    {
+      "method": "DELETE",
+      "path": "/tenant-capabilities/{kind}/{revision_id}/grants",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "撤销某一主体的工具/模型授权；模型租户级默认随之清空",
+      "authorization": "租户 admin"
+    },
+    {
+      "method": "POST",
       "path": "/approval-requests/{id}/challenge",
       "stage": "A3",
       "success_status": 200,
@@ -874,7 +890,7 @@
   ],
   "counts": {
     "source": 62,
-    "supplemental": 46,
-    "total": 108
+    "supplemental": 48,
+    "total": 110
   }
 }

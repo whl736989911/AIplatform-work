@@ -56,6 +56,15 @@ __all__ = [
     "WorkBuddyCapabilityNotApproved",
     "WorkBuddyCasConflict",
     "WorkBuddyCatalogError",
+    "CAPABILITY_MODEL",
+    "CAPABILITY_TOOL",
+    "CODE_SUBJECT_UNKNOWN",
+    "SUBJECT_DEPARTMENT",
+    "SUBJECT_DEPARTMENT_CHAIN",
+    "SUBJECT_KINDS",
+    "SUBJECT_MEMBER",
+    "SUBJECT_TENANT",
+    "WorkBuddyCapabilityGrant",
     "WorkBuddyCatalogRepo",
     "WorkBuddyCredential",
     "WorkBuddyCredentialNameTaken",
@@ -67,6 +76,8 @@ __all__ = [
     "WorkBuddyPlatformRevisionConflict",
     "WorkBuddyRevisionRevoked",
     "WorkBuddyToolRevision",
+    "capability_kind",
+    "grant_subject_reach",
 ]
 
 STATUS_ACTIVE = "active"
@@ -110,6 +121,38 @@ _TABLE_MEMBERS = "workbuddy_tenant_members"
 
 _COL_TOOL_REVISION = "tool_revision_id"
 _COL_MODEL_REVISION = "model_revision_id"
+
+# Grant subjects (§4.6.1 capability governance): one revision reaches the whole
+# tenant, one department, or one member. ``SUBJECT_TENANT`` is the tenant-wide
+# row every grant had before the subject dimension existed.
+SUBJECT_TENANT = "tenant"
+SUBJECT_DEPARTMENT = "department"
+SUBJECT_MEMBER = "member"
+SUBJECT_KINDS = (SUBJECT_TENANT, SUBJECT_DEPARTMENT, SUBJECT_MEMBER)
+CAPABILITY_TOOL = "tool"
+CAPABILITY_MODEL = "model"
+CODE_SUBJECT_UNKNOWN = "WORKBUDDY_GRANT_SUBJECT_UNKNOWN"
+
+_CAPABILITY_TABLES: dict[str, tuple[str, str]] = {
+    CAPABILITY_TOOL: (_TABLE_TOOL_GRANTS, _COL_TOOL_REVISION),
+    CAPABILITY_MODEL: (_TABLE_MODEL_GRANTS, _COL_MODEL_REVISION),
+}
+_CAPABILITY_REVISIONS: dict[str, str] = {
+    CAPABILITY_TOOL: _TABLE_TOOL_REVISIONS,
+    CAPABILITY_MODEL: _TABLE_MODEL_REVISIONS,
+}
+
+# The members of a department and of its sub-departments, for a caller whose
+# department grant must also reach them. Parameters: (tenant, user, tenant).
+SUBJECT_DEPARTMENT_CHAIN = (
+    "WITH RECURSIVE wb_subject_departments(department_id) AS ("
+    " SELECT m.department_id FROM workbuddy_tenant_members m"
+    " WHERE m.tenant_id = ? AND m.user_id = ? AND m.department_id IS NOT NULL"
+    " UNION"
+    " SELECT d.parent_department_id FROM workbuddy_departments d"
+    " JOIN wb_subject_departments c ON d.department_id = c.department_id"
+    " WHERE d.tenant_id = ? AND d.parent_department_id IS NOT NULL)"
+)
 
 # A server-generated pointer such as ``vault://tenant/credential/rotation``.
 _EXTERNAL_REF_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://\S{1,400}$")
@@ -266,6 +309,51 @@ class WorkBuddyGrant:
             member_id=str(row["membership_id"]),
             granted_by_member_id=str(row["granted_by_membership_id"]),
             created_at=int(row["granted_at"]),
+        )
+
+
+@dataclass(frozen=True)
+class WorkBuddyCapabilityGrant:
+    """One tool or model revision reaching a tenant, a department, or one member.
+
+    ``user_id``/``department_id`` are the raw subject columns: both unset means
+    the grant is tenant-wide, which is what every grant was before the subject
+    dimension existed.
+    """
+
+    tenant_id: str
+    revision_id: str
+    kind: str
+    user_id: int | None
+    department_id: str | None
+    granted_by_member_id: str | None
+    granted_at: int
+
+    @property
+    def subject_kind(self) -> str:
+        if self.user_id is not None:
+            return SUBJECT_MEMBER
+        if self.department_id is not None:
+            return SUBJECT_DEPARTMENT
+        return SUBJECT_TENANT
+
+    @property
+    def subject_id(self) -> str | None:
+        """The subject as stored: the user id for a member, the department id otherwise."""
+        if self.user_id is not None:
+            return str(self.user_id)
+        return self.department_id
+
+    @classmethod
+    def from_row(cls, row: DbRow, *, kind: str, revision_column: str) -> WorkBuddyCapabilityGrant:
+        return cls(
+            tenant_id=str(row["tenant_id"]),
+            revision_id=str(row[revision_column]),
+            kind=kind,
+            user_id=_optional_int(row["user_id"]),
+            department_id=_optional_str(row["department_id"]),
+            granted_by_member_id=_optional_str(row["granted_by_membership_id"]),
+            granted_at=int(row["granted_at"]),
         )
 
 
@@ -899,6 +987,106 @@ class WorkBuddyCatalogRepo:
                 raise WorkBuddyCatalogError("capability upsert returned no row")
             return _capabilities_record(conn, updated)
 
+    # ── capability subjects: department and member grants ──────────────────
+
+    def granted_tenant_wide(self, tenant_id: str, *, kind: str, revision_id: str) -> bool:
+        """True when the revision carries the tenant-wide grant.
+
+        The tenant-level question a migration or an admin report asks, as opposed
+        to the caller-scoped reach the workflow resolver answers: a revision that
+        only one department or member holds is not tenant-wide approved.
+        """
+        table, column = capability_kind(kind)
+        with workbuddy_transaction(self._db, _tenant_context(tenant_id)) as conn:
+            row = conn.execute(
+                f"SELECT 1 FROM {table}"
+                f" WHERE tenant_id = ? AND {column} = ? AND subject_key = ? LIMIT 1",
+                (tenant_id, str(revision_id), SUBJECT_TENANT),
+            ).fetchone()
+        return row is not None
+
+    def list_capability_grants(
+        self, tenant_id: str, *, kind: str
+    ) -> list[WorkBuddyCapabilityGrant]:
+        """Every subject grant of one family, tenant-wide rows included."""
+        table, column = capability_kind(kind)
+        with workbuddy_transaction(self._db, _tenant_context(tenant_id)) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM {table} WHERE tenant_id = ? ORDER BY {column}, subject_key",
+                (tenant_id,),
+            ).fetchall()
+        return [
+            WorkBuddyCapabilityGrant.from_row(row, kind=kind, revision_column=column)
+            for row in rows
+        ]
+
+    def grant_capability(
+        self,
+        tenant_id: str,
+        *,
+        kind: str,
+        revision_id: str,
+        subject_kind: str,
+        actor_member_id: str,
+        subject_id: str | None = None,
+    ) -> WorkBuddyCapabilityGrant:
+        """Grant one published revision to the tenant, a department, or a member."""
+        table, column = capability_kind(kind)
+        ts = now_ts()
+        with workbuddy_transaction(self._db, _tenant_context(tenant_id)) as conn:
+            _require_active_member(conn, tenant_id, actor_member_id)
+            _require_published_revisions(
+                conn, _CAPABILITY_REVISIONS[kind], column, (str(revision_id),)
+            )
+            key, user_id, department_id = _subject_columns(
+                conn, tenant_id, subject_kind, subject_id
+            )
+            row = conn.execute(
+                f"INSERT INTO {table}(tenant_id, {column}, subject_key, user_id, department_id,"
+                " granted_by_membership_id, granted_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                f" ON CONFLICT (tenant_id, {column}, subject_key) DO UPDATE SET"
+                " granted_by_membership_id = EXCLUDED.granted_by_membership_id,"
+                " granted_at = EXCLUDED.granted_at"
+                " RETURNING *",
+                (tenant_id, str(revision_id), key, user_id, department_id, actor_member_id, ts),
+            ).fetchone()
+            if row is None:
+                raise WorkBuddyCatalogError("capability grant returned no row")
+            return WorkBuddyCapabilityGrant.from_row(row, kind=kind, revision_column=column)
+
+    def revoke_capability_grant(
+        self,
+        tenant_id: str,
+        *,
+        kind: str,
+        revision_id: str,
+        subject_kind: str,
+        subject_id: str | None = None,
+    ) -> bool:
+        """Drop one subject's grant; ``False`` when nothing matched."""
+        table, column = capability_kind(kind)
+        with workbuddy_transaction(self._db, _tenant_context(tenant_id)) as conn:
+            key, _, _ = _subject_columns(
+                conn, tenant_id, subject_kind, subject_id, require_active=False
+            )
+            row = conn.execute(
+                f"DELETE FROM {table} WHERE tenant_id = ? AND {column} = ? AND subject_key = ?"
+                " RETURNING subject_key",
+                (tenant_id, str(revision_id), key),
+            ).fetchone()
+            dropped = row is not None
+            if dropped and kind == CAPABILITY_MODEL and subject_kind == SUBJECT_TENANT:
+                # The tenant default has to stay tenant-wide approved: losing that
+                # row leaves a stored default nothing may use, so it is cleared
+                # here, exactly as revoking the revision itself does.
+                conn.execute(
+                    f"UPDATE {_TABLE_CAPABILITIES}"
+                    " SET default_model_revision_id = NULL, revision = revision + 1,"
+                    " updated_at = ? WHERE tenant_id = ? AND default_model_revision_id = ?",
+                    (now_ts(), tenant_id, str(revision_id)),
+                )
+        return dropped
+
     # ── shared platform catalog internals ──────────────────────────────────
 
     def _publish_revision(
@@ -1002,6 +1190,32 @@ class WorkBuddyCatalogRepo:
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
+def grant_subject_reach(alias: str = "g") -> str:
+    """Predicate over grant row ``alias``: does its subject reach the calling user?
+
+    The caller binds the user id for the placeholder and supplies the
+    :data:`SUBJECT_DEPARTMENT_CHAIN` CTE, so a department grant also reaches the
+    members of that department's sub-departments.
+    """
+    return (
+        f"({alias}.subject_key = 'tenant'"
+        f" OR ({alias}.user_id IS NOT NULL AND {alias}.user_id = ?)"
+        f" OR ({alias}.department_id IS NOT NULL AND {alias}.department_id IN"
+        " (SELECT department_id FROM wb_subject_departments)))"
+    )
+
+
+def capability_kind(kind: str) -> tuple[str, str]:
+    """``(grant table, revision column)`` for one capability family."""
+    try:
+        return _CAPABILITY_TABLES[kind]
+    except KeyError:
+        raise WorkBuddyInvalidInput(
+            f"capability kind must be one of {', '.join(_CAPABILITY_TABLES)}",
+            code=CODE_SUBJECT_UNKNOWN,
+        ) from None
+
+
 def _tenant_context(tenant_id: str) -> WorkBuddyDbContext:
     return WorkBuddyDbContext.for_tenant(tenant_id)
 
@@ -1029,15 +1243,16 @@ def _capability_row(conn: Any, tenant_id: str, *, lock: bool = False) -> DbRow |
 
 
 def _capability_grants(conn: Any, tenant_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The tenant-wide approved revisions; subject grants live beside them."""
     tool_rows = conn.execute(
         f"SELECT {_COL_TOOL_REVISION} AS revision_id FROM {_TABLE_TOOL_GRANTS}"
-        " WHERE tenant_id = ? ORDER BY revision_id",
-        (tenant_id,),
+        " WHERE tenant_id = ? AND subject_key = ? ORDER BY revision_id",
+        (tenant_id, SUBJECT_TENANT),
     ).fetchall()
     model_rows = conn.execute(
         f"SELECT {_COL_MODEL_REVISION} AS revision_id FROM {_TABLE_MODEL_GRANTS}"
-        " WHERE tenant_id = ? ORDER BY revision_id",
-        (tenant_id,),
+        " WHERE tenant_id = ? AND subject_key = ? ORDER BY revision_id",
+        (tenant_id, SUBJECT_TENANT),
     ).fetchall()
     return (
         tuple(str(row["revision_id"]) for row in tool_rows),
@@ -1066,15 +1281,16 @@ def _sync_grant_set(
     for revision_id in current:
         if revision_id not in desired_set:
             conn.execute(
-                f"DELETE FROM {table} WHERE tenant_id = ? AND {column} = ?",
-                (tenant_id, revision_id),
+                f"DELETE FROM {table} WHERE tenant_id = ? AND {column} = ? AND subject_key = ?",
+                (tenant_id, revision_id, SUBJECT_TENANT),
             )
     for revision_id in desired:
         if revision_id not in current_set:
             conn.execute(
-                f"INSERT INTO {table}(tenant_id, {column}, granted_by_membership_id, granted_at)"
-                " VALUES (?, ?, ?, ?)",
-                (tenant_id, revision_id, actor_member_id, ts),
+                f"INSERT INTO {table}(tenant_id, {column}, subject_key,"
+                " granted_by_membership_id, granted_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (tenant_id, revision_id, SUBJECT_TENANT, actor_member_id, ts),
             )
 
 
@@ -1095,6 +1311,70 @@ def _require_published_revisions(
         raise WorkBuddyCapabilityNotApproved(
             f"unknown or revoked catalog revisions: {', '.join(sorted(missing))}"
         )
+
+
+def _subject_columns(
+    conn: Any,
+    tenant_id: str,
+    subject_kind: str,
+    subject_id: str | None,
+    *,
+    require_active: bool = True,
+) -> tuple[str, int | None, str | None]:
+    """Map an API subject onto a grant row: ``(subject_key, user_id, department_id)``."""
+    if subject_kind == SUBJECT_TENANT:
+        if subject_id not in (None, ""):
+            raise WorkBuddyInvalidInput(
+                "a tenant-wide grant carries no subject_id", code=CODE_SUBJECT_UNKNOWN
+            )
+        return SUBJECT_TENANT, None, None
+    if subject_kind == SUBJECT_DEPARTMENT:
+        department_id = _required_subject_id(subject_kind, subject_id)
+        row = conn.execute(
+            "SELECT 1 FROM workbuddy_departments WHERE tenant_id = ? AND department_id = ?",
+            (tenant_id, department_id),
+        ).fetchone()
+        if row is None:
+            raise WorkBuddyInvalidInput(
+                "department does not belong to this tenant", code=CODE_SUBJECT_UNKNOWN
+            )
+        return f"{SUBJECT_DEPARTMENT}:{department_id}", None, department_id
+    if subject_kind == SUBJECT_MEMBER:
+        raw_user_id = _required_subject_id(subject_kind, subject_id)
+        if not raw_user_id.isdigit():
+            raise WorkBuddyInvalidInput(
+                "a member grant is addressed by user id", code=CODE_SUBJECT_UNKNOWN
+            )
+        user_id = int(raw_user_id)
+        row = conn.execute(
+            f"SELECT 1 FROM {_TABLE_MEMBERS}"
+            " WHERE tenant_id = ? AND user_id = ? AND status = 'active'",
+            (tenant_id, user_id),
+        ).fetchone()
+        if row is None and require_active:
+            raise WorkBuddyMembershipRequired("granted user is not an active member of this tenant")
+        if row is None:
+            row = conn.execute(
+                f"SELECT 1 FROM {_TABLE_MEMBERS} WHERE tenant_id = ? AND user_id = ?",
+                (tenant_id, user_id),
+            ).fetchone()
+        if row is None:
+            raise WorkBuddyInvalidInput(
+                "user is not a member of this tenant", code=CODE_SUBJECT_UNKNOWN
+            )
+        return f"{SUBJECT_MEMBER}:{user_id}", user_id, None
+    raise WorkBuddyInvalidInput(
+        f"subject_kind must be one of {', '.join(SUBJECT_KINDS)}", code=CODE_SUBJECT_UNKNOWN
+    )
+
+
+def _required_subject_id(subject_kind: str, subject_id: str | None) -> str:
+    value = str(subject_id or "").strip()
+    if not value:
+        raise WorkBuddyInvalidInput(
+            f"a {subject_kind} grant needs a subject_id", code=CODE_SUBJECT_UNKNOWN
+        )
+    return value
 
 
 def _is_active_member(conn: Any, tenant_id: str, membership_id: str) -> bool:

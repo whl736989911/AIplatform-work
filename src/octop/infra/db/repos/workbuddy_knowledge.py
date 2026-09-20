@@ -26,6 +26,10 @@ from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, now_ts
+from octop.infra.db.repos.workbuddy_catalog import (
+    SUBJECT_DEPARTMENT_CHAIN,
+    grant_subject_reach,
+)
 from octop.infra.db.workbuddy_context import (
     WorkBuddyDbContext,
     workbuddy_transaction,
@@ -509,11 +513,27 @@ class WorkBuddyKnowledgeRepo:
         return WorkBuddyPlatformModelRevisionRow.from_row(row) if row is not None else None
 
     def tenant_model_granted(self, ctx: WorkBuddyDbContext, model_revision_id: str) -> bool:
+        """True when the revision reaches the calling member.
+
+        A grant is tenant-wide, for the member's department, or for the member
+        itself; a context without a user cannot prove reach and fails closed.
+        """
+        if ctx.user_id is None:
+            return False
         with workbuddy_transaction(self._db, ctx) as conn:
             row = conn.execute(
-                "SELECT 1 AS granted FROM workbuddy_tenant_model_grants "
-                "WHERE tenant_id = ? AND model_revision_id = ?",
-                (ctx.tenant_id, model_revision_id),
+                SUBJECT_DEPARTMENT_CHAIN + " "
+                "SELECT 1 AS granted FROM workbuddy_tenant_model_grants g "
+                "WHERE g.tenant_id = ? AND g.model_revision_id = ? "
+                f"AND {grant_subject_reach('g')}",
+                (
+                    ctx.tenant_id,
+                    ctx.user_id,
+                    ctx.tenant_id,
+                    ctx.tenant_id,
+                    model_revision_id,
+                    ctx.user_id,
+                ),
             ).fetchone()
         return row is not None
 

@@ -31,6 +31,10 @@ from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import now_ts
+from octop.infra.db.repos.workbuddy_catalog import (
+    SUBJECT_DEPARTMENT_CHAIN,
+    grant_subject_reach,
+)
 from octop.infra.db.workbuddy_context import (
     WorkBuddyDbContext,
     require_postgres,
@@ -884,6 +888,12 @@ class PostgresWorkflowSemanticResolver:
     explicit tenant predicate both apply.  A dependency that cannot be queried
     raises :class:`DependencyUnavailable` instead of guessing, and a reference
     that is not provable is refused rather than silently accepted.
+
+    Reachability is answered for the **caller**, not for the tenant: a tool or
+    model is usable when a grant reaches the caller's identity — the tenant-wide
+    row, a grant on the caller's department or one of its parents, or a grant on
+    the caller itself.  ``user_id`` is therefore required for tool, model, and
+    knowledge-base checks; a resolver built without it fails closed.
     """
 
     def __init__(self, conn: Any, tenant_id: str, *, user_id: int | None = None) -> None:
@@ -899,45 +909,73 @@ class PostgresWorkflowSemanticResolver:
                 "workflow semantic resolver cannot query the tenant catalog"
             ) from exc
 
+    def _grant_reach(self, sql: str, params: Sequence[Any]) -> Any | None:
+        """Run a grant query with the caller's department chain in scope."""
+        if self._user_id is None:
+            raise DependencyUnavailable("tool and model resolution needs the calling user context")
+        return self._one(sql, params)
+
     def check_tool(self, tool_name: str, parameters: Mapping[str, Any]) -> SemanticDecision:
-        row = self._one(
+        row = self._grant_reach(
+            SUBJECT_DEPARTMENT_CHAIN + " "
             "SELECT 1 AS granted FROM workbuddy_tenant_tool_grants g "
             "JOIN workbuddy_platform_tool_revisions r ON r.tool_revision_id = g.tool_revision_id "
-            "WHERE g.tenant_id = ? AND r.tool_key = ? AND r.status = 'published' LIMIT 1",
-            (self._tenant_id, str(tool_name)),
+            "WHERE g.tenant_id = ? AND r.tool_key = ? AND r.status = 'published' "
+            f"AND {grant_subject_reach('g')} LIMIT 1",
+            (
+                self._tenant_id,
+                self._user_id,
+                self._tenant_id,
+                self._tenant_id,
+                str(tool_name),
+                self._user_id,
+            ),
         )
         if row is None:
             return SemanticDecision.refused(
                 "WORKFLOW_TOOL_UNAVAILABLE",
-                f"tool {tool_name!r} is not granted to this tenant",
+                f"tool {tool_name!r} is not granted to this member",
             )
         return SemanticDecision.allowed()
 
     def check_model(self, model: str | None) -> SemanticDecision:
         if model is None:
-            row = self._one(
+            row = self._grant_reach(
+                SUBJECT_DEPARTMENT_CHAIN + " "
                 "SELECT r.model_key FROM workbuddy_tenant_capabilities c "
                 "JOIN workbuddy_platform_model_revisions r "
                 "ON r.model_revision_id = c.default_model_revision_id "
-                "WHERE c.tenant_id = ? AND r.status = 'published' LIMIT 1",
-                (self._tenant_id,),
+                "JOIN workbuddy_tenant_model_grants g ON g.tenant_id = c.tenant_id "
+                "AND g.model_revision_id = c.default_model_revision_id "
+                "WHERE c.tenant_id = ? AND r.status = 'published' "
+                f"AND {grant_subject_reach('g')} LIMIT 1",
+                (self._tenant_id, self._user_id, self._tenant_id, self._tenant_id, self._user_id),
             )
             if row is None:
                 return SemanticDecision.refused(
                     ErrorCode.MODEL_NOT_CONFIGURED.value,
-                    "no default model is configured for this tenant",
+                    "no default model is configured for this member",
                 )
             return SemanticDecision.allowed()
-        row = self._one(
+        row = self._grant_reach(
+            SUBJECT_DEPARTMENT_CHAIN + " "
             "SELECT 1 AS granted FROM workbuddy_tenant_model_grants g "
             "JOIN workbuddy_platform_model_revisions r ON r.model_revision_id = g.model_revision_id "
-            "WHERE g.tenant_id = ? AND r.model_key = ? AND r.status = 'published' LIMIT 1",
-            (self._tenant_id, str(model)),
+            "WHERE g.tenant_id = ? AND r.model_key = ? AND r.status = 'published' "
+            f"AND {grant_subject_reach('g')} LIMIT 1",
+            (
+                self._tenant_id,
+                self._user_id,
+                self._tenant_id,
+                self._tenant_id,
+                str(model),
+                self._user_id,
+            ),
         )
         if row is None:
             return SemanticDecision.refused(
                 ErrorCode.MODEL_NOT_CONFIGURED.value,
-                f"model {model!r} is not approved for this tenant",
+                f"model {model!r} is not approved for this member",
             )
         return SemanticDecision.allowed()
 

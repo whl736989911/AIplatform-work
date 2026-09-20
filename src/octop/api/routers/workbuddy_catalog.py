@@ -19,7 +19,7 @@ import os
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from octop.api.deps import get_server
@@ -34,6 +34,8 @@ from octop.api.routers.workbuddy_identity import (
 from octop.infra.connectors.crypto import encrypt_credentials
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos.workbuddy_catalog import (
+    CAPABILITY_MODEL,
+    CAPABILITY_TOOL,
     WorkBuddyCapabilityNotApproved,
     WorkBuddyCasConflict,
     WorkBuddyCatalogError,
@@ -81,6 +83,8 @@ _GRANT_NOT_FOUND = "connector credential grant not found"
 _GRANT_TARGET_NOT_FOUND = "connector credential or same-tenant grant target not found"
 _TOOL_NOT_FOUND = "platform tool revision not found"
 _MODEL_NOT_FOUND = "platform model revision not found"
+_REVISION_NOT_FOUND = "approved catalog revision not found"
+_CAPABILITY_GRANT_NOT_FOUND = "tool or model grant not found"
 
 
 def _not_found(detail: str) -> OctopError:
@@ -289,6 +293,17 @@ def _model_payload(record: Any) -> dict[str, Any]:
     }
 
 
+def _capability_grant_payload(grant: Any) -> dict[str, Any]:
+    """One grant subject, without exposing anything beyond who may use the revision."""
+    return {
+        "kind": grant.kind,
+        "revision_id": grant.revision_id,
+        "subject_kind": grant.subject_kind,
+        "subject_id": grant.subject_id,
+        "granted_at": grant.granted_at,
+    }
+
+
 def _capabilities_payload(tenant_id: str, record: Any | None) -> dict[str, Any]:
     if record is None:
         return {
@@ -341,6 +356,19 @@ class GrantCreateBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_id: str = Field(min_length=1, max_length=64)
+
+
+class CapabilityGrantBody(BaseModel):
+    """One subject of a tool/model grant: the tenant, a department, or a member.
+
+    ``subject_id`` is the department id for a department and the user id for a
+    member; a tenant-wide grant carries neither.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject_kind: str = Field(pattern="^(tenant|department|member)$")
+    subject_id: str | None = Field(default=None, max_length=64)
 
 
 class ToolPublishBody(BaseModel):
@@ -713,7 +741,16 @@ async def read_tenant_capabilities(
 ) -> dict[str, Any]:
     repo = _repo(server)
     record = repo.get_capabilities(admin.tenant_id)
-    return workbuddy_envelope(request, _capabilities_payload(admin.tenant_id, record))
+    payload = _capabilities_payload(admin.tenant_id, record)
+    payload["tool_grants"] = [
+        _capability_grant_payload(grant)
+        for grant in repo.list_capability_grants(admin.tenant_id, kind=CAPABILITY_TOOL)
+    ]
+    payload["model_grants"] = [
+        _capability_grant_payload(grant)
+        for grant in repo.list_capability_grants(admin.tenant_id, kind=CAPABILITY_MODEL)
+    ]
+    return workbuddy_envelope(request, payload)
 
 
 @router.put(
@@ -755,3 +792,68 @@ async def update_tenant_capabilities(
     except _CATALOG_ERRORS as exc:
         raise _capability_refusal(exc) from exc
     return workbuddy_envelope(request, _capabilities_payload(admin.tenant_id, record))
+
+
+@router.post(
+    "/tenant-capabilities/{kind}/{revision_id}/grants",
+    status_code=201,
+    summary="Grant an approved tool or model revision to a department or member",
+)
+async def create_capability_grant(
+    request: Request,
+    kind: str,
+    revision_id: str,
+    body: CapabilityGrantBody,
+    admin: _AdminPrincipal,
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Narrow or widen reach: a tenant-wide grant is what every tenant had before."""
+    repo = _repo(server)
+    try:
+        grant = repo.grant_capability(
+            admin.tenant_id,
+            kind=kind,
+            revision_id=_public_id(revision_id, _REVISION_NOT_FOUND),
+            subject_kind=body.subject_kind,
+            subject_id=body.subject_id,
+            actor_member_id=admin.member_id,
+        )
+    except _CATALOG_ERRORS as exc:
+        raise _capability_refusal(exc) from exc
+    return workbuddy_envelope(request, _capability_grant_payload(grant))
+
+
+@router.delete(
+    "/tenant-capabilities/{kind}/{revision_id}/grants",
+    summary="Revoke one tool or model grant subject",
+)
+async def delete_capability_grant(
+    request: Request,
+    kind: str,
+    revision_id: str,
+    subject_kind: str = Query(pattern="^(tenant|department|member)$"),
+    subject_id: str | None = Query(default=None, max_length=64),
+    admin: WorkBuddyPrincipal = Depends(require_workbuddy_admin()),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Revoking the tenant-wide grant stops every member the subject list did not keep."""
+    repo = _repo(server)
+    revision = _public_id(revision_id, _REVISION_NOT_FOUND)
+    if not repo.revoke_capability_grant(
+        admin.tenant_id,
+        kind=kind,
+        revision_id=revision,
+        subject_kind=subject_kind,
+        subject_id=subject_id,
+    ):
+        raise _not_found(_CAPABILITY_GRANT_NOT_FOUND)
+    return workbuddy_envelope(
+        request,
+        {
+            "kind": kind,
+            "revision_id": revision,
+            "subject_kind": subject_kind,
+            "subject_id": subject_id,
+            "revoked": True,
+        },
+    )
