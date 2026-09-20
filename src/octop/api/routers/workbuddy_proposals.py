@@ -8,6 +8,8 @@ Paths are relative to the parent-mounted ``/api/v1`` prefix:
 * ``GET  /improvement-proposals/{id}`` — detail with reviews, shadow proof and
   gate evidence;
 * ``POST /improvement-proposals/{id}/decisions`` — record an independent review;
+* ``POST /improvement-proposals/{id}/reviewers`` — the workflow manager assigns
+  the reviewers of an open proposal;
 * ``POST /improvement-proposals/{id}/promote`` — ``start_shadow``,
   ``start_canary``, ``apply`` or ``abort`` with an ``If-Match`` workflow
   revision.
@@ -42,6 +44,7 @@ from octop.infra.db.repos.workbuddy_proposals import (
 )
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.proposals import (
+    MAX_ASSIGNED_REVIEWERS,
     MAX_PATCH_OPERATIONS,
     PromotionAction,
     ProposalActor,
@@ -114,8 +117,10 @@ _ERROR_CODES: dict[str, ErrorCode] = {
     "WORKBUDDY_VERSION_IMMUTABLE": ErrorCode.WORKBUDDY_VERSION_IMMUTABLE,
 }
 
-# Governance columns only the tenant administration sees.
-_REVIEWER_HIDDEN_FIELDS = ("reviews",)
+# Governance columns only the tenant administration sees.  A reviewer sees the
+# frozen evidence, never the roster: an independent review must not be coloured
+# by who else was assigned.
+_REVIEWER_HIDDEN_FIELDS = ("reviews", "reviewers")
 
 
 class ProposalCreateBody(BaseModel):
@@ -135,6 +140,19 @@ class ProposalCreateBody(BaseModel):
 class DecisionBody(BaseModel):
     decision: Literal["approved", "rejected"]
     comment: str = Field(default="", max_length=2000)
+
+
+class ReviewersBody(BaseModel):
+    """The members the workflow manager designates as independent reviewers."""
+
+    reviewer_membership_ids: list[str] = Field(
+        min_length=1,
+        max_length=MAX_ASSIGNED_REVIEWERS,
+        description=(
+            "Membership UUIDs of this tenant.  The creator of the proposal and "
+            "members that are not active are refused."
+        ),
+    )
 
 
 class PromoteBody(BaseModel):
@@ -413,6 +431,40 @@ async def decide_improvement_proposal(
     return workbuddy_envelope(request, _payload(view, principal))
 
 
+@router.post(
+    "/improvement-proposals/{proposal_id}/reviewers",
+    summary="Assign independent reviewers",
+)
+async def assign_improvement_proposal_reviewers(
+    request: Request,
+    proposal_id: str,
+    body: ReviewersBody,
+    principal: _Admin,
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Designate the reviewers of an open proposal (workflow manager only).
+
+    Every designated member must be active in this tenant and must not be the
+    author: the creator can neither vote nor be assigned to vote.  The roster
+    answers 400 otherwise, and one refusal covers foreign, suspended and unknown
+    memberships alike.
+    """
+    service = _service(server, principal)
+    try:
+        view = service.assign_reviewers(
+            _public_id(proposal_id),
+            reviewers=body.reviewer_membership_ids,
+            actor=_actor(principal),
+        )
+    except ProposalPolicyError as exc:
+        raise _refusal(exc) from exc
+    except ProposalNotFoundError as exc:
+        raise _not_found() from exc
+    except WorkBuddyError as exc:
+        raise _refusal(exc) from exc
+    return workbuddy_envelope(request, _payload(view, principal))
+
+
 @router.post("/improvement-proposals/{proposal_id}/promote", summary="Promote a proposal")
 async def promote_improvement_proposal(
     request: Request,
@@ -457,6 +509,8 @@ __all__ = [
     "DecisionBody",
     "PromoteBody",
     "ProposalCreateBody",
+    "ReviewersBody",
+    "assign_improvement_proposal_reviewers",
     "create_improvement_proposal",
     "decide_improvement_proposal",
     "get_improvement_proposal",

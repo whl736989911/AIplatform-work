@@ -58,9 +58,9 @@ export default function MarketplacePage() {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   /**
-   * Ids observed in this session (an install or an explicit open). The frozen
-   * manifest exposes no list route for installations or submissions, so the
-   * console never pretends to have a server-side list it cannot read.
+   * Ids observed in this session (an install or an explicit open). The
+   * installations panel reads this tenant's ledger from the list route; these
+   * ids stay as the shortcut back to what this session just produced.
    */
   const [knownInstallations, setKnownInstallations] = useState<string[]>([]);
   const [knownSubmissions, setKnownSubmissions] = useState<string[]>([]);

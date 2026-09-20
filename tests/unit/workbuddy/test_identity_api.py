@@ -717,6 +717,7 @@ def test_routes_are_api_v1_relative_and_match_the_frozen_manifest() -> None:
     actual = {(method, route.path) for route in wb_id.router.routes for method in route.methods}
     assert actual == {
         ("POST", "/auth/login"),
+        ("POST", "/auth/reauthenticate"),
         ("POST", "/auth/register"),
         ("GET", "/tenant-context"),
         ("POST", "/tenants"),
@@ -745,6 +746,9 @@ def test_only_v1_auth_and_webhooks_bypass_jwt() -> None:
     assert is_jwt_exempt_path("/api/v1/auth/login")
     assert is_jwt_exempt_path("/api/v1/auth/register")
     assert is_jwt_exempt_path("/api/v1/webhooks/anything")
+    # Re-authentication is a step *inside* an authenticated session, never a way
+    # in: the password check runs against the caller's own membership.
+    assert not is_jwt_exempt_path("/api/v1/auth/reauthenticate")
     assert not is_jwt_exempt_path("/api/v1/users")
     assert not is_jwt_exempt_path("/api/v1/tenants")
     assert not is_jwt_exempt_path("/api/v1/tenant-context")

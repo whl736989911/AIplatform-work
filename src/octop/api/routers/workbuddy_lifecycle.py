@@ -5,6 +5,10 @@ Paths are relative to the ``/api/v1`` mount (see ``contracts/route-manifest.json
 * ``POST /tenants/{id}/export`` — 202, builds the redacted export and mints the
   single redeem token for the fixed 72h window;
 * ``POST /exports/{id}/redeem`` — 200, one-time CAS consumption of that token;
+* ``POST /exports/{id}/download-challenge`` — 200, re-issues that same token on
+  demand for the admin who requested the export, against a five-minute one-time
+  re-authentication credential (``POST /auth/reauthenticate``); the 72h window is
+  never extended and an export that was already redeemed yields no challenge;
 * ``GET  /exports/{id}/manifest`` — the frozen manifest and its digest;
 * ``POST /tenants/{id}/deletion-requests`` — 201 inside cooling-off, or
   ``COMPLIANCE_GATE_CLOSED`` when no signed policy authorises the tenant;
@@ -54,6 +58,10 @@ _NO_STORE = "no-store"
 
 class RedeemBody(BaseModel):
     token: str = Field(min_length=8, max_length=512)
+
+
+class DownloadChallengeBody(BaseModel):
+    credential: str = Field(min_length=8, max_length=512)
 
 
 class DeletionCancelBody(BaseModel):
@@ -162,6 +170,40 @@ async def read_export_manifest(
         raise _not_found(_EXPORT_NOT_FOUND)
     _no_store(response)
     return workbuddy_envelope(request, manifest)
+
+
+@router.post(
+    "/exports/{export_job_id}/download-challenge",
+    summary="Issue the one-time export redeem challenge",
+)
+async def issue_download_challenge(
+    request: Request,
+    export_job_id: str,
+    response: Response,
+    body: DownloadChallengeBody,
+    principal: _AdminPrincipal,
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Exchange a fresh re-auth credential for this job's redeem challenge.
+
+    The challenge *is* the job's redeem token: it is minted against the window
+    frozen when the export was created, so re-issuing never extends the 72h, and
+    it is spent by the first ``/redeem`` call.  Only the admin who requested the
+    export may ask for one, and only with a live one-time credential.
+    """
+    job_id = _public_id(export_job_id, _EXPORT_NOT_FOUND)
+    try:
+        challenge = policy.issue_download_challenge(
+            _repo(server),
+            tenant_id=str(principal.tenant_id),
+            user_id=principal.user_id,
+            export_job_id=job_id,
+            credential=body.credential,
+        )
+    except WorkBuddyPostgresRequiredError as exc:
+        raise _translate(exc) from exc
+    _no_store(response)
+    return workbuddy_envelope(request, challenge.as_payload())
 
 
 @router.post("/exports/{export_job_id}/redeem", summary="Redeem an export token once")

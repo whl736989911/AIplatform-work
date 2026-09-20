@@ -174,6 +174,79 @@ def test_export_is_redacted_verifiable_and_redeemed_once(
     assert replay.value.code is ErrorCode.EXPORT_REDEEM_CONSUMED
 
 
+def test_download_challenge_reissues_the_frozen_redeem_challenge_once(
+    pool: PostgresPool, tenant: dict[str, str]
+) -> None:
+    """Stage D against the real schema: credential -> challenge -> one download."""
+    repo = WorkBuddyLifecycleRepo(pool)
+    tenant_id = tenant["tenant_id"]
+    user_id = int(tenant["user_id"])
+    issue = policy.start_tenant_export(repo, tenant_id=tenant_id, user_id=user_id)
+
+    credential = policy.issue_reauth_credential(repo, tenant_id=tenant_id, user_id=user_id)
+    challenge = policy.issue_download_challenge(
+        repo,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        export_job_id=issue.job.export_job_id,
+        credential=credential.credential,
+    )
+    # The re-issued challenge inherits the window frozen at job creation.
+    assert challenge.expires_at == issue.job.redeem_expires_at
+
+    # The credential is single-use: only the digest is stored, and a replay is
+    # refused before anything is minted.
+    with repo.transaction(WorkBuddyDbContext.platform(tenant_id=tenant_id)) as conn:
+        stored = repo.get_reauth_credential(
+            conn,
+            tenant_id=tenant_id,
+            credential_sha256=policy.hash_redeem_token(credential.credential),
+        )
+    assert stored is not None
+    assert stored["credential_sha256"] == policy.hash_redeem_token(credential.credential)
+    assert credential.credential not in json.dumps(stored, default=str)
+    with pytest.raises(OctopError) as reused:
+        policy.issue_download_challenge(
+            repo,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            export_job_id=issue.job.export_job_id,
+            credential=credential.credential,
+        )
+    assert reused.value.code is ErrorCode.AUTH_INVALID_CREDENTIALS
+
+    download = policy.redeem_export(
+        repo, tenant_id=tenant_id, user_id=user_id, token=challenge.challenge
+    )
+    assert download.export_job_id == issue.job.export_job_id
+    with pytest.raises(OctopError) as replay:
+        policy.redeem_export(repo, tenant_id=tenant_id, user_id=user_id, token=challenge.challenge)
+    assert replay.value.code is ErrorCode.EXPORT_REDEEM_CONSUMED
+
+    # An export that was already downloaded never yields a second challenge.
+    another = policy.issue_reauth_credential(repo, tenant_id=tenant_id, user_id=user_id)
+    with pytest.raises(OctopError) as consumed:
+        policy.issue_download_challenge(
+            repo,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            export_job_id=issue.job.export_job_id,
+            credential=another.credential,
+        )
+    assert consumed.value.code is ErrorCode.EXPORT_REDEEM_CONSUMED
+
+    with repo.transaction(WorkBuddyDbContext.platform(tenant_id=tenant_id)) as conn:
+        job = repo.get_export_job(conn, tenant_id=tenant_id, export_job_id=issue.job.export_job_id)
+        entry_types = [
+            str(row["entry_type"])
+            for row in repo.list_ledger_entries(conn, tenant_id=tenant_id, limit=50)
+        ]
+    assert job is not None
+    assert job["redeem_expires_at"] == issue.job.redeem_expires_at
+    # Both issuances are on the record: the create-time token and the challenge.
+    assert entry_types.count("export_redeem_issued") == 2
+
+
 def test_deletion_requires_the_policy_and_cancels_only_inside_cooling_off(
     pool: PostgresPool, tenant: dict[str, str]
 ) -> None:

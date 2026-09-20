@@ -900,6 +900,7 @@ class WorkBuddyMarketplaceRepo:
         tenant_id: object,
         *,
         status: object = None,
+        installed_by: object = None,
         limit: object = None,
         offset: object = None,
         ctx: Any = None,
@@ -910,6 +911,11 @@ class WorkBuddyMarketplaceRepo:
         if status is not None and str(status).strip():
             clauses.append(" AND status = ?")
             params.append(str(status).strip())
+        if installed_by is not None and str(installed_by).strip():
+            # An installation is readable by whoever installed it and by tenant
+            # admins; a member's ledger is therefore the rows they own.
+            clauses.append(" AND installed_by = ?")
+            params.append(normalize_uuid(installed_by, field="installed_by"))
         params.extend([_limit(limit), _offset(offset)])
         context = self._tenant_context(identifier, ctx=ctx)
         with _db_errors(), self._transaction(context, None) as active:

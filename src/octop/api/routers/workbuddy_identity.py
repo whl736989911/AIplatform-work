@@ -32,12 +32,14 @@ from pydantic import BaseModel, Field
 
 from octop.api.deps import current_user, extract_raw_token, get_server, sign_token
 from octop.infra.db.pool import DatabasePool
+from octop.infra.db.workbuddy_context import WorkBuddyPostgresRequiredError
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.users.email import parse_optional_email
 from octop.infra.users.identity import Role, User
 from octop.infra.users.password import validate_password_policy
 from octop.infra.users.permissions import effective_permissions
 from octop.infra.utils.locale import normalize_locale, resolve_request_locale
+from octop.infra.workbuddy import lifecycle as policy
 from octop.infra.workbuddy.roles import TENANT_ADMIN_ROLES
 
 router = APIRouter()
@@ -93,6 +95,34 @@ def _identity_repo(server: Any) -> Any:
     # ``dialect`` was checked above, so this is a real PostgreSQL pool.
     assert isinstance(db, DatabasePool), db
     return WorkBuddyIdentityRepo(db)
+
+
+def _credential_repo(server: Any) -> Any:
+    """Build the credential store that authorises a fresh export download.
+
+    Re-authentication credentials live in the lifecycle slice
+    (``031_workbuddy_reauth_credentials.pg.sql``), next to the redeem tokens they
+    authorise, so this seam fails closed exactly like :func:`_identity_repo`.
+    Tests replace it with an in-memory store.
+    """
+    services = getattr(server, "services", None)
+    if services is None:
+        raise OctopError(
+            ErrorCode.SETUP_REQUIRED,
+            "control-plane database not configured yet",
+            status=503,
+        )
+    db = getattr(services, "db", None)
+    if getattr(db, "dialect", "") != "postgresql":
+        raise OctopError(
+            ErrorCode.DEPENDENCY_UNAVAILABLE,
+            "WorkBuddy re-authentication requires the PostgreSQL control plane",
+        )
+    from octop.infra.db.repos.workbuddy_lifecycle import WorkBuddyLifecycleRepo
+
+    # ``dialect`` was checked above, so this is a real PostgreSQL pool.
+    assert isinstance(db, DatabasePool), db
+    return WorkBuddyLifecycleRepo(db)
 
 
 def _map_store_error(exc: BaseException) -> OctopError:
@@ -533,6 +563,11 @@ class RegisterBody(BaseModel):
     display_name: str | None = Field(default=None, max_length=128)
 
 
+class ReauthenticateBody(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+    purpose: str = Field(default=policy.EXPORT_DOWNLOAD_PURPOSE, min_length=1, max_length=64)
+
+
 class TenantCreateBody(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     slug: str = Field(min_length=3, max_length=32)
@@ -668,6 +703,42 @@ async def register(
         raise OctopError(ErrorCode.RESOURCE_NOT_FOUND, "tenant not found")
     response.headers["Cache-Control"] = "no-store"
     return workbuddy_envelope(request, _issue_session(server, user, tenant, member))
+
+
+@router.post(
+    "/auth/reauthenticate",
+    summary="Issue a five-minute one-time re-authentication credential",
+)
+@_store_errors
+async def reauthenticate(
+    body: ReauthenticateBody,
+    request: Request,
+    response: Response,
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Re-prove the caller's password and mint one purpose-bound credential.
+
+    The credential backs the stage-D export download challenge: it lives five
+    minutes, is bound to this tenant, this user and one purpose, is stored as its
+    sha256 only, and is spent by the first caller that uses it.  A wrong password
+    answers exactly like a failed sign-in — including the shared lockout counters
+    — so nothing here confirms that an account or a credential exists.
+    """
+    confirmed = await server.user_manager.authenticate(principal.user.username, body.password)
+    if confirmed is None or confirmed.id != principal.user_id:
+        raise _invalidate_credentials()
+    try:
+        issue = policy.issue_reauth_credential(
+            _credential_repo(server),
+            tenant_id=str(principal.tenant_id),
+            user_id=principal.user_id,
+            purpose=body.purpose,
+        )
+    except WorkBuddyPostgresRequiredError as exc:
+        raise OctopError(ErrorCode.DEPENDENCY_UNAVAILABLE, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return workbuddy_envelope(request, issue.as_payload())
 
 
 # --------------------------------------------------------------------------- #

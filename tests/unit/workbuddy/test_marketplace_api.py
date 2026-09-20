@@ -28,6 +28,10 @@ from octop.api.routers.workbuddy_identity import (
     WorkBuddyPrincipal,
     workbuddy_principal,
 )
+from octop.infra.db.repos.workbuddy_marketplace import (
+    DEFAULT_LIST_LIMIT,
+    MAX_LIST_LIMIT,
+)
 from octop.infra.db.workbuddy_context import WorkBuddyPostgresRequiredError
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.users.identity import Role, User
@@ -36,6 +40,9 @@ from octop.infra.workbuddy import marketplace as M
 TENANT = "11111111-1111-4111-8111-111111111111"
 MEMBER = "22222222-2222-4222-8222-222222222222"
 OTHER_MEMBER = "33333333-3333-4333-8333-333333333333"
+OTHER_TENANT = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+COLLEAGUE_INSTALLATION_ID = "14141414-1414-4141-8141-141414141414"
+FOREIGN_INSTALLATION_ID = "15151515-1515-4151-8151-151515151515"
 TEMPLATE = "44444444-4444-4444-8444-444444444444"
 TEMPLATE_VERSION = "55555555-5555-4555-8555-555555555555"
 SUBMISSION_ID = "66666666-6666-4666-8666-666666666666"
@@ -105,6 +112,37 @@ def consent_body(**overrides: Any) -> dict[str, Any]:
 
 
 _MISSING = object()
+
+
+def installation_row(
+    installation_id: str,
+    *,
+    tenant_id: str = TENANT,
+    installed_by: str = MEMBER,
+    status: str = "installed",
+    updated_at: str = "2026-01-01T00:00:00+00:00",
+) -> dict[str, Any]:
+    """One ``marketplace_installations`` row in the shape the routes read."""
+    return {
+        "id": installation_id,
+        "tenant_id": tenant_id,
+        "template_id": TEMPLATE,
+        "template_version_id": TEMPLATE_VERSION,
+        "workflow_id": WORKFLOW_ID,
+        "installed_version_id": WORKFLOW_VERSION_ID,
+        "installed_by": installed_by,
+        "installed_by_user_id": 10,
+        "status": status,
+        "consented_license_hash": M.sha256_hex(PUBLISHER_LICENSE),
+        "consented_capabilities": [],
+        "consented_at": updated_at,
+        "job_id": JOB_ID,
+        "error_code": None,
+        "error_detail": None,
+        "revision": 1,
+        "created_at": updated_at,
+        "updated_at": updated_at,
+    }
 
 
 class _Catalog:
@@ -203,6 +241,29 @@ class _Store:
     def get_installation(self, tenant_id: Any, installation_id: Any, **kwargs: Any) -> dict | None:
         row = self.installations.get(str(installation_id).lower())
         return dict(row) if row is not None else None
+
+    def list_installations(
+        self,
+        tenant_id: Any,
+        *,
+        status: Any = None,
+        installed_by: Any = None,
+        limit: Any = None,
+        offset: Any = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """The repository's contract: tenant-scoped, newest first, page clamped."""
+        rows = [
+            dict(row)
+            for row in self.installations.values()
+            if str(row.get("tenant_id")) == str(tenant_id)
+            and (status is None or str(row.get("status")) == str(status))
+            and (installed_by is None or str(row.get("installed_by")) == str(installed_by))
+        ]
+        rows.sort(key=lambda row: (str(row.get("updated_at") or ""), str(row["id"])), reverse=True)
+        size = DEFAULT_LIST_LIMIT if limit is None else max(1, min(int(limit), MAX_LIST_LIMIT))
+        start = max(0, int(offset or 0))
+        return rows[start : start + size]
 
     # -- writes ------------------------------------------------------------ #
 
@@ -824,3 +885,52 @@ async def test_platform_decisions_need_the_platform_audience(
     )
     assert response.status_code == 401, response.text
     assert response.json()["error"]["code"] == ErrorCode.AUTH_FAILED.value
+
+
+async def test_the_installation_ledger_shows_only_what_the_caller_may_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T24: the list is tenant- and member-scoped, exactly like the detail route."""
+    store = _Store()
+    store.installations[INSTALLATION_ID] = installation_row(INSTALLATION_ID)
+    store.installations[COLLEAGUE_INSTALLATION_ID] = installation_row(
+        COLLEAGUE_INSTALLATION_ID, installed_by=OTHER_MEMBER
+    )
+    store.installations[FOREIGN_INSTALLATION_ID] = installation_row(
+        FOREIGN_INSTALLATION_ID, tenant_id=OTHER_TENANT
+    )
+    app = _app(store, monkeypatch)
+
+    member = await _request(app, "GET", "/marketplace/installations", principal=_principal())
+    admin = await _request(
+        app, "GET", "/marketplace/installations", principal=_principal(role="admin")
+    )
+
+    assert member.status_code == 200, member.text
+    assert [row["id"] for row in member.json()["data"]] == [INSTALLATION_ID]
+    assert admin.status_code == 200, admin.text
+    assert {row["id"] for row in admin.json()["data"]} == {
+        INSTALLATION_ID,
+        COLLEAGUE_INSTALLATION_ID,
+    }
+
+
+async def test_the_installation_ledger_never_returns_more_than_a_store_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T24: the caller's page size is honoured, and an oversized one is capped."""
+    store = _Store()
+    for index in range(MAX_LIST_LIMIT + 5):
+        identifier = f"{index:08d}-0000-4000-8000-000000000000"
+        store.installations[identifier] = installation_row(identifier)
+    app = _app(store, monkeypatch)
+
+    small = await _request(app, "GET", "/marketplace/installations?limit=3", principal=_principal())
+    huge = await _request(
+        app, "GET", "/marketplace/installations?limit=1000000", principal=_principal()
+    )
+
+    assert small.status_code == 200, small.text
+    assert len(small.json()["data"]) == 3
+    assert huge.status_code == 200, huge.text
+    assert len(huge.json()["data"]) == MAX_LIST_LIMIT

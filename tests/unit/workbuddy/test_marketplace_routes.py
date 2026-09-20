@@ -104,3 +104,17 @@ def test_the_review_route_requires_the_platform_audience() -> None:
 
     assert platform_dependency in dependencies
     assert workbuddy_principal not in dependencies
+
+
+def test_the_installation_ledger_takes_its_tenant_from_the_principal_only() -> None:
+    """The list is scoped by the authenticated principal, never by the request."""
+    route = next(route for route in mp.router.routes if route.path == "/marketplace/installations")
+    dependant = route.dependant
+    named = {param.name for param in dependant.query_params} | {
+        param.name for param in dependant.path_params
+    }
+
+    assert getattr(route, "methods", set()) == {"GET"}
+    assert (getattr(route, "status_code", None) or 200) == 200
+    assert "tenant_id" not in named
+    assert workbuddy_principal in _dependencies(route)

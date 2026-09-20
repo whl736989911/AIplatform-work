@@ -2,20 +2,85 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-20T00:00:00Z",
+  "updated": "2026-09-19T22:54:04Z",
   "batches": {
     "1": {
-      "state": "in_progress",
-      "tasks": ["A-01", "A-19", "A-20", "A-21"],
+      "state": "done",
+      "tasks": [
+        "A-01",
+        "A-19",
+        "A-20",
+        "A-21"
+      ],
+      "pr": 29,
+      "commits": [
+        "c9e39fd9"
+      ],
+      "evidence": "后端静态门禁全绿（ruff check / ruff format --check 1085 文件 / mypy 537 文件）；迁移三态全通过（全新 PG→v31 且 workbuddy_reauth_credentials 存在；既有库 v30→v31 哨兵计数一致、既有表列集合未变；全新 SQLite→v31 无 PG 专属表、无报错），用 pgvector/pg16 专用临时库，用完即删；批次内单测：提案 60 passed、生命周期 16 + 活体 PG 4、身份 23、策略 21、市场 22、路由契约对齐 9；前端 lint 0 error、tsc -b 通过、vitest 922 passed（唯一失败是既有 ChannelsPanel 超时，与本批无关，基线同样失败）；新增 test_proposals_lifecycle_routes.py 做契约双向比对，防止同类缺陷复发",
+      "notes": "A-20 占用迁移号 031（A 线段），后续 A 线从 032 起；/auth/reauthenticate 落在 workbuddy_identity.py，属按路由的例外（已写入计划契约 5）。未包含项：个人版知识库入口保留到 B-10/B-14；治理组不做客户端角色隐藏；A-19 名册前端暂不渲染；收件箱提问/审核属批次 4；逐节点排障属 A-02。"
+    },
+    "2": {
+      "state": "pending",
+      "tasks": [
+        "A-04",
+        "A-05",
+        "A-02",
+        "A-03"
+      ],
       "pr": null,
       "commits": [],
       "evidence": "",
-      "notes": "开始：IA 重组 + 三个小缺陷（/reviewers、生命周期重新认证、市场安装列表）"
+      "notes": ""
     },
-    "2": { "state": "pending", "tasks": ["A-04", "A-05", "A-02", "A-03"], "pr": null, "commits": [], "evidence": "", "notes": "" },
-    "3": { "state": "pending", "tasks": ["A-06", "A-07"], "pr": null, "commits": [], "evidence": "", "notes": "" },
-    "4": { "state": "pending", "tasks": ["A-08", "A-09", "A-11"], "pr": null, "commits": [], "evidence": "", "notes": "" },
-    "5": { "state": "pending", "tasks": ["A-12", "A-13", "A-14", "A-15"], "pr": null, "commits": [], "evidence": "", "notes": "" },
-    "6": { "state": "pending", "tasks": ["A-16", "A-17", "A-22", "A-23", "A-24"], "pr": null, "commits": [], "evidence": "", "notes": "" }
+    "3": {
+      "state": "pending",
+      "tasks": [
+        "A-06",
+        "A-07"
+      ],
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": ""
+    },
+    "4": {
+      "state": "pending",
+      "tasks": [
+        "A-08",
+        "A-09",
+        "A-11"
+      ],
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": ""
+    },
+    "5": {
+      "state": "pending",
+      "tasks": [
+        "A-12",
+        "A-13",
+        "A-14",
+        "A-15"
+      ],
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": ""
+    },
+    "6": {
+      "state": "pending",
+      "tasks": [
+        "A-16",
+        "A-17",
+        "A-22",
+        "A-23",
+        "A-24"
+      ],
+      "pr": null,
+      "commits": [],
+      "evidence": "",
+      "notes": ""
+    }
   }
 }
