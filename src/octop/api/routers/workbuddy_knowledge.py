@@ -40,9 +40,11 @@ from octop.infra.db.workbuddy_context import WorkBuddyPostgresRequiredError, req
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.workbuddy.knowledge import (
     DEFAULT_TOLERANCE_SECONDS,
+    DOCUMENT_SOURCE_UPLOAD,
     WorkBuddyKnowledgeActor,
     WorkBuddyKnowledgeService,
     WorkBuddyTriggerService,
+    validate_document_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,19 @@ class DocumentCreateBody(BaseModel):
     )
     file_ref_id: str | None = Field(default=None, description="Alias of file_ref.")
     title: str = ""
+    source: str = Field(
+        default=DOCUMENT_SOURCE_UPLOAD,
+        description=(
+            "Where the content comes from: 'upload' (a stored file reference), "
+            "'text' (the text supplied here) or 'migration' (imported from the "
+            "personal edition, text only). The text-only sources must not name a "
+            "file reference."
+        ),
+    )
+    text: str | None = Field(
+        default=None,
+        description="Content of a text-only document; ignored for uploads.",
+    )
 
 
 class SearchBody(BaseModel):
@@ -184,6 +199,34 @@ def _schedule_indexing(
             department_id=actor.department_id,
             kb_id=kb_id,
             document_id=document_id,
+        ),
+    )
+    future.add_done_callback(_log_index_failure)
+
+
+def _schedule_text_indexing(
+    service: WorkBuddyKnowledgeService,
+    actor: WorkBuddyKnowledgeActor,
+    kb_id: str,
+    document_id: str,
+    text: str,
+) -> None:
+    """Index a text-only document off the request thread, content held in memory.
+
+    The text travels with the task and is never written to the job record: only
+    the chunks and their vectors reach the database.
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(
+        None,
+        functools.partial(
+            service.index_text_document,
+            tenant_id=actor.tenant_id,
+            actor_user_id=actor.user_id,
+            department_id=actor.department_id,
+            kb_id=kb_id,
+            document_id=document_id,
+            text=text,
         ),
     )
     future.add_done_callback(_log_index_failure)
@@ -384,17 +427,32 @@ async def create_knowledge_document(
     actor = _actor(principal)
     service = _knowledge(server)
     kb_id = _require_uuid(id, "knowledge base id")
+    source = str(body.source or DOCUMENT_SOURCE_UPLOAD).strip().lower()
+    text_only = source != DOCUMENT_SOURCE_UPLOAD
     file_ref = body.file_ref or body.file_ref_id
-    if not file_ref:
+    if text_only:
+        if file_ref or body.upload_id:
+            raise OctopError(
+                ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+                "a text-only document cannot name a file reference",
+            )
+        # The content is validated here, before a document row exists, so a caller
+        # cannot leave a pending document that nobody can ever index.
+        validate_document_text(body.text)
+    elif not file_ref:
         raise OctopError(ErrorCode.WORKBUDDY_INVALID_ARGUMENT, "file_ref is required")
     payload = service.create_document(
         actor,
         kb_id,
-        file_ref_id=_require_uuid(file_ref, "file_ref"),
+        source=source,
+        file_ref_id=_require_uuid(file_ref, "file_ref") if file_ref else None,
         upload_id=_require_uuid(body.upload_id, "upload id") if body.upload_id else None,
         title=body.title or "",
     )
-    _schedule_indexing(service, actor, kb_id, payload["document_id"])
+    if text_only:
+        _schedule_text_indexing(service, actor, kb_id, payload["document_id"], str(body.text))
+    else:
+        _schedule_indexing(service, actor, kb_id, payload["document_id"])
     return workbuddy_envelope(request, payload)
 
 

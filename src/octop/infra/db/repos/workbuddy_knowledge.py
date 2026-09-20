@@ -240,7 +240,8 @@ class WorkBuddyKnowledgeDocumentRow:
     document_id: str
     tenant_id: str
     kb_id: str
-    file_ref_id: str
+    file_ref_id: str | None
+    source: str
     title: str
     status: str
     error_code: str | None
@@ -258,7 +259,8 @@ class WorkBuddyKnowledgeDocumentRow:
             document_id=str(row["document_id"]),
             tenant_id=str(row["tenant_id"]),
             kb_id=str(row["kb_id"]),
-            file_ref_id=str(row["file_ref_id"]),
+            file_ref_id=_str_or_none(row, "file_ref_id"),
+            source=str(row["source"]),
             title=str(row["title"]),
             status=str(row["status"]),
             error_code=_str_or_none(row, "error_code"),
@@ -872,24 +874,27 @@ class WorkBuddyKnowledgeRepo:
         ctx: WorkBuddyDbContext,
         kb_id: str,
         *,
-        file_ref_id: str,
+        file_ref_id: str | None,
         title: str,
         created_by_user_id: int,
         document_id: str | None = None,
         job_id: str | None = None,
+        source: str = "upload",
     ) -> WorkBuddyKnowledgeDocumentRow:
+        """Insert one document; ``file_ref_id`` is ``None`` for text-only sources."""
         stamp = now_ts()
         with workbuddy_transaction(self._db, ctx) as conn:
             row = conn.execute(
                 "INSERT INTO workbuddy_knowledge_documents ("
-                "tenant_id, document_id, kb_id, file_ref_id, title, status, job_id, "
+                "tenant_id, document_id, kb_id, file_ref_id, source, title, status, job_id, "
                 "created_by_user_id, created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?) RETURNING *",
+                ") VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?) RETURNING *",
                 (
                     ctx.tenant_id,
                     document_id or new_uuid(),
                     kb_id,
                     file_ref_id,
+                    source,
                     title,
                     job_id or new_uuid(),
                     created_by_user_id,

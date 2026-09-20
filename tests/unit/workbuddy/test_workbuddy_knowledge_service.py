@@ -212,6 +212,7 @@ def _document(**overrides: Any) -> WorkBuddyKnowledgeDocumentRow:
         "tenant_id": TENANT,
         "kb_id": KB_ID,
         "file_ref_id": FILE_REF_ID,
+        "source": "upload",
         "title": "doc.md",
         "status": "pending",
         "error_code": None,
@@ -326,6 +327,7 @@ class FakeKnowledgeRepo:
             document_id=kwargs.get("document_id") or DOC_ID,
             kb_id=kb_id,
             file_ref_id=kwargs["file_ref_id"],
+            source=kwargs.get("source", "upload"),
             title=kwargs["title"],
             job_id=kwargs["job_id"],
         )
@@ -1219,7 +1221,134 @@ def test_creating_a_document_opens_the_indexing_job_it_points_at() -> None:
     created = service.create_document(_actor(), KB_ID, file_ref_id=FILE_REF_ID, title="doc.md")
 
     assert jobs.started == [
-        ("knowledge_index", {"kb_id": KB_ID, "file_ref_id": FILE_REF_ID, "title": "doc.md"})
+        (
+            "knowledge_index",
+            {
+                "kb_id": KB_ID,
+                "source": "upload",
+                "file_ref_id": FILE_REF_ID,
+                "title": "doc.md",
+            },
+        )
     ], jobs.started
     assert created["job_id"] == "job-1", created
     assert repo.created_documents[0]["job_id"] == "job-1", repo.created_documents
+
+
+# ── text-only documents (the migration channel) ──────────────────────────────
+
+
+class _ExplodingStore:
+    """A store that fails the test if a text-only document is read from storage."""
+
+    def __init__(self) -> None:
+        self.reads: list[str] = []
+
+    def available(self) -> bool:
+        return True
+
+    def read(self, object_key: str, *, limit: int) -> bytes:  # pragma: no cover - asserted
+        self.reads.append(object_key)
+        raise AssertionError("a text-only document must not read the object store")
+
+
+def _text_only_document(**overrides: Any) -> WorkBuddyKnowledgeDocumentRow:
+    return _document(file_ref_id=None, source="migration", **overrides)
+
+
+def test_a_text_only_document_is_created_without_a_file_reference() -> None:
+    repo = FakeKnowledgeRepo()
+    jobs = _FakeJobs()
+    service = _service(repo, _index_hooks(store=FakeObjectStore()), jobs=jobs)
+
+    payload = service.create_document(_actor(), KB_ID, title="migrated policy", source="migration")
+
+    assert payload["source"] == "migration"
+    assert payload["file_ref_id"] is None
+    created = repo.created_documents[0]
+    assert created["source"] == "migration"
+    assert created["file_ref_id"] is None
+    # The job names the source and carries no file reference to read.
+    kind, request = jobs.started[0]
+    assert kind == "knowledge_index"
+    assert request["source"] == "migration"
+    assert "file_ref_id" not in request
+
+
+def test_a_text_only_document_cannot_name_a_file_reference() -> None:
+    service = _service(FakeKnowledgeRepo(), _index_hooks(store=FakeObjectStore()))
+    with pytest.raises(OctopError) as named:
+        service.create_document(
+            _actor(), KB_ID, title="x", source="migration", file_ref_id=FILE_REF_ID
+        )
+    assert named.value.code is ErrorCode.WORKBUDDY_INVALID_ARGUMENT
+
+    with pytest.raises(OctopError) as uploaded:
+        service.create_document(_actor(), KB_ID, title="x", source="upload")
+    assert uploaded.value.code is ErrorCode.WORKBUDDY_INVALID_ARGUMENT
+
+
+def test_an_unknown_document_source_is_refused() -> None:
+    service = _service(FakeKnowledgeRepo(), _index_hooks(store=FakeObjectStore()))
+    with pytest.raises(OctopError) as excinfo:
+        service.create_document(_actor(), KB_ID, title="x", source="telepathy")
+    assert excinfo.value.code is ErrorCode.WORKBUDDY_INVALID_ARGUMENT
+
+
+def test_indexing_a_text_document_never_touches_the_object_store() -> None:
+    """The channel exists because a migrated document has no stored file at all."""
+    store = _ExplodingStore()
+    repo = FakeKnowledgeRepo(document=_text_only_document(title="migrated policy"))
+    jobs = _FakeJobs()
+    service = _service(repo, _index_hooks(store=store), jobs=jobs)
+
+    service.index_text_document(
+        tenant_id=TENANT,
+        actor_user_id=7,
+        kb_id=KB_ID,
+        document_id=DOC_ID,
+        text="first paragraph about policy\n\nsecond paragraph about scope",
+    )
+
+    assert store.reads == []
+    published = repo.published[0]
+    assert published["document_id"] == DOC_ID
+    assert published["chunks"], "the supplied text must be chunked and published"
+    assert all(chunk[3]["source"] == "migrated policy" for chunk in published["chunks"])
+    assert all(len(chunk[4]) == EMBEDDING_DIMENSIONS for chunk in published["chunks"])
+    assert repo.statuses == [("parsing", None), ("indexing", None)]
+    assert jobs.begun == [DOC_JOB_ID], jobs.begun
+    assert jobs.finished[-1][1] == "succeeded"
+
+
+def test_the_wrong_indexing_entry_point_is_refused() -> None:
+    uploaded = _service(FakeKnowledgeRepo(), _index_hooks(store=_ExplodingStore()))
+    with pytest.raises(OctopError) as from_text:
+        uploaded.index_text_document(
+            tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID, text="body"
+        )
+    assert from_text.value.code is ErrorCode.WORKBUDDY_INVALID_ARGUMENT
+
+    text_only = _service(
+        FakeKnowledgeRepo(document=_text_only_document()),
+        _index_hooks(store=_ExplodingStore()),
+    )
+    with pytest.raises(OctopError) as from_storage:
+        text_only.index_document(tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID)
+    assert from_storage.value.code is ErrorCode.WORKBUDDY_INVALID_ARGUMENT
+
+
+def test_an_empty_text_document_fails_closed_and_records_the_failure() -> None:
+    repo = FakeKnowledgeRepo(document=_text_only_document())
+    jobs = _FakeJobs()
+    service = _service(repo, _index_hooks(store=_ExplodingStore()), jobs=jobs)
+
+    with pytest.raises(OctopError) as excinfo:
+        service.index_text_document(
+            tenant_id=TENANT, actor_user_id=7, kb_id=KB_ID, document_id=DOC_ID, text="   \n"
+        )
+
+    assert excinfo.value.code is ErrorCode.WORKBUDDY_INVALID_ARGUMENT
+    assert repo.published == []
+    assert repo.statuses[-1][0] == "failed"
+    assert jobs.finished[-1][1] == "failed"

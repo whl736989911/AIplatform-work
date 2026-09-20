@@ -43,6 +43,7 @@ from octop.infra.db.repos.workbuddy_knowledge import (
     WorkBuddyKnowledgeAclRow,
     WorkBuddyKnowledgeBaseRow,
     WorkBuddyKnowledgeDocumentRow,
+    WorkBuddyKnowledgeFileRefRow,
     WorkBuddyKnowledgeRepo,
     WorkBuddyPlatformModelRevisionRow,
     WorkBuddyTriggerDeliveryRow,
@@ -64,6 +65,15 @@ MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
 MAX_MATCH_COUNT = 50
 UPLOAD_TTL_SECONDS = 900
+
+#: Document sources.  ``upload`` names a stored file reference; the other two are
+#: text-only: ``text`` for content a caller supplies, ``migration`` for content
+#: imported from the personal edition (chunk text and vectors, no original file).
+DOCUMENT_SOURCE_UPLOAD = "upload"
+DOCUMENT_SOURCE_TEXT = "text"
+DOCUMENT_SOURCE_MIGRATION = "migration"
+DOCUMENT_SOURCES = (DOCUMENT_SOURCE_UPLOAD, DOCUMENT_SOURCE_TEXT, DOCUMENT_SOURCE_MIGRATION)
+TEXT_DOCUMENT_SOURCES = (DOCUMENT_SOURCE_TEXT, DOCUMENT_SOURCE_MIGRATION)
 #: Fixed overlap window during which the previous webhook secret still verifies.
 SECRET_OVERLAP_SECONDS = 300
 DEFAULT_TOLERANCE_SECONDS = 300
@@ -1020,32 +1030,63 @@ class WorkBuddyKnowledgeService:
         actor: WorkBuddyKnowledgeActor,
         kb_id: str,
         *,
-        file_ref_id: str,
         title: str,
+        source: str = DOCUMENT_SOURCE_UPLOAD,
+        file_ref_id: str | None = None,
         upload_id: str | None = None,
     ) -> dict[str, Any]:
+        """Create a document row.
+
+        ``source='upload'`` is the original path: the document names a completed
+        file reference and an object store holds its bytes.  The text-only sources
+        (``'text'``, ``'migration'``) belong to content that has no source file —
+        a document created from supplied text, or one imported from the personal
+        edition, whose ``index.sqlite`` keeps chunk text and vectors only — so they
+        must not name a file reference, and their content is supplied to
+        :meth:`index_text_document` instead of being read back from storage.
+        """
         ctx = self.context(actor)
         self._require(ctx, actor, kb_id, "write")
         repo = self._repository()
-        ref = repo.get_file_ref(ctx, kb_id, file_ref_id)
-        if ref is None:
-            raise OctopError(ErrorCode.NOT_FOUND, "file reference not found")
-        if upload_id is not None and ref.upload_id != upload_id:
-            raise OctopError(
-                ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
-                "file reference does not belong to the upload",
-            )
-        clean_title = sanitize_filename(title or ref.filename)
+        text_only = validate_document_source(source)
+        if text_only:
+            if file_ref_id is not None or upload_id is not None:
+                raise OctopError(
+                    ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+                    "a text-only document cannot name a file reference",
+                )
+            ref: WorkBuddyKnowledgeFileRefRow | None = None
+        else:
+            if not file_ref_id:
+                raise OctopError(
+                    ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+                    "file_ref is required for an uploaded document",
+                )
+            ref = repo.get_file_ref(ctx, kb_id, file_ref_id)
+            if ref is None:
+                raise OctopError(ErrorCode.NOT_FOUND, "file reference not found")
+            if upload_id is not None and ref.upload_id != upload_id:
+                raise OctopError(
+                    ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+                    "file reference does not belong to the upload",
+                )
+        clean_title = sanitize_filename(title or (ref.filename if ref is not None else ""))
         jobs = self._jobs(actor)
         job_id = jobs.start(
             kind="knowledge_index",
-            request={"kb_id": kb_id, "file_ref_id": ref.file_ref_id, "title": clean_title},
+            request={
+                "kb_id": kb_id,
+                "source": source,
+                **({} if ref is None else {"file_ref_id": ref.file_ref_id}),
+                "title": clean_title,
+            },
         )
         try:
             document = repo.create_document(
                 ctx,
                 kb_id,
-                file_ref_id=ref.file_ref_id,
+                file_ref_id=None if ref is None else ref.file_ref_id,
+                source=source,
                 title=clean_title,
                 created_by_user_id=actor.user_id,
                 job_id=job_id,
@@ -1058,15 +1099,7 @@ class WorkBuddyKnowledgeService:
                 error_message=str(exc),
             )
             raise
-        return {
-            "document_id": document.document_id,
-            "kb_id": document.kb_id,
-            "job_id": document.job_id,
-            "title": document.title,
-            "status": document.status,
-            "chunk_count": document.chunk_count,
-            "created_at": document.created_at,
-        }
+        return self._document_view(document)
 
     def list_documents(self, actor: WorkBuddyKnowledgeActor, kb_id: str) -> list[dict[str, Any]]:
         ctx = self.context(actor)
@@ -1093,7 +1126,11 @@ class WorkBuddyKnowledgeService:
         document_id: str,
         department_id: str | None = None,
     ) -> None:
-        """Parse, embed and atomically publish one document's ready generation."""
+        """Parse, embed and atomically publish one *uploaded* document's generation.
+
+        A text-only document has no object to parse; :meth:`index_text_document`
+        indexes it from the text its caller supplies.
+        """
         actor = WorkBuddyKnowledgeActor(
             user_id=actor_user_id, tenant_id=tenant_id, department_id=department_id
         )
@@ -1103,6 +1140,13 @@ class WorkBuddyKnowledgeService:
         document = repo.get_document(ctx, kb_id, document_id)
         if base is None or document is None or document.deleted_at is not None:
             raise OctopError(ErrorCode.NOT_FOUND, "document not found")
+        if document.source in TEXT_DOCUMENT_SOURCES:
+            raise OctopError(
+                ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+                "document has no source file; index its text instead",
+            )
+        if document.file_ref_id is None:  # the source shape constraint forbids this
+            raise OctopError(ErrorCode.NOT_FOUND, "file reference not found")
         ref = repo.get_file_ref(ctx, kb_id, document.file_ref_id)
         if ref is None:
             raise OctopError(ErrorCode.NOT_FOUND, "file reference not found")
@@ -1111,7 +1155,6 @@ class WorkBuddyKnowledgeService:
         try:
             store = require_object_store(self._hooks.object_store)
             parser = require_parser(self._hooks.parser)
-            embedder = require_embedder(self._hooks.embedder)
             repo.set_document_status(ctx, kb_id, document_id, status="parsing")
             data = store.read(ref.object_key, limit=min(ref.size_bytes, MAX_UPLOAD_BYTES) + 1)
             if sha256_hex(data) != ref.checksum_sha256:
@@ -1120,36 +1163,14 @@ class WorkBuddyKnowledgeService:
                 )
             parsed = parser.parse(data, filename=ref.filename, mime_type=ref.mime_type)
             validate_archive_manifest(parsed.archive_entries)
-            chunks = chunk_parsed_text(parsed)
-            if not chunks:
-                raise HookRejection("NO_TEXT", "document contains no extractable text")
-            descriptor = self._require_descriptor(ctx, base, embedder)
-            vectors = embedder.embed([chunk for chunk, _ in chunks])
-            if not isinstance(vectors, list) or len(vectors) != len(chunks):
-                raise OctopError(
-                    ErrorCode.MODEL_NOT_CONFIGURED,
-                    "embedder returned a different number of vectors than chunks",
-                )
-            prepared: list[tuple[int, str, int, dict[str, Any], list[float]]] = []
-            for ordinal, ((text, tokens), raw_vector) in enumerate(
-                zip(chunks, vectors, strict=True)
-            ):
-                prepared.append(
-                    (
-                        ordinal,
-                        text,
-                        tokens,
-                        {"source": ref.filename, "model": descriptor.model_key},
-                        validate_embedding_vector(raw_vector, dimensions=base.embedding_dimensions),
-                    )
-                )
-            repo.set_document_status(ctx, kb_id, document_id, status="indexing")
-            generation = repo.publish_generation(
-                ctx,
+            generation = self._publish_parsed(
+                ctx=ctx,
+                repo=repo,
                 base=base,
-                document_id=document_id,
-                created_by_user_id=actor_user_id,
-                chunks=prepared,
+                document=document,
+                actor_user_id=actor_user_id,
+                parsed=parsed,
+                source_label=ref.filename,
             )
         except Exception as exc:
             code = (
@@ -1169,6 +1190,115 @@ class WorkBuddyKnowledgeService:
                 "generation_id": generation.generation_id,
                 "chunk_count": generation.chunk_count,
             },
+        )
+
+    def index_text_document(
+        self,
+        *,
+        tenant_id: str,
+        actor_user_id: int,
+        kb_id: str,
+        document_id: str,
+        text: str,
+        department_id: str | None = None,
+    ) -> None:
+        """Chunk, embed and atomically publish a text-only document's generation.
+
+        The content is supplied by the caller — a migration import or a caller
+        that pasted text — because there is no source file to read back.  It is
+        never stored as a blob: only the chunks and their vectors are persisted,
+        which is exactly what the personal edition kept.
+        """
+        actor = WorkBuddyKnowledgeActor(
+            user_id=actor_user_id, tenant_id=tenant_id, department_id=department_id
+        )
+        ctx = self.context(actor)
+        repo = self._repository()
+        base = repo.get_base(ctx, kb_id, include_archived=False)
+        document = repo.get_document(ctx, kb_id, document_id)
+        if base is None or document is None or document.deleted_at is not None:
+            raise OctopError(ErrorCode.NOT_FOUND, "document not found")
+        if document.source not in TEXT_DOCUMENT_SOURCES:
+            raise OctopError(
+                ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+                "document has a source file; index it from storage",
+            )
+        jobs = self._jobs(actor)
+        jobs.begin(document.job_id)
+        try:
+            content = validate_document_text(text)
+            repo.set_document_status(ctx, kb_id, document_id, status="parsing")
+            parsed = ParsedDocument(text_blocks=(TextBlock(text=content),))
+            generation = self._publish_parsed(
+                ctx=ctx,
+                repo=repo,
+                base=base,
+                document=document,
+                actor_user_id=actor_user_id,
+                parsed=parsed,
+                source_label=document.title,
+            )
+        except Exception as exc:
+            code = (
+                exc.code.value
+                if isinstance(exc, OctopError)
+                else str(getattr(exc, "code", "INDEX_FAILED"))
+            )
+            repo.set_document_status(ctx, kb_id, document_id, status="failed", error_code=code)
+            jobs.finish(document.job_id, status="failed", error_code=code, error_message=str(exc))
+            raise
+        jobs.finish(
+            document.job_id,
+            status="succeeded",
+            result={
+                "document_id": document_id,
+                "kb_id": kb_id,
+                "generation_id": generation.generation_id,
+                "chunk_count": generation.chunk_count,
+            },
+        )
+
+    def _publish_parsed(
+        self,
+        *,
+        ctx: WorkBuddyDbContext,
+        repo: Any,
+        base: Any,
+        document: WorkBuddyKnowledgeDocumentRow,
+        actor_user_id: int,
+        parsed: ParsedDocument,
+        source_label: str,
+    ) -> Any:
+        """Chunk, embed and publish one document's ready generation (shared tail)."""
+        chunks = chunk_parsed_text(parsed)
+        if not chunks:
+            raise HookRejection("NO_TEXT", "document contains no extractable text")
+        embedder = require_embedder(self._hooks.embedder)
+        descriptor = self._require_descriptor(ctx, base, embedder)
+        vectors = embedder.embed([chunk for chunk, _ in chunks])
+        if not isinstance(vectors, list) or len(vectors) != len(chunks):
+            raise OctopError(
+                ErrorCode.MODEL_NOT_CONFIGURED,
+                "embedder returned a different number of vectors than chunks",
+            )
+        prepared: list[tuple[int, str, int, dict[str, Any], list[float]]] = []
+        for ordinal, ((text, tokens), raw_vector) in enumerate(zip(chunks, vectors, strict=True)):
+            prepared.append(
+                (
+                    ordinal,
+                    text,
+                    tokens,
+                    {"source": source_label, "model": descriptor.model_key},
+                    validate_embedding_vector(raw_vector, dimensions=base.embedding_dimensions),
+                )
+            )
+        repo.set_document_status(ctx, base.kb_id, document.document_id, status="indexing")
+        return repo.publish_generation(
+            ctx,
+            base=base,
+            document_id=document.document_id,
+            created_by_user_id=actor_user_id,
+            chunks=prepared,
         )
 
     # -- search ------------------------------------------------------------
@@ -1343,6 +1473,8 @@ class WorkBuddyKnowledgeService:
         return {
             "document_id": row.document_id,
             "kb_id": row.kb_id,
+            "file_ref_id": row.file_ref_id,
+            "source": row.source,
             "title": row.title,
             "status": row.status,
             "error_code": row.error_code,
@@ -1361,6 +1493,32 @@ def _rejection_code(exc: BaseException, default: str) -> str:
     if isinstance(code, str) and code:
         return code
     return default
+
+
+def validate_document_source(source: Any) -> bool:
+    """Return True for a text-only source, False for an uploaded one."""
+    value = str(source or "").strip().lower()
+    if value not in DOCUMENT_SOURCES:
+        raise OctopError(
+            ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+            "source must be one of: " + ", ".join(DOCUMENT_SOURCES),
+        )
+    return value in TEXT_DOCUMENT_SOURCES
+
+
+def validate_document_text(text: Any) -> str:
+    """Return the content of a text-only document, or refuse an unusable one."""
+    value = str(text or "")
+    if not value.strip():
+        raise OctopError(
+            ErrorCode.WORKBUDDY_INVALID_ARGUMENT, "the document text must not be empty"
+        )
+    if len(value) > MAX_UPLOAD_BYTES:
+        raise OctopError(
+            ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+            f"the document text must be at most {MAX_UPLOAD_BYTES} characters",
+        )
+    return value
 
 
 def chunk_parsed_text(
