@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-19T23:53:35Z",
+  "updated": "2026-09-20T00:12:06Z",
   "batches": {
     "1": {
       "state": "done",
@@ -20,17 +20,22 @@
       "notes": "A-20 占用迁移号 031（A 线段），后续 A 线从 032 起；/auth/reauthenticate 落在 workbuddy_identity.py，属按路由的例外（已写入计划契约 5）。未包含项：个人版知识库入口保留到 B-10/B-14；治理组不做客户端角色隐藏；A-19 名册前端暂不渲染；收件箱提问/审核属批次 4；逐节点排障属 A-02。"
     },
     "2": {
-      "state": "in_progress",
+      "state": "done",
       "tasks": [
         "A-04",
         "A-05",
         "A-02",
         "A-03"
       ],
-      "pr": null,
-      "commits": [],
-      "evidence": "静态门禁全绿（ruff check / format / mypy 539 文件）；前端 lint 0 error + build 通过 + vitest 934 通过（1 条为并发超时伪影，单独重跑 4 passed，并已给该交互测试加显式 20s 预算）",
-      "notes": "五个切片已全部实现：A-05 编译器诊断聚合（46 个 raise 点改收集器；诊断稳定穿过 HTTP；24 个错误码的中英修复提示）、A-04 节点元数据契约（GET /workflow-definitions/metadata，从 JSON Schema 同源导出）、A-02 逐节点排障（迁移 032：复用 018 早已声明的 step_input payload 类型与 input_sha256）+ 重新运行、A-03 版本比较（semantic_diff 抽为唯一实现）。并行切片另发现并修复两个真实缺陷：对账对话框必 422、步骤/对账状态词表前后端不一致。集成收口已完成：本地化 211 键中英一致、CHANGELOG、契约 counts 110 自检。待完成：后端整套 -m \"not live\" 与 PG/redis 套件在本机跑完、迁移 032 三态、批次 1 合并后 rebase 到 main、提 PR。"
+      "pr": 31,
+      "commits": [
+        "aea5d9c1",
+        "5fbb4a12",
+        "115bb970",
+        "2139a77d"
+      ],
+      "evidence": "静态门禁全绿（ruff check / format 1092 文件 / mypy 539 文件）；后端 -m \"not live\" 3577 passed（3 条失败经逐条定性为并行与负载伪影：单独重跑 4 passed 与 34 passed，批次 1 等价树同样通过）；PG+redis 专用库套件 82 passed / 1 skipped / 0 failed；前端 lint 0 error + tsc -b + build 通过 + vitest 935 passed；迁移 032 三态全通过（全新 PG v32 含新列 / 既有库 v31→v32 计数与列集合不变 / 全新 SQLite v32 未长出 PG 列）；211 个引用键中英齐备（含 24 个诊断修复提示）；契约 counts 62+48=110=routes 自检通过",
+      "notes": "已 rebase 到批次 1 合并后的 main（force-with-lease 强推自己的功能分支）。未包含项：「重跑到此」（与批次 4 的 waiting_input/resume 一起设计）、定义编辑器动态表单（属 A-06）、非 LLM 节点 per-node token 记 null、版本比较不做语义影响面分析（属 A-13/A-14）。并行切片另修两个真实缺陷：对账对话框必 422、步骤/对账状态词表前后端不一致。"
     },
     "3": {
       "state": "pending",
