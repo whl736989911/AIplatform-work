@@ -17,6 +17,7 @@ import {
   workbuddyRuntimeApi,
   type ApprovalRequest,
   type Execution,
+  type ExecutionMetrics,
 } from "../../../api/modules/workbuddyRuntime";
 import {
   workbuddyWorkflowsApi,
@@ -26,6 +27,7 @@ import { useWorkBuddyResource } from "../Workflows/consoleState";
 import PendingApprovalsBlock from "./PendingApprovalsBlock";
 import MyWorkflowsBlock from "./MyWorkflowsBlock";
 import RecentRunsBlock from "./RecentRunsBlock";
+import MetricsBlock from "./MetricsBlock";
 import styles from "./index.module.less";
 
 export default function WorkBuddyHomePage() {
@@ -52,6 +54,12 @@ export default function WorkBuddyHomePage() {
   const executions = useWorkBuddyResource<Execution[]>(
     [],
     () => workbuddyRuntimeApi.listExecutions({ scope: "self", limit: 5 }),
+    [],
+  );
+
+  const metrics = useWorkBuddyResource<ExecutionMetrics | null>(
+    null,
+    () => workbuddyRuntimeApi.getExecutionMetrics({ limit: 20000 }),
     [],
   );
 
@@ -94,6 +102,7 @@ export default function WorkBuddyHomePage() {
         <PendingApprovalsBlock resource={approvals} />
         <MyWorkflowsBlock resource={workflows} />
         <RecentRunsBlock resource={executions} workflowNames={workflowNames} />
+        <MetricsBlock resource={metrics} workflowNames={workflowNames} />
       </div>
     </PageShell>
   );

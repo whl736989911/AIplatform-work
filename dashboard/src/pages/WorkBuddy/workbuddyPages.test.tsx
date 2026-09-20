@@ -99,10 +99,14 @@ describe("WorkBuddy console pages", () => {
       </MemoryRouter>,
     );
 
+    // One unavailable state per block, so a block that failed cannot look like
+    // part of one that loaded. The count is the workbench's block list: pending
+    // approvals, my workflows, recent runs, run metrics — adding a block means
+    // updating this number on purpose.
     await waitFor(() =>
       expect(
         screen.getAllByText(/workbuddy\.shared\.notMergedTitle/).length,
-      ).toBe(3),
+      ).toBe(4),
     );
   });
 

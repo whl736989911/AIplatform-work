@@ -7610,6 +7610,24 @@
       "reviewRequestFailed": "Failed to request the review",
       "reviewOpen": "Open the review",
       "reviewOverview": "Review status"
+    },
+    "metrics": {
+      "title": "Run metrics",
+      "scope": {
+        "member": "Runs you started",
+        "tenant": "Whole tenant"
+      },
+      "settled": "Settled runs",
+      "successRate": "Success rate",
+      "p95": "P95 active time",
+      "avgTokens": "Avg tokens",
+      "wait": "Avg wait",
+      "columnWorkflow": "Workflow",
+      "columnSettled": "Settled",
+      "columnSuccess": "Success",
+      "columnP95": "P95 active",
+      "empty": "No settled runs yet",
+      "emptyHint": "Metrics count settled runs only — a queued or parked run has no outcome yet, and counting it would only flatter the numbers."
     }
   },
   "workflowDiagnostics": {

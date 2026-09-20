@@ -183,8 +183,7 @@ export const RECONCILIATION_DECISIONS = [
   "confirmed_success",
   "confirmed_failed",
 ] as const;
-export type ReconciliationDecision =
-  (typeof RECONCILIATION_DECISIONS)[number];
+export type ReconciliationDecision = (typeof RECONCILIATION_DECISIONS)[number];
 
 /** Row visibility filter shared by the execution and approval list routes. */
 export const WORKBUDDY_SCOPES = ["self", "tenant"] as const;
@@ -200,6 +199,36 @@ export type WorkBuddyScope = (typeof WORKBUDDY_SCOPES)[number];
  * reported nothing sends ``null`` here instead of a zero-filled mapping.
  */
 export type TokenUsage = Record<string, unknown>;
+
+/** One scope's numbers, exactly as the promotion gates compute them (A-24). */
+export interface PhaseMetricsPayload {
+  settled_runs: number;
+  success_rate: number;
+  p95_latency_ms: number;
+  avg_tokens: number;
+  safety_violations: number;
+  wait_ms: number;
+}
+
+/** The same six numbers, broken down by the workflow they came from. */
+export interface WorkflowMetricsPayload extends PhaseMetricsPayload {
+  workflow_id: string;
+}
+
+/** Settled-run metrics for the caller's scope: a member's own, or a tenant's. */
+export interface ExecutionMetrics {
+  scope: "member" | "tenant";
+  window: { since: number | null; until: number | null };
+  settled: PhaseMetricsPayload;
+  workflows: WorkflowMetricsPayload[];
+}
+
+export interface ExecutionMetricsQuery {
+  since?: number;
+  until?: number;
+  workflow_id?: string;
+  limit?: number;
+}
 
 export interface Execution {
   id: string;
@@ -591,6 +620,20 @@ export const workbuddyRuntimeApi = {
       `${BASE}/workflows/${encodeURIComponent(workflowId)}/execute`,
       jsonInit("POST", body),
     ),
+  /**
+   * Settled-run metrics for whatever scope the caller has: a member's own runs,
+   * an admin's whole tenant. The scope is the server's decision, so the block
+   * never has to guess which set of numbers it is showing.
+   */
+  getExecutionMetrics: (query: ExecutionMetricsQuery = {}) =>
+    unwrap<ExecutionMetrics>(
+      withQuery(`${BASE}/execution-metrics`, {
+        since: query.since,
+        until: query.until,
+        workflow_id: query.workflow_id,
+        limit: query.limit,
+      }),
+    ),
   listExecutions: (query: ExecutionListQuery = {}) =>
     unwrapItems<Execution>(
       withQuery(`${BASE}/executions`, {
@@ -676,7 +719,9 @@ export const workbuddyRuntimeApi = {
     body: InputAnswerRequest,
   ) =>
     unwrap<Execution>(
-      `${BASE}/executions/${encodeURIComponent(executionId)}/input-requests/${encodeURIComponent(inputRequestId)}/answer`,
+      `${BASE}/executions/${encodeURIComponent(
+        executionId,
+      )}/input-requests/${encodeURIComponent(inputRequestId)}/answer`,
       jsonInit("POST", body),
     ),
 

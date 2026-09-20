@@ -7749,6 +7749,24 @@
       "reviewRequestFailed": "请求审核失败",
       "reviewOpen": "打开审核",
       "reviewOverview": "审核状态"
+    },
+    "metrics": {
+      "title": "运行指标",
+      "scope": {
+        "member": "仅你自己发起的运行",
+        "tenant": "全租户"
+      },
+      "settled": "已结算运行",
+      "successRate": "成功率",
+      "p95": "P95 活跃时长",
+      "avgTokens": "平均 token",
+      "wait": "平均等待",
+      "columnWorkflow": "工作流",
+      "columnSettled": "已结算",
+      "columnSuccess": "成功率",
+      "columnP95": "P95 活跃时长",
+      "empty": "还没有已结算的运行",
+      "emptyHint": "指标只统计已结算的运行——排队中或等人回答的运行没有结果，计进去只会让数字好看。"
     }
   },
   "workflowDiagnostics": {
