@@ -441,6 +441,80 @@ class InputAssigneeRow:
 
 
 @dataclass(frozen=True, slots=True)
+class OutputReviewRow:
+    id: str
+    tenant_id: str
+    execution_id: str
+    status: str
+    produced: Any
+    produced_sha256: str
+    corrected: Any
+    corrected_sha256: str | None
+    requested_by_user_id: int | None
+    decided_by_user_id: int | None
+    decided_at: Any
+    rerun_execution_id: str | None
+    locked_workflow_version_id: str
+    locked_workflow_version_hash: str
+    created_at: Any
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> OutputReviewRow:
+        return cls(
+            id=str(row["id"]),
+            tenant_id=str(row["tenant_id"]),
+            execution_id=str(row["execution_id"]),
+            status=str(row["status"]),
+            produced=row["produced"],
+            produced_sha256=str(row["produced_sha256"]),
+            corrected=row["corrected"],
+            corrected_sha256=(
+                str(row["corrected_sha256"]) if row["corrected_sha256"] is not None else None
+            ),
+            requested_by_user_id=(
+                int(row["requested_by_user_id"])
+                if row["requested_by_user_id"] is not None
+                else None
+            ),
+            decided_by_user_id=(
+                int(row["decided_by_user_id"]) if row["decided_by_user_id"] is not None else None
+            ),
+            decided_at=row["decided_at"],
+            rerun_execution_id=(
+                str(row["rerun_execution_id"]) if row["rerun_execution_id"] is not None else None
+            ),
+            locked_workflow_version_id=str(row["locked_workflow_version_id"]),
+            locked_workflow_version_hash=str(row["locked_workflow_version_hash"]),
+            created_at=row["created_at"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OutputReviewReviewerRow:
+    id: str
+    tenant_id: str
+    review_id: str
+    user_id: int
+    department_id: str | None
+    status: str
+    decided_at: Any
+    created_at: Any
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> OutputReviewReviewerRow:
+        return cls(
+            id=str(row["id"]),
+            tenant_id=str(row["tenant_id"]),
+            review_id=str(row["review_id"]),
+            user_id=int(row["user_id"]),
+            department_id=str(row["department_id"]) if row["department_id"] else None,
+            status=str(row["status"]),
+            decided_at=row["decided_at"],
+            created_at=row["created_at"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ReconciliationRow:
     id: str
     execution_id: str
@@ -1899,6 +1973,227 @@ class WorkBuddyRuntimeRepo:
             ).fetchall()
         return [InputRequestRow.from_row(row) for row in rows]
 
+    # -- output reviews -----------------------------------------------------
+
+    def insert_output_review(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        produced: Any,
+        produced_sha256: str,
+        requested_by_user_id: int | None,
+        locked_workflow_version_id: str,
+        locked_workflow_version_hash: str,
+        review_id: str | None = None,
+        conn: Any | None = None,
+    ) -> str:
+        """Open the review of a settled run; the row starts ``open``.
+
+        ``corrected`` and its digest are left NULL on purpose: the decision is
+        the only thing that fills them, so an open review can never be read as
+        one whose output was already replaced.
+        """
+        rid = review_id or new_runtime_id()
+        with runtime_transaction(self._db, ctx, conn) as c:
+            c.execute(
+                """
+                INSERT INTO workbuddy_output_reviews(
+                    id, tenant_id, execution_id, status, produced, produced_sha256,
+                    requested_by_user_id, locked_workflow_version_id,
+                    locked_workflow_version_hash
+                ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?)
+                """,
+                (
+                    rid,
+                    tenant_id,
+                    execution_id,
+                    _jsonb(produced),
+                    produced_sha256,
+                    requested_by_user_id,
+                    locked_workflow_version_id,
+                    locked_workflow_version_hash,
+                ),
+            )
+        return rid
+
+    def insert_output_review_reviewers(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        tenant_id: str,
+        review_id: str,
+        reviewers: Sequence[tuple[int, str | None]],
+        conn: Any | None = None,
+    ) -> int:
+        inserted = 0
+        with runtime_transaction(self._db, ctx, conn) as c:
+            for user_id, department_id in reviewers:
+                c.execute(
+                    """
+                    INSERT INTO workbuddy_output_review_reviewers(
+                        id, tenant_id, review_id, user_id, department_id
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_runtime_id(),
+                        tenant_id,
+                        review_id,
+                        int(user_id),
+                        department_id,
+                    ),
+                )
+                inserted += 1
+        return inserted
+
+    def get_output_review(
+        self, ctx: WorkBuddyDbContext, review_id: str, *, conn: Any | None = None
+    ) -> OutputReviewRow | None:
+        with runtime_transaction(self._db, ctx, conn) as c:
+            row = c.execute(
+                "SELECT * FROM workbuddy_output_reviews WHERE id = ?", (review_id,)
+            ).fetchone()
+        return OutputReviewRow.from_row(row) if row is not None else None
+
+    def get_output_review_for_execution(
+        self, ctx: WorkBuddyDbContext, execution_id: str, *, conn: Any | None = None
+    ) -> OutputReviewRow | None:
+        with runtime_transaction(self._db, ctx, conn) as c:
+            row = c.execute(
+                "SELECT * FROM workbuddy_output_reviews WHERE execution_id = ?", (execution_id,)
+            ).fetchone()
+        return OutputReviewRow.from_row(row) if row is not None else None
+
+    def list_output_reviews(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        execution_id: str | None = None,
+        reviewer_user_id: int | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        conn: Any | None = None,
+    ) -> list[OutputReviewRow]:
+        clauses = ["r.tenant_id = ?"]
+        params: list[Any] = [ctx.tenant_id]
+        if execution_id is not None:
+            clauses.append("r.execution_id = ?")
+            params.append(execution_id)
+        if status is not None:
+            clauses.append("r.status = ?")
+            params.append(status)
+        if reviewer_user_id is not None:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM workbuddy_output_review_reviewers rv "
+                "WHERE rv.review_id = r.id AND rv.user_id = ?)"
+            )
+            params.append(int(reviewer_user_id))
+        params.append(max(1, min(int(limit), 200)))
+        with runtime_transaction(self._db, ctx, conn) as c:
+            rows = c.execute(
+                "SELECT r.* FROM workbuddy_output_reviews r "
+                f"WHERE {' AND '.join(clauses)} ORDER BY r.created_at DESC, r.id DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        return [OutputReviewRow.from_row(r) for r in rows]
+
+    def list_output_review_reviewers(
+        self, ctx: WorkBuddyDbContext, review_id: str, *, conn: Any | None = None
+    ) -> list[OutputReviewReviewerRow]:
+        with runtime_transaction(self._db, ctx, conn) as c:
+            rows = c.execute(
+                "SELECT * FROM workbuddy_output_review_reviewers WHERE review_id = ? "
+                "ORDER BY created_at, user_id",
+                (review_id,),
+            ).fetchall()
+        return [OutputReviewReviewerRow.from_row(r) for r in rows]
+
+    def decide_output_review(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        review_id: str,
+        status: str,
+        corrected: Any = None,
+        corrected_sha256: str | None = None,
+        decided_by_user_id: int | None = None,
+        rerun_execution_id: str | None = None,
+        conn: Any | None = None,
+    ) -> bool:
+        """Decide an open review once; False means it was decided already.
+
+        ``status = 'open'`` is part of the WHERE clause, so two decisions racing
+        for the same review cannot both land: the first commits, the second
+        finds no row and is reported as a no-op instead of overwriting the
+        decision of record.
+        """
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_output_reviews
+                SET status = ?, corrected = ?, corrected_sha256 = ?,
+                    decided_by_user_id = ?, decided_at = now(), rerun_execution_id = ?
+                WHERE id = ? AND status = 'open'
+                """,
+                (
+                    status,
+                    _jsonb(corrected),
+                    corrected_sha256,
+                    decided_by_user_id,
+                    rerun_execution_id,
+                    review_id,
+                ),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def set_output_review_rerun(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        review_id: str,
+        rerun_execution_id: str,
+        conn: Any | None = None,
+    ) -> bool:
+        """Point a rerun decision at the execution it started.
+
+        The decision and the run it asks for cannot be written in one
+        transaction, because starting a run opens its own, so the decision lands
+        first and this call records the successor afterwards. The
+        ``status = 'rerun'`` guard keeps a successor from being attached to a
+        review that was accepted or corrected instead.
+        """
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_output_reviews
+                SET rerun_execution_id = ?
+                WHERE id = ? AND status = 'rerun'
+                """,
+                (rerun_execution_id, review_id),
+            )
+            return bool(getattr(cursor, "rowcount", 0))
+
+    def mark_output_review_reviewer(
+        self,
+        ctx: WorkBuddyDbContext,
+        *,
+        review_id: str,
+        user_id: int,
+        decision: str,
+        conn: Any | None = None,
+    ) -> int:
+        with runtime_transaction(self._db, ctx, conn) as c:
+            cursor = c.execute(
+                """
+                UPDATE workbuddy_output_review_reviewers
+                SET status = ?, decided_at = now()
+                WHERE review_id = ? AND user_id = ?
+                """,
+                (decision, review_id, int(user_id)),
+            )
+            return int(getattr(cursor, "rowcount", 0) or 0)
+
     # -- reconciliations ----------------------------------------------------
 
     def insert_reconciliation(
@@ -2980,6 +3275,8 @@ __all__ = [
     "LeaseRow",
     "NotificationRow",
     "OutboxRow",
+    "OutputReviewReviewerRow",
+    "OutputReviewRow",
     "PayloadRow",
     "QuotaReservationRow",
     "ReconciliationRow",

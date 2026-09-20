@@ -934,11 +934,43 @@
       "success_status": 200,
       "summary": "列出对账证据，200",
       "authorization": "发起者或受控 admin；只对该执行的对账记录"
+    },
+    {
+      "method": "POST",
+      "path": "/executions/{execution_id}/output-review",
+      "stage": "A4",
+      "success_status": 201,
+      "summary": "请求审核某次运行的产出，201",
+      "authorization": "发起者或受控 admin；仅对已结算的执行；执行已有审核则冲突（运行本身不受影响）"
+    },
+    {
+      "method": "GET",
+      "path": "/executions/{execution_id}/output-review",
+      "stage": "A4",
+      "success_status": 200,
+      "summary": "读取某次执行的产出审核，200",
+      "authorization": "受指派的审核人、请求者或受控 admin；其余 404 防存在性泄露"
+    },
+    {
+      "method": "POST",
+      "path": "/executions/{execution_id}/output-review/decisions",
+      "stage": "A4",
+      "success_status": 200,
+      "summary": "采纳 / 修正后确认 / 重跑，200",
+      "authorization": "受指派的审核人或受控 admin；修正值只能替换运行实际产出的键；CAS 一次决定；重跑要求锁定版本仍是当前版本"
+    },
+    {
+      "method": "GET",
+      "path": "/output-reviews",
+      "stage": "A4",
+      "success_status": 200,
+      "summary": "本人待审产出队列，200",
+      "authorization": "范围默认本人；admin 的 scope=tenant 须有管理目的并审计"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 54,
-    "total": 116
+    "supplemental": 58,
+    "total": 120
   }
 }

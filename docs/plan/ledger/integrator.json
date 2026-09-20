@@ -53,9 +53,10 @@
     "迁移里不得对 octop_app / workbuddy_auth 角色 GRANT：本仓库从不创建这两个角色（018/019/031/050 只 REVOKE FROM PUBLIC），GRANT 会因角色不存在而中止迁移；角色创建属部署方 D 批次。",
     "新增任何人工等待状态（如 waiting_input）时，必须同时检查三类硬编码状态清单：request_cancel 的可直接取消集、_CLAIMABLE_EXECUTIONS_SQL/claim_execution 的可领取集（**不得**加入停放态）、以及 SQL 部分索引谓词（idx_wb_executions_open 需含新停放态）。",
     "契约文档未列出的新端点登记为 route-manifest 的 supplemental，并保持 counts.source == source.original_route_count；契约扩展（如新执行状态 waiting_input）需在 machine-*.json 的 notes 里留痕。",
-    "单元测试全绿不等于功能可用：新增节点类型/状态/表，必须有一条真实 PostgreSQL 端到端用例走过它（本轮即由该用例抓到 node_type CHECK 缺陷）。"
+    "单元测试全绿不等于功能可用：新增节点类型/状态/表，必须有一条真实 PostgreSQL 端到端用例走过它（本轮即由该用例抓到 node_type CHECK 缺陷）。",
+    "审核类能力默认不阻断：新的人工环节应作为既有运行之上的只追加记录（approval 之外的审核/确认），除非用户明确要求阻断；需要重跑时启动新执行并回链，绝不改写已结算运行的产出。"
   ],
-  "updated": "2026-09-20T03:57:17Z",
+  "updated": "2026-09-20T04:12:33Z",
   "issues": [
     "B 线：test_workbuddy_rbac_postgresql.py::test_grants_are_invisible_across_tenants 的 teardown 残留角色 octop_rbac_probe（需先 REVOKE/DROP OWNED BY 再 DROP ROLE）。测试通过但清理不彻底，重复运行时同库会受影响。"
   ],
@@ -72,7 +73,9 @@
       "not_blocking": [
         "A-18 会话续期（完全独立，可立即开工）",
         "批次 4 的其余部分（A-08/A-10 已交付并验证）"
-      ]
+      ],
+      "decision": "已定（用户 2026-09-20）：「尽量避免阻断式」——采用事后只追加读法：运行照常结算，审核记录与修正值是新的只追加产物；修正只能替换运行实际产出的键；重跑启动新执行并回链，不改写既有运行。",
+      "decided_at": "2026-09-20T04:12:33Z"
     }
   ]
 }

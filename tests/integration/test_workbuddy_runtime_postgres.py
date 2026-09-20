@@ -722,6 +722,208 @@ async def test_a_run_parked_on_a_question_can_be_cancelled(
         assert fetched.json()["data"]["status"] == "canceled", fetched.text
 
 
+# --------------------------------------------------------------------------- #
+# output reviews (A-09: after the fact, never blocking)
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_output_review_accepts_a_settled_run_without_touching_it(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T36: reviewing a run is a second, append-only account of its result."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Review runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "runtime"}}
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        settled = await client.get(f"/executions/{execution_id}")
+        produced = settled.json()["data"]["outputs"]
+        assert settled.json()["data"]["status"] == "success", settled.text
+
+        requested = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert requested.status_code == 201, requested.text
+        review = requested.json()["data"]
+        # The review copies what the run produced; the run's own payloads stay the
+        # source of truth.
+        assert review["produced"] == produced, review
+        assert review["status"] == "open", review
+        assert review["corrected"] is None, review
+        assert [item["user_id"] for item in review["reviewers"]], review
+
+        inbox = await client.get("/output-reviews")
+        assert inbox.status_code == 200, inbox.text
+        assert [item["id"] for item in inbox.json()["data"]["items"]] == [review["id"]]
+
+        decided = await client.post(
+            f"/executions/{execution_id}/output-review/decisions", json={"decision": "accept"}
+        )
+        assert decided.status_code == 200, decided.text
+        assert decided.json()["data"]["status"] == "accepted", decided.text
+        assert decided.json()["data"]["decided_at"], decided.text
+
+        # A review never holds a run back: the execution is exactly what it was.
+        after = await client.get(f"/executions/{execution_id}")
+        assert after.json()["data"]["status"] == "success", after.text
+        assert after.json()["data"]["outputs"] == produced, after.text
+
+        # One review per run, and one decision per review.
+        again = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert again.status_code == 409, again.text
+        replay = await client.post(
+            f"/executions/{execution_id}/output-review/decisions", json={"decision": "accept"}
+        )
+        assert replay.status_code == 409, replay.text
+
+
+async def test_a_correction_may_only_replace_what_the_run_produced(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T37: a correction fixes values; it cannot invent a result."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Correction runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "runtime"}}
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        requested = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert requested.status_code == 201, requested.text
+        keys = sorted(requested.json()["data"]["produced"])
+        assert keys, requested.text
+
+        invented = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {**dict.fromkeys(keys, "x"), "bogus": 1}},
+        )
+        assert invented.status_code == 400, invented.text
+        assert invented.json()["error"]["code"] == ErrorCode.WORKBUDDY_VALIDATION_FAILED.value
+
+        nothing = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {}},
+        )
+        assert nothing.status_code == 400, nothing.text
+
+        fixed = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "correct", "corrected": {keys[0]: {"greeting": "hello corrected"}}},
+        )
+        assert fixed.status_code == 200, fixed.text
+        data = fixed.json()["data"]
+        assert data["status"] == "corrected", data
+        assert data["corrected"] == {keys[0]: {"greeting": "hello corrected"}}, data
+        # The correction is recorded beside the produced output, not instead of it.
+        assert data["produced"], data
+
+
+async def test_a_review_is_invisible_to_everyone_else(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T38: a member who was not asked to review learns nothing about the review."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Review visibility")
+    owner = _principal(tenant)
+    async with _client(app, owner) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        requested = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert requested.status_code == 201, requested.text
+
+    reviewer = _principal(
+        tenant,
+        role="member",
+        user_id=tenant["reviewer_user_id"],
+        member_id=tenant["reviewer_member_id"],
+    )
+    async with _client(app, reviewer) as client:
+        inbox = await client.get("/output-reviews")
+        assert inbox.status_code == 200, inbox.text
+        assert inbox.json()["data"]["items"] == [], inbox.text
+        hidden = await client.get(f"/executions/{execution_id}/output-review")
+        assert hidden.status_code == 404, hidden.text
+        refused = await client.post(
+            f"/executions/{execution_id}/output-review/decisions", json={"decision": "accept"}
+        )
+        assert refused.status_code == 404, refused.text
+
+
+async def test_an_unsettled_run_cannot_be_reviewed(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T39: a review is about a settled result, not about a run still going."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Unsettled review")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(f"/workflows/{workflow_id}/execute", json={"inputs": {}})
+        execution_id = accepted.json()["data"]["id"]
+        # No drain: the execution is still queued.
+        refused = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["error"]["code"] == ErrorCode.STATE_CONFLICT.value
+
+
+async def test_a_rerun_starts_a_linked_execution(
+    app: FastAPI, pool: Any, tenant: dict[str, Any]
+) -> None:
+    """T40: "run it again" is a fact about two runs, never a rewrite of one."""
+    workflow_id = _publish(pool, tenant, hello_definition(), "Rerun runtime")
+    principal = _principal(tenant)
+    async with _client(app, principal) as client:
+        accepted = await client.post(
+            f"/workflows/{workflow_id}/execute", json={"inputs": {"who": "first"}}
+        )
+        execution_id = accepted.json()["data"]["id"]
+        _drain(pool)
+        first = await client.get(f"/executions/{execution_id}")
+        assert first.json()["data"]["status"] == "success", first.text
+
+        requested = await client.post(
+            f"/executions/{execution_id}/output-review",
+            json={"reviewer_user_ids": [tenant["owner_member_id"]]},
+        )
+        assert requested.status_code == 201, requested.text
+
+        rerun = await client.post(
+            f"/executions/{execution_id}/output-review/decisions",
+            json={"decision": "rerun", "inputs": {"who": "second"}},
+        )
+        assert rerun.status_code == 200, rerun.text
+        data = rerun.json()["data"]
+        assert data["status"] == "rerun", data
+        new_execution_id = data["rerun_execution_id"]
+        assert new_execution_id and new_execution_id != execution_id, data
+
+        # The original run is untouched and the new one is a real execution that
+        # runs the inputs the reviewer asked for.
+        again = await client.get(f"/executions/{execution_id}")
+        assert again.json()["data"]["status"] == "success", again.text
+        fresh = await client.get(f"/executions/{new_execution_id}")
+        assert fresh.json()["data"]["status"] == "queued", fresh.text
+        assert fresh.json()["data"]["inputs"] == {"who": "second"}, fresh.text
+        _drain(pool)
+        settled = await client.get(f"/executions/{new_execution_id}")
+        assert settled.json()["data"]["status"] == "success", settled.text
+
+
 async def test_an_overdue_question_fails_the_run_and_escalates(
     app: FastAPI, pool: Any, tenant: dict[str, Any]
 ) -> None:

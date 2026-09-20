@@ -164,6 +164,20 @@ class AnswerBody(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
 
 
+class OutputReviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reviewer_user_ids: list[str] = Field(min_length=1, max_length=10)
+
+
+class OutputReviewDecisionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: str = Field(min_length=1, max_length=16)
+    corrected: dict[str, Any] | None = None
+    inputs: dict[str, Any] | None = None
+
+
 class ReconciliationBody(BaseModel):
     """One operator decision about an unknown external write."""
 
@@ -336,6 +350,80 @@ async def list_input_requests(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     items = _service(server).list_input_requests(
+        _actor(principal), scope=scope, status=status, limit=limit
+    )
+    return workbuddy_envelope(request, {"items": items})
+
+
+@router.post(
+    "/executions/{execution_id}/output-review",
+    status_code=201,
+    summary="Ask reviewers to look at what a run produced",
+)
+async def request_output_review(
+    execution_id: str,
+    body: OutputReviewBody,
+    request: Request,
+    principal: _Principal,
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Request a review of a settled run's output; the run itself is untouched."""
+    payload = _service(server).request_output_review(
+        _actor(principal),
+        _uuid(execution_id, field="execution"),
+        reviewer_membership_ids=body.reviewer_user_ids,
+    )
+    return workbuddy_envelope(request, payload)
+
+
+@router.get(
+    "/executions/{execution_id}/output-review",
+    summary="Read the review of one execution",
+)
+async def get_output_review(
+    execution_id: str,
+    request: Request,
+    principal: _Principal,
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    payload = _service(server).get_output_review(
+        _actor(principal), _uuid(execution_id, field="execution")
+    )
+    return workbuddy_envelope(request, payload)
+
+
+@router.post(
+    "/executions/{execution_id}/output-review/decisions",
+    summary="Accept, correct or re-run a reviewed output",
+)
+async def decide_output_review(
+    execution_id: str,
+    body: OutputReviewDecisionBody,
+    request: Request,
+    principal: _Principal,
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Record the review decision; a re-run starts a new execution and links it."""
+    payload = _service(server).decide_output_review(
+        _actor(principal),
+        _uuid(execution_id, field="execution"),
+        decision=body.decision,
+        corrected=body.corrected,
+        inputs=body.inputs,
+    )
+    return workbuddy_envelope(request, payload)
+
+
+@router.get("/output-reviews", summary="List output reviews assigned to the caller")
+async def list_output_reviews(
+    request: Request,
+    principal: _Principal,
+    server: Any = Depends(get_server),
+    scope: str = Query(default="self", pattern="^(self|tenant)$"),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    items = _service(server).list_output_reviews(
         _actor(principal), scope=scope, status=status, limit=limit
     )
     return workbuddy_envelope(request, {"items": items})

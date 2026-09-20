@@ -39,6 +39,8 @@ from octop.infra.db.repos.workbuddy_runtime import (
     InputRequestRow,
     JobRow,
     NotificationRow,
+    OutputReviewReviewerRow,
+    OutputReviewRow,
     ReconciliationRow,
     WorkBuddyRuntimeRepo,
     canonical_json,
@@ -1978,6 +1980,64 @@ def _latest_attempts(steps: Sequence[Any]) -> dict[str, Any]:
     return latest
 
 
+def validate_correction(
+    produced: Mapping[str, Any], corrected: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """A correction may replace the values a run produced, and nothing else.
+
+    Adding a key would let a reviewer invent a result the workflow never produced,
+    and a later consumer could not tell that value apart from real output.  Keys
+    may be left out (a correction says what to change), so the result is always a
+    subset of what the run actually produced.
+    """
+    if not isinstance(corrected, Mapping) or not corrected:
+        raise OctopError(
+            ErrorCode.WORKBUDDY_VALIDATION_FAILED,
+            "a correction needs the output values it replaces",
+        )
+    unknown = sorted(str(key) for key in corrected if str(key) not in produced)
+    if unknown:
+        listed = ", ".join(repr(key) for key in unknown)
+        raise OctopError(
+            ErrorCode.WORKBUDDY_VALIDATION_FAILED,
+            f"the run produced no output named {listed}",
+        )
+    return {str(key): value for key, value in corrected.items()}
+
+
+def output_review_payload(
+    row: OutputReviewRow, reviewers: Sequence[OutputReviewReviewerRow] = ()
+) -> dict[str, Any]:
+    """One output review as the API and the reviewing UI need it.
+
+    ``produced`` and ``corrected`` travel together on purpose: a reviewer decides
+    by comparing them, and the run's own payloads stay the source of truth for what
+    the workflow actually produced.
+    """
+    return {
+        "id": row.id,
+        "execution_id": row.execution_id,
+        "status": row.status,
+        "produced": dict(row.produced) if isinstance(row.produced, Mapping) else {},
+        "produced_sha256": row.produced_sha256,
+        "corrected": dict(row.corrected) if isinstance(row.corrected, Mapping) else None,
+        "requested_by_user_id": row.requested_by_user_id,
+        "decided_by_user_id": row.decided_by_user_id,
+        "decided_at": _iso(row.decided_at),
+        "rerun_execution_id": row.rerun_execution_id,
+        "created_at": _iso(row.created_at),
+        "reviewers": [
+            {
+                "user_id": reviewer.user_id,
+                "department_id": reviewer.department_id,
+                "status": reviewer.status,
+                "decided_at": _iso(reviewer.decided_at),
+            }
+            for reviewer in reviewers
+        ],
+    }
+
+
 def input_request_payload(
     row: InputRequestRow, assignees: Sequence[InputAssigneeRow] = ()
 ) -> dict[str, Any]:
@@ -3504,15 +3564,18 @@ class WorkBuddyRuntimeService:
         # a question about *this* run, not the template that produced it.  The
         # recorded outputs are the ones this attempt has already settled, which is
         # exactly the context the template was validated against.
-        prompt = render_template(
-            node.config.get("prompt"),
-            inputs=execution.inputs,
-            node_results=self._repo.recorded_outputs(ctx, execution.id),
-        )
+        prompt = str(
+            render_template(
+                node.config.get("prompt"),
+                inputs=execution.inputs,
+                node_results=self._repo.recorded_outputs(ctx, execution.id),
+            )
+            or ""
+        )[:1000]
         form = {
             "node_id": node_id,
             "node_name": node.name,
-            "prompt": str(prompt or "")[:1000],
+            "prompt": prompt,
             "fields": fields,
             "assignee_membership_ids": [user_id for user_id, _dept in assignees],
             "timeout_hours": timeout_hours,
@@ -3526,7 +3589,7 @@ class WorkBuddyRuntimeService:
             tenant_id=actor.tenant_id,
             execution_id=execution.id,
             node_id=node_id,
-            prompt=form["prompt"],
+            prompt=prompt,
             form=form,
             form_sha256=form_sha,
             expires_at=datetime.now(UTC) + timedelta(hours=timeout_hours),
@@ -4069,6 +4132,288 @@ class WorkBuddyRuntimeService:
             payload={"input_request_id": request.id, "execution_id": request.execution_id},
         )
         return len(recipients)
+
+    def _resolve_reviewers(
+        self, actor: RuntimeActor, membership_ids: Sequence[str]
+    ) -> list[tuple[int, str | None]]:
+        """Identity ids to the current members who may review, or a refusal."""
+        if self._member_resolver is None:
+            raise OctopError(
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
+                "reviewer resolution is not configured for this deployment",
+            )
+        resolved = {
+            int(user_id): department_id
+            for user_id, department_id in self._member_resolver(
+                actor.tenant_id, list(membership_ids)
+            )
+        }
+        return sorted(resolved.items())
+
+    def _load_output_review(
+        self, actor: RuntimeActor, execution_id: str, *, conn: Any = None
+    ) -> OutputReviewRow:
+        """One review the actor may read, or a 404.
+
+        Readable by the people asked to review it, by whoever asked for it, and by
+        admins; everyone else learns nothing about whether it exists.
+        """
+        ctx = self._ctx(actor)
+        row = self._repo.get_output_review_for_execution(ctx, execution_id, conn=conn)
+        if row is None:
+            raise _not_found()
+        if actor.is_admin or row.requested_by_user_id == actor.user_id:
+            return row
+        reviewers = self._repo.list_output_review_reviewers(ctx, row.id, conn=conn)
+        if all(reviewer.user_id != actor.user_id for reviewer in reviewers):
+            raise _not_found()
+        return row
+
+    def request_output_review(
+        self,
+        actor: RuntimeActor,
+        execution_id: str,
+        *,
+        reviewer_membership_ids: Sequence[str],
+    ) -> dict[str, Any]:
+        """Ask people to look at what a settled run produced.
+
+        The run stays exactly as it settled and its outputs are copied, not moved:
+        a review adds a second, append-only account of what a person said about the
+        result.  That is what keeps ``correct`` and ``rerun`` honest — an audit can
+        always tell the workflow's own output from a correction recorded later.
+        """
+        self._require_postgres()
+        named = [str(member_id) for member_id in reviewer_membership_ids if str(member_id)]
+        if not named:
+            raise _invalid("a review needs at least one reviewer")
+        ctx = self._ctx(actor)
+        with runtime_transaction(self._db, ctx) as conn:
+            execution = self._load_execution(actor, execution_id, conn=conn)
+            if execution.status not in TERMINAL_EXECUTION_STATUSES:
+                raise OctopError(
+                    ErrorCode.STATE_CONFLICT,
+                    "only a settled execution can be reviewed",
+                )
+            if self._repo.get_output_review_for_execution(ctx, execution.id, conn=conn) is not None:
+                raise OctopError(ErrorCode.STATE_CONFLICT, "this execution already has a review")
+            reviewers = self._resolve_reviewers(actor, named)
+            if not reviewers:
+                raise OctopError(
+                    ErrorCode.WORKBUDDY_VALIDATION_FAILED,
+                    "no named reviewer is a current member of this tenant",
+                )
+            produced = dict(execution.outputs or {})
+            produced_sha, _ = _hash_json(produced)
+            review_id = self._repo.insert_output_review(
+                ctx,
+                tenant_id=actor.tenant_id,
+                execution_id=execution.id,
+                produced=produced,
+                produced_sha256=produced_sha,
+                requested_by_user_id=actor.acting_user_id,
+                locked_workflow_version_id=execution.workflow_version_id,
+                locked_workflow_version_hash=execution.workflow_version_hash,
+                conn=conn,
+            )
+            self._repo.insert_output_review_reviewers(
+                ctx,
+                tenant_id=actor.tenant_id,
+                review_id=review_id,
+                reviewers=reviewers,
+                conn=conn,
+            )
+            for user_id, _department in reviewers:
+                self._repo.insert_notification(
+                    ctx,
+                    tenant_id=actor.tenant_id,
+                    user_id=user_id,
+                    kind="output_review.requested",
+                    title=f"Review required: {execution.workflow_id}",
+                    resource_type="output_review",
+                    resource_id=review_id,
+                    conn=conn,
+                )
+            self._repo.enqueue_outbox(
+                ctx,
+                tenant_id=actor.tenant_id,
+                topic="workbuddy.output_review.created",
+                dedupe_key=f"{review_id}:created",
+                payload={"review_id": review_id, "execution_id": execution.id},
+                conn=conn,
+            )
+            self._audit(
+                actor,
+                action="output_review.request",
+                resource_type="output_review",
+                resource_id=review_id,
+                details={"execution_id": execution.id, "reviewers": len(reviewers)},
+                conn=conn,
+            )
+            row = self._repo.get_output_review(ctx, review_id, conn=conn)
+            reviewer_rows = self._repo.list_output_review_reviewers(ctx, review_id, conn=conn)
+        if row is None:  # pragma: no cover - defensive
+            raise _not_found()
+        return output_review_payload(row, reviewer_rows)
+
+    def get_output_review(self, actor: RuntimeActor, execution_id: str) -> dict[str, Any]:
+        """The review of one execution, with its reviewers."""
+        self._require_postgres()
+        ctx = self._ctx(actor)
+        row = self._load_output_review(actor, execution_id)
+        return output_review_payload(row, self._repo.list_output_review_reviewers(ctx, row.id))
+
+    def decide_output_review(
+        self,
+        actor: RuntimeActor,
+        execution_id: str,
+        *,
+        decision: str,
+        corrected: Mapping[str, Any] | None = None,
+        inputs: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record what a reviewer decided about a run's output.
+
+        ``accept`` confirms the output as produced.  ``correct`` stores the values
+        a person fixed — only keys the run actually produced, because a correction
+        is not a place to invent results.  ``rerun`` starts a new execution and
+        links it here, so "run it again" is a fact about two runs rather than a
+        rewrite of one.
+
+        ``rerun`` refuses when the workflow has been republished since the reviewed
+        run: the correction belongs to the version that produced the output, and
+        running the current one would answer a different question.
+        """
+        self._require_postgres()
+        if decision not in {"accept", "correct", "rerun"}:
+            raise _invalid("decision must be 'accept', 'correct' or 'rerun'")
+        ctx = self._ctx(actor)
+        rerun_inputs: dict[str, Any] | None = None
+        with runtime_transaction(self._db, ctx) as conn:
+            execution = self._load_execution(actor, execution_id, conn=conn)
+            review = self._load_output_review(actor, execution_id, conn=conn)
+            if review.status != "open":
+                raise OctopError(ErrorCode.STATE_CONFLICT, "this review has already been decided")
+            if decision == "rerun":
+                active = self._versions.load_active(ctx, execution.workflow_id)
+                if active.version_id != review.locked_workflow_version_id:
+                    raise OctopError(
+                        ErrorCode.STATE_CONFLICT,
+                        "the workflow was republished since this run; re-run it explicitly",
+                    )
+                rerun_inputs = dict(inputs) if inputs is not None else dict(execution.inputs or {})
+            if decision == "correct":
+                values = validate_correction(review.produced, corrected)
+                values_sha, _ = _hash_json(values)
+                settled_status: str = "corrected"
+            else:
+                values, values_sha = None, None
+                settled_status = "accepted" if decision == "accept" else "rerun"
+            if not self._repo.decide_output_review(
+                ctx,
+                review_id=review.id,
+                status=settled_status,
+                corrected=values,
+                corrected_sha256=values_sha,
+                decided_by_user_id=actor.acting_user_id,
+                conn=conn,
+            ):
+                raise OctopError(ErrorCode.STATE_CONFLICT, "this review has already been decided")
+            self._repo.mark_output_review_reviewer(
+                ctx,
+                review_id=review.id,
+                user_id=actor.acting_user_id,
+                decision=settled_status,
+                conn=conn,
+            )
+            if review.requested_by_user_id is not None:
+                self._repo.insert_notification(
+                    ctx,
+                    tenant_id=actor.tenant_id,
+                    user_id=review.requested_by_user_id,
+                    kind="output_review.decided",
+                    title=f"Review {settled_status}: {execution.workflow_id}",
+                    resource_type="output_review",
+                    resource_id=review.id,
+                    conn=conn,
+                )
+            self._repo.enqueue_outbox(
+                ctx,
+                tenant_id=actor.tenant_id,
+                topic="workbuddy.output_review.decided",
+                dedupe_key=f"{review.id}:decided",
+                payload={
+                    "review_id": review.id,
+                    "execution_id": execution.id,
+                    "status": settled_status,
+                },
+                conn=conn,
+            )
+            self._audit(
+                actor,
+                action="output_review.decide",
+                resource_type="output_review",
+                resource_id=review.id,
+                details={
+                    "execution_id": execution.id,
+                    "status": settled_status,
+                    "corrected_keys": sorted(values) if values else [],
+                },
+                conn=conn,
+            )
+        if decision == "rerun":
+            # The new run is its own execution: starting it outside the decision's
+            # transaction keeps one failed start from rolling the review back, and
+            # the link below is what makes the pair auditable.
+            view = self.start_execution(
+                actor,
+                workflow_id=execution.workflow_id,
+                inputs=rerun_inputs,
+                trigger_type="api",
+                subject=f"user:{actor.user_id}" if actor.user_id else None,
+            )
+            self._repo.set_output_review_rerun(ctx, review_id=review.id, rerun_execution_id=view.id)
+        row = self._repo.get_output_review(ctx, review.id)
+        if row is None:  # pragma: no cover - defensive
+            raise _not_found()
+        return output_review_payload(row, self._repo.list_output_review_reviewers(ctx, row.id))
+
+    def list_output_reviews(
+        self,
+        actor: RuntimeActor,
+        *,
+        scope: str = "self",
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """The reviews the caller may read, newest first.
+
+        ``scope="self"`` is the reviewing queue: only what this member was asked to
+        review.  ``scope="tenant"`` is the operator view, needs an admin, and is
+        audited.
+        """
+        self._require_postgres()
+        if scope not in {"self", "tenant"}:
+            raise _invalid("scope must be 'self' or 'tenant'")
+        tenant_scope = scope == "tenant"
+        if tenant_scope and not actor.is_admin:
+            raise OctopError(ErrorCode.FORBIDDEN, "tenant scope requires tenant admin")
+        ctx = self._ctx(actor)
+        rows = self._repo.list_output_reviews(
+            ctx,
+            reviewer_user_id=None if tenant_scope else actor.user_id,
+            status=status,
+            limit=limit,
+        )
+        if tenant_scope:
+            self._audit(
+                actor,
+                action="output_review.list_tenant",
+                resource_type="output_review",
+                resource_id=None,
+                details={"count": len(rows)},
+            )
+        return [output_review_payload(row) for row in rows]
 
     def _recorded_expired(self, ctx: WorkBuddyDbContext, execution: ExecutionRow) -> frozenset[str]:
         """Nodes of this execution whose question passed its deadline unanswered.
