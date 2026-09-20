@@ -1038,11 +1038,35 @@
       "success_status": 200,
       "summary": "该会话触发过的投递（消息触发的运行归属，含拒绝原因），200",
       "authorization": "租户内登录成员；按投递事件键前缀（chat:<会话>:<消息>）检索"
+    },
+    {
+      "method": "GET",
+      "path": "/duties",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "列出本租户岗位授权（作者/发布者/审批人/库管理员/运维）与岗位词表",
+      "authorization": "租户 admin"
+    },
+    {
+      "method": "POST",
+      "path": "/duties/{duty}/grants",
+      "stage": "A2",
+      "success_status": 201,
+      "summary": "把某一岗位授予部门或成员；租户级为全员持有",
+      "authorization": "租户 admin"
+    },
+    {
+      "method": "DELETE",
+      "path": "/duties/{duty}/grants",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "撤销某一主体的岗位授权",
+      "authorization": "租户 admin"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 67,
-    "total": 129
+    "supplemental": 70,
+    "total": 132
   }
 }

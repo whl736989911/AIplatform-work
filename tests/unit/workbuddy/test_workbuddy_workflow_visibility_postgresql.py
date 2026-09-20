@@ -34,7 +34,10 @@ from tests.support.postgresql import requires_postgresql
 from octop.api.deps import get_server
 from octop.api.routers import workbuddy_workflows
 from octop.api.routers.workbuddy_identity import WorkBuddyPrincipal, workbuddy_principal
-from octop.infra.db.migrate import run_migrations
+from octop.infra.db.migrate import (
+    _ensure_workbuddy_visibility_backfill,
+    run_migrations,
+)
 from octop.infra.db.pool import PostgresPool
 from octop.infra.db.repos._base import now_ts
 from octop.infra.db.repos.workbuddy_identity import WorkBuddyIdentityRepo
@@ -416,6 +419,36 @@ async def test_a_workflow_without_a_permission_row_stays_company_visible(
     async with client_for(app, member) as client:
         refused = await client.get(f"/workflows/{created['id']}/versions")
     assert refused.status_code == 404, refused.text
+
+
+async def test_the_backfill_writes_the_implicit_row_and_stays_idempotent(
+    app: FastAPI, pool: PostgresPool, world: dict[str, Any]
+) -> None:
+    """B-06: going live must not make pre-existing work disappear.
+
+    The permission row is what the model reads; until the backfill writes it the
+    object is only readable through the legacy fallback. Re-running the repair
+    must neither duplicate the row nor move an existing one.
+    """
+    owner = principal_for(world, world["owner_user_id"], role="owner")
+    created = await create_workflow(app, owner)
+    await publish(app, owner, created)
+    with pool.connect() as conn, conn.transaction():
+        conn.execute(
+            "DELETE FROM workbuddy_object_scopes "
+            "WHERE tenant_id = ? AND object_kind = ? AND object_id = ?",
+            (world["tenant_id"], RBAC_OBJECT_KIND, created["id"]),
+        )
+
+    _ensure_workbuddy_visibility_backfill(pool)
+    assert scope_rows(pool, world)[created["id"]] == "enterprise"
+
+    before = scope_rows(pool, world)
+    _ensure_workbuddy_visibility_backfill(pool)
+    assert scope_rows(pool, world) == before
+
+    member = principal_for(world, world["detached_user_id"])
+    assert created["id"] in await listed_ids(app, member)
 
 
 def test_the_resolver_and_the_list_agree_for_every_actor(

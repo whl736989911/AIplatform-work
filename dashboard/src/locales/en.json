@@ -7736,5 +7736,80 @@
     "WORKFLOW_OUTPUT_DUPLICATE": {
       "hint": "A workflow declares at most one output node: remove the extra one or merge them into a single result."
     }
+  },
+  "access": {
+    "title": "Access policy",
+    "subtitle": "Duty grants: let a member take on a job without promoting them to admin.",
+    "add": "New grant",
+    "policy": {
+      "title": "A duty adds a path, never takes one away",
+      "additive": "Granting or revoking here only adds or removes one path; no existing permission changes.",
+      "adminImplicit": "A tenant admin already holds every duty and needs no grant.",
+      "departmentChain": "A duty granted to a department also covers all of its sub-departments.",
+      "tenantWide": "A tenant-wide grant gives the duty to every member of the tenant.",
+      "adminOnly": "Reading and changing these grants is limited to tenant admins."
+    },
+    "vocabulary": {
+      "title": "Duty vocabulary"
+    },
+    "duty": {
+      "author": {
+        "label": "Author",
+        "description": "Creates and edits workflows and knowledge content"
+      },
+      "publisher": {
+        "label": "Publisher",
+        "description": "Publishes workflow versions to the tenant"
+      },
+      "approver": {
+        "label": "Approver",
+        "description": "Decides the requests waiting on approval nodes"
+      },
+      "kb_admin": {
+        "label": "Knowledge admin",
+        "description": "Manages knowledge bases, documents, and their grants"
+      },
+      "ops": {
+        "label": "Operations",
+        "description": "Reads runs and handles their failures"
+      }
+    },
+    "grantCount": "{{count}} granted",
+    "column": {
+      "duty": "Duty",
+      "subject": "Subject",
+      "grantedAt": "Granted"
+    },
+    "subject": {
+      "tenant": "Everyone",
+      "department": "Department",
+      "member": "Member"
+    },
+    "emptyTitle": "No duty grants yet",
+    "emptyHint": "Only tenant admins hold every duty implicitly; each grant you make to a department or a member is listed here.",
+    "loadFailed": "Could not load the duty grants",
+    "loadFailedHint": "The server did not say why the call failed.",
+    "grantSuccess": "Duty granted",
+    "grantFailed": "Could not grant the duty",
+    "revoke": "Revoke",
+    "revokeConfirm": "Revoke this subject's duty?",
+    "revokeConfirmOk": "Revoke",
+    "revokeSuccess": "Duty grant revoked",
+    "revokeFailed": "Could not revoke the duty",
+    "form": {
+      "addTitle": "New duty grant",
+      "duty": "Duty",
+      "dutyPlaceholder": "Choose a duty",
+      "dutyRequired": "Choose a duty",
+      "subjectKind": "Subject",
+      "subject": "Subject",
+      "subjectPlaceholder": "Choose a subject",
+      "subjectEmpty": "No members available",
+      "subjectRequired": "Choose the subject",
+      "departmentHint": "A department grant also covers its sub-departments.",
+      "memberHint": "A member grant applies to that member only.",
+      "tenantHint": "A tenant-wide grant gives this duty to every member.",
+      "submit": "Grant"
+    }
   }
 }

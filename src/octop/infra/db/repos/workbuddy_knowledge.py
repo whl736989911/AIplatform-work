@@ -26,13 +26,13 @@ from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, now_ts
-from octop.infra.db.repos.workbuddy_catalog import (
-    SUBJECT_DEPARTMENT_CHAIN,
-    grant_subject_reach,
-)
 from octop.infra.db.workbuddy_context import (
     WorkBuddyDbContext,
     workbuddy_transaction,
+)
+from octop.infra.rbac.subjects import (
+    SUBJECT_DEPARTMENT_CHAIN,
+    grant_subject_reach,
 )
 
 MAX_LIST_BASES = 200

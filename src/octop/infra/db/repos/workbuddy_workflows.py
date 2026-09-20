@@ -31,10 +31,6 @@ from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import now_ts
-from octop.infra.db.repos.workbuddy_catalog import (
-    SUBJECT_DEPARTMENT_CHAIN,
-    grant_subject_reach,
-)
 from octop.infra.db.workbuddy_context import (
     WorkBuddyDbContext,
     require_postgres,
@@ -44,6 +40,10 @@ from octop.infra.errors import ErrorCode
 from octop.infra.rbac.model import RbacActor
 from octop.infra.rbac.repo import WorkBuddyRbacRepo
 from octop.infra.rbac.resolver import visibility_sql
+from octop.infra.rbac.subjects import (
+    SUBJECT_DEPARTMENT_CHAIN,
+    grant_subject_reach,
+)
 from octop.infra.workbuddy.workflow_compiler import (
     ACTIVATABLE_VERSION_ORIGINS,
     VERSION_ORIGINS,

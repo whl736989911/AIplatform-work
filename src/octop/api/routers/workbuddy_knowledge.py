@@ -31,13 +31,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from octop.api.deps import get_server
 from octop.api.routers.workbuddy_identity import (
     WorkBuddyPrincipal,
-    require_workbuddy_admin,
+    require_workbuddy_duty,
     workbuddy_envelope,
     workbuddy_principal,
 )
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.workbuddy_context import WorkBuddyPostgresRequiredError, require_postgres
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.rbac.duties import DUTY_KB_ADMIN
 from octop.infra.workbuddy.knowledge import (
     DEFAULT_TOLERANCE_SECONDS,
     DOCUMENT_SOURCE_UPLOAD,
@@ -524,7 +525,7 @@ async def create_trigger_registration(
     request: Request,
     id: str,
     body: TriggerRegistrationCreateBody,
-    principal: WorkBuddyPrincipal = Depends(require_workbuddy_admin()),
+    principal: WorkBuddyPrincipal = Depends(require_workbuddy_duty(DUTY_KB_ADMIN)),
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     payload = _triggers(server).create_registration(
@@ -554,7 +555,7 @@ async def create_trigger_registration(
 async def list_trigger_registrations(
     request: Request,
     id: str,
-    principal: WorkBuddyPrincipal = Depends(require_workbuddy_admin()),
+    principal: WorkBuddyPrincipal = Depends(require_workbuddy_duty(DUTY_KB_ADMIN)),
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     items = _triggers(server).list_registrations(
@@ -571,7 +572,7 @@ async def delete_trigger_registration(
     request: Request,
     id: str,
     registration_id: str,
-    principal: WorkBuddyPrincipal = Depends(require_workbuddy_admin()),
+    principal: WorkBuddyPrincipal = Depends(require_workbuddy_duty(DUTY_KB_ADMIN)),
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     payload = _triggers(server).revoke_registration(
@@ -590,7 +591,7 @@ async def rotate_trigger_secret(
     request: Request,
     id: str,
     registration_id: str,
-    principal: WorkBuddyPrincipal = Depends(require_workbuddy_admin()),
+    principal: WorkBuddyPrincipal = Depends(require_workbuddy_duty(DUTY_KB_ADMIN)),
     server: Any = Depends(get_server),
 ) -> JSONResponse:
     payload = _triggers(server).rotate_secret(
@@ -691,7 +692,7 @@ async def post_chat_message(
 async def test_trigger_delivery(
     request: Request,
     registration_id: str,
-    principal: WorkBuddyPrincipal = Depends(require_workbuddy_admin()),
+    principal: WorkBuddyPrincipal = Depends(require_workbuddy_duty(DUTY_KB_ADMIN)),
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     payload = _triggers(server).test_delivery(

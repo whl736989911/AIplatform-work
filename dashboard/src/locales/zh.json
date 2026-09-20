@@ -7875,5 +7875,80 @@
     "WORKFLOW_OUTPUT_DUPLICATE": {
       "hint": "一个工作流只能有一个输出节点：删掉多余的那个，或把两个输出合并成一个。"
     }
+  },
+  "access": {
+    "title": "权限策略",
+    "subtitle": "岗位授权：让成员不必提权即可承担岗位职责。",
+    "add": "新增授权",
+    "policy": {
+      "title": "岗位只加路，不夺权",
+      "additive": "这里的新增或撤销只多给或少给一条路径，不会改变任何既有权限。",
+      "adminImplicit": "租户管理员隐式持有全部岗位，不需要在这里授权。",
+      "departmentChain": "授予部门的岗位同时覆盖该部门下的所有子部门。",
+      "tenantWide": "主体为「全员」时，租户内所有成员都持有该岗位。",
+      "adminOnly": "查看与管理这些授权仅限租户管理员。"
+    },
+    "vocabulary": {
+      "title": "岗位词表"
+    },
+    "duty": {
+      "author": {
+        "label": "作者",
+        "description": "创建与编辑工作流、知识库内容"
+      },
+      "publisher": {
+        "label": "发布者",
+        "description": "把工作流版本发布给租户使用"
+      },
+      "approver": {
+        "label": "审批人",
+        "description": "裁决审批节点上的执行请求"
+      },
+      "kb_admin": {
+        "label": "库管理员",
+        "description": "管理知识库、文档与知识库授权"
+      },
+      "ops": {
+        "label": "运维",
+        "description": "查看运行记录并处理失败"
+      }
+    },
+    "grantCount": "{{count}} 项授权",
+    "column": {
+      "duty": "岗位",
+      "subject": "主体",
+      "grantedAt": "授权时间"
+    },
+    "subject": {
+      "tenant": "全员",
+      "department": "部门",
+      "member": "成员"
+    },
+    "emptyTitle": "还没有岗位授权",
+    "emptyHint": "只有租户管理员隐式持有全部岗位；为部门或成员授权后，每一条都会列在这里。",
+    "loadFailed": "岗位授权加载失败",
+    "loadFailedHint": "服务端未说明失败原因。",
+    "grantSuccess": "已授予该岗位",
+    "grantFailed": "授权失败",
+    "revoke": "撤销",
+    "revokeConfirm": "撤销该主体的岗位授权？",
+    "revokeConfirmOk": "撤销",
+    "revokeSuccess": "已撤销该岗位授权",
+    "revokeFailed": "撤销失败",
+    "form": {
+      "addTitle": "新增岗位授权",
+      "duty": "岗位",
+      "dutyPlaceholder": "选择岗位",
+      "dutyRequired": "请选择岗位",
+      "subjectKind": "主体",
+      "subject": "具体主体",
+      "subjectPlaceholder": "选择主体",
+      "subjectEmpty": "没有可选的成员",
+      "subjectRequired": "请选择具体主体",
+      "departmentHint": "部门授权同时覆盖其子部门。",
+      "memberHint": "成员授权只对该成员生效。",
+      "tenantHint": "全员授权让租户内所有成员都持有该岗位。",
+      "submit": "授权"
+    }
   }
 }
