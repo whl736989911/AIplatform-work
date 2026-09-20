@@ -626,6 +626,26 @@ class WorkBuddyKnowledgeRepo:
             ).fetchall()
         return [WorkBuddyKnowledgeBaseRow.from_row(row) for row in rows]
 
+    def active_chunk_texts(
+        self, ctx: WorkBuddyDbContext, kb_id: str, document_id: str
+    ) -> list[str]:
+        """The active generation's chunk text in order — the document as indexed.
+
+        A text-only or migrated document keeps no original file: its chunks *are*
+        the text, so preview and export read them back here.
+        """
+        with workbuddy_transaction(self._db, ctx) as conn:
+            rows = conn.execute(
+                "SELECT c.content AS content FROM workbuddy_knowledge_chunks c"
+                " JOIN workbuddy_knowledge_documents d"
+                " ON d.tenant_id = c.tenant_id AND d.document_id = c.document_id"
+                " WHERE c.tenant_id = ? AND c.kb_id = ? AND c.document_id = ?"
+                " AND c.generation_id = d.active_generation_id"
+                " ORDER BY c.ordinal",
+                (ctx.tenant_id, kb_id, document_id),
+            ).fetchall()
+        return [str(row["content"]) for row in rows]
+
     def update_base_settings(
         self, ctx: WorkBuddyDbContext, kb_id: str, *, max_documents: int
     ) -> WorkBuddyKnowledgeBaseRow | None:

@@ -2,7 +2,7 @@
   "machine": "machine-B",
   "line": "B",
   "owner": "machine-B（权限与知识库）",
-  "updated": "2026-09-20T05:30:00Z",
+  "updated": "2026-09-20T15:20:00Z",
   "batches": {
     "1": {
       "state": "done",
@@ -34,16 +34,18 @@
       "notes": "B-02 工作流接入权限四层：创建与 workbuddy_object_scopes 行同一事务写入（默认 enterprise，主体取自服务端上下文）、列表过滤与纯解析器逐 actor 一致、详情/保存/发布/回滚/归档统一判定且不可见一律 404；测试抓到并修复「列表按 legacy 默认公司可见、详情走 RbacService 无该回退」的口径不一致。B-03 工具/模型授权加 subject：subject_key（tenant/department:<id>/member:<user_id>）进主键，折叠进 016_workbuddy_catalog.pg.sql 并以 migrate.py 幂等修复 _ensure_workbuddy_grant_subjects 覆盖已跳过该文件的库；update_capabilities 只替换 subject_key='tenant' 的行（部门/成员授权不被覆盖）；撤销租户级模型授权时清空默认模型（默认模型必须保持租户级批准）。B-04 解析器按调用者解析（租户级行 ∪ 部门父链 ∪ 本人），默认模型须对调用者可达否则 MODEL_NOT_CONFIGURED，缺 user_id 时 fail-closed；A 线三处构造点未改实现，契约定稿写入 docs/plan/two-machine-workstreams.md §3.6。另修 scripts/migrate_kb.py：授权判定改问租户级事实（新增 WorkBuddyCatalogRepo.granted_tenant_wide），与调用者可达性明确区分。contracts/route-manifest.json 追加两条端点（supplemental 46→48、total 108→110），未新增迁移号（按 AGENTS.md 折叠进当前未发布的 016）。未包含：部门/成员授权前端配置页（B-07）、知识库权限向 rbac/ 收敛（B-10/B-13）、执行期工具/模型运行时复核。注意：首次提交时钩子在随机顺序下出现 1 项偶发失败（未记录用例名，随后单跑与全量确定序均通过，无法复现，疑似既有顺序耦合）；第二次提交钩子全绿，PR 已提并及时合并。"
     },
     "3": {
-      "state": "pending",
+      "state": "done",
       "tasks": [
         "B-05",
         "B-06",
         "B-07"
       ],
-      "pr": null,
-      "commits": [],
-      "evidence": "",
-      "notes": ""
+      "pr": 41,
+      "commits": [
+        "3ec432b5"
+      ],
+      "evidence": "已合并:PR #41 → main 3a20a990。合并前按 §3.8 rebase 到最新 main(CHANGELOG/清单取并集并重算 counts,workbuddy_workflows.py 取 main 的新结构 _load_version + 本批次 duty=DUTY_PUBLISHER 语义),rebase 后用 PYTHONPATH 指向 worktree 的 src 复核:duties 9 + visibility 8 + identity 23 = 40 passed。原始证据:ruff/format/mypy 全清;tests/unit/db 153 passed/1 skipped;workbuddy+冒烟+运行时 PG 380 passed/2 skipped;前端 vitest 174 文件/929 用例。",
+      "notes": "B-05 岗位授权(迁移 052 + rbac/duties + require_workbuddy_duty + 3 条管理端点,只加路不夺权);B-06 默认可见性回填(迁移 053 + migrate.py 幂等修复);B-07 前端权限策略页(pages/Settings/Access + workbuddyAccess.ts + 中英各 51 键)。未包含:审批人(workbuddy_proposals.py)与运行时运维(workbuddy_runtime.py)的同名放宽属 A 线文件,已交接;B-07 路由/导航接线属 A 线;B-07 无真机浏览器验证(本机无运行中后端与租户 JWT)。"
     },
     "4": {
       "state": "in_progress",
@@ -52,9 +54,13 @@
         "B-12"
       ],
       "pr": null,
-      "commits": [],
-      "evidence": "B-12 第一步（适配层接缝）与 B-10 第一批（每库上限 + 每成员默认打开）均自测通过。新增 tests/unit/workbuddy/test_workbuddy_knowledge_adapter_postgresql.py 6 项、tests/unit/workbuddy/test_workbuddy_knowledge_cap_postgresql.py 4 项（真实 PG）全通过；回归：tests/unit/db + tests/unit/knowledge + tests/unit/api/test_knowledge_bases.py + tests/unit/workbuddy = 627 passed / 3 skipped；ruff/format 与 mypy --strict 545 文件 0 错。",
-      "notes": "已完成：①B-12 适配层（knowledge_adapter.py：开关解析/镜像/投影/优雅回退 + knowledge_bases.py 四条挂钩，默认零行为变化）；②B-10 第一批（迁移 054：workbuddy_knowledge_bases.max_documents + workbuddy_knowledge_preferences 每成员默认打开，仓库方法 update_base_settings/document_cap_reached/set_default_open/default_open_bases，投影保真）。**未完成（B-10 余项）**：文件夹、预览、抽取文本下载、单·整库重建索引、文本型文档类型面、KB 级 OCR（后者受 integrator.blocked[knowledge-onnx] 影响，先不做）；以及这些能力的前端（知识库页）与路由/清单接线。B-12 余项：文档级镜像（设计上交 B-08/B-13 迁移通道）、icon_name 保真（租户表无该列）。状态：停在 feat/rbac-kb-adapter，未合并（§5.3；integrator verified[2] 仍未出现，next_batch=2）。"
+      "commits": [
+        "1f4c58a9",
+        "7cce10fb",
+        "1afb7e1e"
+      ],
+      "evidence": "B-12 第一步 + B-10 前两批均自测通过。新增 PG 验收：适配层 6 项、每库上限/默认打开 4 项、文本读取与重建索引 4 项（真实 PG + 桩嵌入器，跑真实世代/分块/作业行）。回归汇总:tests/unit/workbuddy + tests/unit/knowledge + tests/unit/api/test_knowledge_bases.py = 115 passed(本轮聚焦集);此前全量聚焦集 627 passed/3 skipped;ruff/format 与 mypy --strict 545 文件 0 错。",
+      "notes": "已完成：①B-12 适配层（开关/镜像/投影/回退 + 四条挂钩）;②B-10 第一批（迁移 054 + 每库上限 + 每成员默认打开 + 投影保真）;③B-10 第二批（文档文本读取/预览/导出 + 单篇与整库重建索引,三条端点已入 route-manifest,supplemental 50→53、total 112→115）。**未完成（B-10 余项）**：文件夹（需迁移加列/表 + 前端）、KB 级 OCR（受 integrator.blocked[knowledge-onnx] 影响,按 §5.4 暂不做）、文本型文档类型面的前端展示、以及知识库页对这些能力的 UI。B-12 余项：文档级镜像（交给 B-08/B-13）、icon_name 保真。状态：停在 feat/rbac-kb-adapter,未合并（§5.3;verified[2] 仍未出现）。 已 rebase 到批次 3 合并后的 main(CHANGELOG/清单/ledger 取并集与重算 counts),新分支 feat/rbac-kb-carried。"
     },
     "5": {
       "state": "pending",

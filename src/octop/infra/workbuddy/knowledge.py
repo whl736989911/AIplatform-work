@@ -1258,6 +1258,105 @@ class WorkBuddyKnowledgeService:
             },
         )
 
+    def document_text(
+        self,
+        actor: WorkBuddyKnowledgeActor,
+        kb_id: str,
+        document_id: str,
+        *,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """The indexed text of one document; ``limit`` yields a preview.
+
+        This is the text the personal edition could hand back: a text-only or
+        migrated document has no source file, so its chunks are the content. The
+        preview and the text export read exactly this.
+        """
+        ctx = self.context(actor)
+        self._require(ctx, actor, kb_id, "read")
+        repo = self._repository()
+        document = repo.get_document(ctx, kb_id, document_id)
+        if document is None or document.deleted_at is not None:
+            raise OctopError(ErrorCode.NOT_FOUND, "document not found")
+        text = "\n\n".join(repo.active_chunk_texts(ctx, kb_id, document_id))
+        truncated = False
+        if limit is not None and len(text) > max(0, int(limit)):
+            text = text[: max(0, int(limit))]
+            truncated = True
+        return {
+            "document_id": document.document_id,
+            "kb_id": kb_id,
+            "title": document.title,
+            "text": text,
+            "truncated": truncated,
+            "chunk_count": int(document.chunk_count),
+        }
+
+    def reindex_document(
+        self, actor: WorkBuddyKnowledgeActor, kb_id: str, document_id: str
+    ) -> dict[str, Any]:
+        """Publish a fresh generation for one document (per-document reindex).
+
+        A text-only or migrated document is re-indexed from the text its chunks
+        already hold; an uploaded one is parsed again from storage. Either way the
+        document keeps its job row, and the previous generation stays until the
+        new one is published atomically.
+        """
+        ctx = self.context(actor)
+        self._require(ctx, actor, kb_id, "write")
+        repo = self._repository()
+        document = repo.get_document(ctx, kb_id, document_id)
+        if document is None or document.deleted_at is not None:
+            raise OctopError(ErrorCode.NOT_FOUND, "document not found")
+        if document.source in TEXT_DOCUMENT_SOURCES:
+            text = "\n\n".join(repo.active_chunk_texts(ctx, kb_id, document_id))
+            if not text.strip():
+                raise OctopError(
+                    ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+                    "document has no indexed text to reindex",
+                )
+            self.index_text_document(
+                tenant_id=actor.tenant_id,
+                actor_user_id=actor.user_id,
+                kb_id=kb_id,
+                document_id=document_id,
+                text=text,
+                department_id=actor.department_id,
+            )
+        else:
+            self.index_document(
+                tenant_id=actor.tenant_id,
+                actor_user_id=actor.user_id,
+                kb_id=kb_id,
+                document_id=document_id,
+                department_id=actor.department_id,
+            )
+        return {
+            "document_id": document_id,
+            "kb_id": kb_id,
+            "job_id": str(document.job_id),
+            "reindexed": True,
+        }
+
+    def reindex_base(self, actor: WorkBuddyKnowledgeActor, kb_id: str) -> dict[str, Any]:
+        """Reindex every live document of one base, reporting each refusal.
+
+        One unreadable document must not stop the rest: the failures come back as
+        codes the caller can act on, and each document records its own job.
+        """
+        ctx = self.context(actor)
+        self._require(ctx, actor, kb_id, "write")
+        repo = self._repository()
+        queued = 0
+        failed: list[dict[str, str]] = []
+        for row in repo.list_documents(ctx, kb_id):
+            try:
+                self.reindex_document(actor, kb_id, row.document_id)
+                queued += 1
+            except OctopError as exc:
+                failed.append({"document_id": row.document_id, "code": exc.code.value})
+        return {"kb_id": kb_id, "queued": queued, "failed": failed}
+
     def _publish_parsed(
         self,
         *,

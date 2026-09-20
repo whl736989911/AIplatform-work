@@ -1030,11 +1030,35 @@
       "success_status": 202,
       "summary": "用一句描述修改既有工作流：生成 JSON Patch 并走既有提案链，202",
       "authorization": "与创建提案同权；未接线作者模型时 503；改动无法编译时 400 并带回编译器诊断"
+    },
+    {
+      "method": "GET",
+      "path": "/knowledge-bases/{id}/documents/{document_id}/text",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "读取文档已索引的文本（limit 预览，download 附件导出）",
+      "authorization": "具备该库读权限"
+    },
+    {
+      "method": "POST",
+      "path": "/knowledge-bases/{id}/documents/{document_id}/reindex",
+      "stage": "A2",
+      "success_status": 202,
+      "summary": "重建单篇文档索引（文本型按分块文本重建，上传型按存储重新解析）",
+      "authorization": "具备该库写权限"
+    },
+    {
+      "method": "POST",
+      "path": "/knowledge-bases/{id}/reindex",
+      "stage": "A2",
+      "success_status": 202,
+      "summary": "重建整库索引，逐篇报告失败码",
+      "authorization": "具备该库写权限"
     }
   ],
   "counts": {
-    "source": 62,
+    "source": 65,
     "supplemental": 66,
-    "total": 128
+    "total": 131
   }
 }

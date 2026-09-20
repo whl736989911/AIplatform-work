@@ -24,10 +24,11 @@ import logging
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from octop.api.common.content_disposition import content_disposition
 from octop.api.deps import get_server
 from octop.api.routers.workbuddy_identity import (
     WorkBuddyPrincipal,
@@ -638,5 +639,82 @@ async def test_trigger_delivery(
 ) -> dict[str, Any]:
     payload = _triggers(server).test_delivery(
         _actor(principal), _require_uuid(registration_id, "registration id")
+    )
+    return workbuddy_envelope(request, payload)
+
+
+# --------------------------------------------------------------------------- #
+# document text and reindexing (B-10)
+# --------------------------------------------------------------------------- #
+
+
+@router.get(
+    "/knowledge-bases/{id}/documents/{document_id}/text",
+    summary="Read one document's indexed text (preview, or an export)",
+)
+async def read_document_text(
+    request: Request,
+    id: str,
+    document_id: str,
+    limit: int | None = Query(default=None, ge=0, le=200000),
+    download: bool = Query(default=False),
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+) -> Any:
+    """A text-only or migrated document has no file: its chunks are the text.
+
+    ``limit`` yields the preview the knowledge page shows; ``download=true`` sends
+    the same bytes as an attachment instead of inside the envelope.
+    """
+    payload = _knowledge(server).document_text(
+        _actor(principal),
+        _require_uuid(id, "knowledge base id"),
+        _require_uuid(document_id, "document id"),
+        limit=limit,
+    )
+    if not download:
+        return workbuddy_envelope(request, payload)
+    title = str(payload.get("title") or "document")
+    return Response(
+        content=str(payload.get("text") or ""),
+        media_type="text/plain; charset=utf-8",
+        headers={"content-disposition": content_disposition(f"{title}.txt")},
+    )
+
+
+@router.post(
+    "/knowledge-bases/{id}/documents/{document_id}/reindex",
+    status_code=202,
+    summary="Reindex one document",
+)
+async def reindex_document(
+    request: Request,
+    id: str,
+    document_id: str,
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    payload = _knowledge(server).reindex_document(
+        _actor(principal),
+        _require_uuid(id, "knowledge base id"),
+        _require_uuid(document_id, "document id"),
+    )
+    return workbuddy_envelope(request, payload)
+
+
+@router.post(
+    "/knowledge-bases/{id}/reindex",
+    status_code=202,
+    summary="Reindex every document of one knowledge base",
+)
+async def reindex_knowledge_base(
+    request: Request,
+    id: str,
+    principal: WorkBuddyPrincipal = Depends(workbuddy_principal),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    payload = _knowledge(server).reindex_base(
+        _actor(principal),
+        _require_uuid(id, "knowledge base id"),
     )
     return workbuddy_envelope(request, payload)

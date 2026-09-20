@@ -114,6 +114,21 @@ def world(pool: PostgresPool) -> dict[str, Any]:
     }
 
 
+def _fresh_base(pool: PostgresPool, world: dict[str, Any], name: str) -> str:
+    """A base of this test's own: the cap is mutable state and must not be shared."""
+    revision = WorkBuddyCatalogRepo(pool).list_public_models()[0]
+    row = WorkBuddyKnowledgeRepo(pool).create_base(
+        _context(world),
+        scope="personal",
+        name=name,
+        description="",
+        model=revision,
+        created_by_user_id=world["owner_user_id"],
+        owner_user_id=world["owner_user_id"],
+    )
+    return row.kb_id
+
+
 def _context(world: dict[str, Any], user_id: int | None = None) -> WorkBuddyDbContext:
     return WorkBuddyDbContext.for_tenant(
         world["tenant_id"], user_id=world["owner_user_id"] if user_id is None else user_id
@@ -146,15 +161,16 @@ def test_a_new_base_carries_the_personal_cap_and_it_moves_within_bounds(
     """The cap is a property of the collection, defaulted and re-settable."""
     repo = WorkBuddyKnowledgeRepo(pool)
     ctx = _context(world)
-    base = repo.get_base(ctx, world["kb_id"])
+    kb_id = _fresh_base(pool, world, f"Caps {uuid.uuid4().hex[:6]}")
+    base = repo.get_base(ctx, kb_id)
     assert base is not None and base.max_documents == DEFAULT_MAX_DOCUMENTS
 
-    raised = repo.update_base_settings(ctx, world["kb_id"], max_documents=5)
+    raised = repo.update_base_settings(ctx, kb_id, max_documents=5)
     assert raised is not None and raised.max_documents == 5
 
     for bad in (0, -1, MAX_DOCUMENTS_PER_BASE + 1):
         with pytest.raises(ValueError):
-            repo.update_base_settings(ctx, world["kb_id"], max_documents=bad)
+            repo.update_base_settings(ctx, kb_id, max_documents=bad)
 
     assert repo.update_base_settings(ctx, str(uuid.uuid4()), max_documents=7) is None
 
@@ -163,17 +179,18 @@ def test_the_cap_counts_live_documents_only(pool: PostgresPool, world: dict[str,
     """A deleted document frees its slot; the cap decides before ingestion starts."""
     repo = WorkBuddyKnowledgeRepo(pool)
     ctx = _context(world)
-    assert repo.update_base_settings(ctx, world["kb_id"], max_documents=2) is not None
-    assert repo.document_cap_reached(ctx, world["kb_id"]) is False
+    kb_id = _fresh_base(pool, world, f"Counting {uuid.uuid4().hex[:6]}")
+    assert repo.update_base_settings(ctx, kb_id, max_documents=2) is not None
+    assert repo.document_cap_reached(ctx, kb_id) is False
 
-    _insert_document(pool, world, deleted=False)
-    assert repo.document_cap_reached(ctx, world["kb_id"]) is False  # 1 of 2
-    _insert_document(pool, world, deleted=False)
-    assert repo.document_cap_reached(ctx, world["kb_id"]) is True  # 2 of 2
-    assert repo.document_cap_reached(ctx, world["kb_id"], incoming=0) is False
+    _insert_document(pool, {**world, "kb_id": kb_id}, deleted=False)
+    assert repo.document_cap_reached(ctx, kb_id) is False  # 1 of 2
+    _insert_document(pool, {**world, "kb_id": kb_id}, deleted=False)
+    assert repo.document_cap_reached(ctx, kb_id) is True  # 2 of 2
+    assert repo.document_cap_reached(ctx, kb_id, incoming=0) is False
 
-    _insert_document(pool, world, deleted=True)
-    assert repo.document_cap_reached(ctx, world["kb_id"]) is True
+    _insert_document(pool, {**world, "kb_id": kb_id}, deleted=True)
+    assert repo.document_cap_reached(ctx, kb_id) is True
 
 
 def test_default_open_is_a_preference_of_each_member(
