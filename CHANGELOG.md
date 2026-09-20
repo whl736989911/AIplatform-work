@@ -8,6 +8,7 @@
 
 ### 新增
 
+- **会话续期（A-18）**：登录与续期现在同时签发**刷新令牌**（响应新增 `refresh_token` 与 `refresh_expires_in`，默认 30 天；访问令牌仍是 24 小时，并由既有的滑动续期在活跃期自动延长）。`POST /api/auth/refresh` 用它换一对新令牌：**每次使用都轮换**、库里只存 sha256、一次登录等于一个"家族"；再次提交已轮换的令牌只可能是重放 → **整个家族被撤销**并要求重新登录（两个请求抢跑同样按重放处理）。`POST /api/auth/logout` 可带上刷新令牌以**真正结束该会话**——此前登出只写审计事件，无状态 JWT 无法撤销。于是"安静超过访问令牌有效期再回来"的客户端不必重登，而登出第一次有了实际效果。表由核心迁移 `036_session_refresh_tokens` 建立（PostgreSQL 与 SQLite 两侧都真建表）。
 - WorkBuddy **运行中向人提问**（A-08）：新增 `ask` 节点——运行到某一步缺少只有人能给的事实时（发票号、两个账户选哪个），执行**停在原地等回答**，而不是取消重跑（后者会丢掉已完成的工作与图上的位置）。节点在权威 schema 里声明 `prompt`、`fields`（名字/标签/类型/是否必填/占位/选项）与 `assignee_user_ids`；编译器校验字段名在同一节点内**唯一**（字段名就是提交结果的键）、`select` 必须给 `options`、受派人须是租户内**当前可见**成员——与审批同一条规则：只有"没人能答"才拦发布，已离职的受派人在运行时表现为该步失败（`ASK_NO_VALID_ASSIGNEE`），不会让本来健全的工作流发布不了。执行状态新增 `waiting_input`，与 `waiting_approval` 同类：停放时不占运行槽，回答后重新排队、由 Worker 再次接纳。
 - 提问落库为 `workbuddy_input_requests`（问题、表单与表单摘要、锁定版本 id/hash、截止时间、答案与答案摘要、作答人/时间）与 `workbuddy_input_assignees`（谁该答、是否已回答），两张表 ENABLE + FORCE RLS 并配租户内复合外键；`workbuddy_step_runs.status` 同步接纳 `waiting_input`。**问题文案在开单时渲染**（`{{ … }}` 按本次运行的实际输入与已结算输出渲染），受派人拿到的是一句关于这次运行的话，而不是模板原文。
 - 新增三个端点：`GET /executions/{id}/input-requests`（某次执行提出的问题，含表单与受派人）、`POST /executions/{id}/input-requests/{rid}/answer`（提交答案；未声明的键、类型不符、选项外、必填缺失一律 400 `WORKBUDDY_VALIDATION_FAILED` 且**不改动任何状态**；CAS 保证一个问题只被回答一次，重复提交冲突）、`GET /input-requests`（本人待填队列；admin 的 `scope=tenant` 需有管理目的并审计）。**非受派人一律 404**，与审批一致，不泄漏问题是否存在。运行详情新增等待原因 `input`（`wait_reasons`/`waiting_steps`），前端据此给出答题入口；`input.requested` 通知与 `workbuddy.input_request.created` 发件箱事件与审批同构。

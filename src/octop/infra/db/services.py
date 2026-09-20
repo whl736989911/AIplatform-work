@@ -18,6 +18,7 @@ from octop.infra.db.repos.knowledge import KnowledgeRepo
 from octop.infra.db.repos.proactive_care_config import ProactiveCareConfigRepo
 from octop.infra.db.repos.providers import ProviderRepo
 from octop.infra.db.repos.published_experts import PublishedExpertRepo
+from octop.infra.db.repos.refresh_tokens import RefreshTokenRepo
 from octop.infra.db.repos.secrets import SecretRepo
 from octop.infra.db.repos.sessions import SessionRepo
 from octop.infra.db.repos.settings import SettingsRepo
@@ -61,6 +62,7 @@ class RepoBundle:
     care_push_repo: CarePushRepo
     proactive_care_config_repo: ProactiveCareConfigRepo
     sso_repo: SsoRepo
+    refresh_token_repo: RefreshTokenRepo
 
     @classmethod
     def from_pool(cls, db: DatabasePool) -> RepoBundle:
@@ -90,6 +92,7 @@ class RepoBundle:
             care_push_repo=CarePushRepo(db),
             proactive_care_config_repo=ProactiveCareConfigRepo(db),
             sso_repo=SsoRepo(db),
+            refresh_token_repo=RefreshTokenRepo(db),
         )
 
 
@@ -198,6 +201,10 @@ class SharedServices:
     @property
     def sso_repo(self) -> SsoRepo:
         return self.repos.sso_repo
+
+    @property
+    def refresh_token_repo(self) -> RefreshTokenRepo:
+        return self.repos.refresh_token_repo
 
 
 def build_shared_services(
