@@ -55,7 +55,7 @@ from octop.infra.db.repos.workbuddy_runtime import (
 )
 from octop.infra.db.workbuddy_context import WorkBuddyDbContext
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.workbuddy.attribution import attribute_corrections
+from octop.infra.workbuddy.attribution import CorrectionCluster, attribute_corrections
 from octop.infra.workbuddy.cel_sandbox import CELSandboxError, evaluate_cel
 from octop.infra.workbuddy.log_redaction import register_secret
 from octop.infra.workbuddy.roles import TENANT_ADMIN_ROLES
@@ -292,6 +292,22 @@ class CanaryRoute:
     bucket: int
     ratio_basis_points: int
     subject: str
+
+
+@dataclass(frozen=True, slots=True)
+class VersionAttribution:
+    """One version's corrections, attributed against the graph that version ran.
+
+    ``definition`` travels with the clusters because the analyser (A-14) needs the
+    same definition the scope was computed from — handing it the *current* one
+    would let a suggestion be written against a graph the evidence never saw.
+    """
+
+    workflow_version_id: str
+    definition_sha256: str
+    definition: Mapping[str, Any]
+    feedback_rows: int
+    clusters: tuple[CorrectionCluster, ...]
 
 
 class CanaryDirectory(Protocol):
@@ -4519,6 +4535,36 @@ class WorkBuddyRuntimeService:
         A tenant-admin view, because this is the input to the analyser (A-14), which
         runs as a platform job rather than on behalf of one member.
         """
+        groups = self._attribution_groups(actor, workflow_id, since=since, limit=limit)
+        return {
+            "workflow_id": workflow_id,
+            "versions": [
+                {
+                    "workflow_version_id": group.workflow_version_id,
+                    "definition_sha256": group.definition_sha256,
+                    "feedback_rows": group.feedback_rows,
+                    "clusters": [cluster.to_payload() for cluster in group.clusters],
+                }
+                for group in groups
+            ],
+        }
+
+    def attribution_for_analysis(
+        self, actor: RuntimeActor, workflow_id: str, *, since: float | None = None, limit: int = 500
+    ) -> VersionAttribution | None:
+        """The version with the most correction evidence, ready for the analyser.
+
+        The analyser proposes changes to *one* version's graph, so it is handed the
+        version whose evidence is strongest rather than a mixture: a patch cannot be
+        written against several definitions at once.
+        """
+        groups = self._attribution_groups(actor, workflow_id, since=since, limit=limit)
+        return groups[0] if groups else None
+
+    def _attribution_groups(
+        self, actor: RuntimeActor, workflow_id: str, *, since: float | None, limit: int
+    ) -> list[VersionAttribution]:
+        """Attribution per version, most-evidenced first.  Backs A-13 and A-14."""
         self._require_postgres()
         if not actor.is_admin:
             raise OctopError(ErrorCode.FORBIDDEN, "attribution is a tenant-admin view")
@@ -4529,21 +4575,21 @@ class WorkBuddyRuntimeService:
         by_version: dict[str, list[ExecutionFeedbackRow]] = {}
         for row in rows:
             by_version.setdefault(row.workflow_version_id, []).append(row)
-        versions: list[dict[str, Any]] = []
+        groups: list[VersionAttribution] = []
         for version_id, members in by_version.items():
             locked = self._versions.load_version(ctx, workflow_id, version_id)
             compiled = compile_stored_definition(locked.definition, locked.definition_sha256)
-            clusters = attribute_corrections(compiled, members)
-            versions.append(
-                {
-                    "workflow_version_id": version_id,
-                    "definition_sha256": locked.definition_sha256,
-                    "feedback_rows": len(members),
-                    "clusters": [cluster.to_payload() for cluster in clusters],
-                }
+            groups.append(
+                VersionAttribution(
+                    workflow_version_id=version_id,
+                    definition_sha256=locked.definition_sha256,
+                    definition=locked.definition,
+                    feedback_rows=len(members),
+                    clusters=tuple(attribute_corrections(compiled, members)),
+                )
             )
-        versions.sort(key=lambda item: -item["feedback_rows"])
-        return {"workflow_id": workflow_id, "versions": versions}
+        groups.sort(key=lambda group: -group.feedback_rows)
+        return groups
 
     def _recorded_expired(self, ctx: WorkBuddyDbContext, execution: ExecutionRow) -> frozenset[str]:
         """Nodes of this execution whose question passed its deadline unanswered.

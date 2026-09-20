@@ -982,11 +982,19 @@
       "success_status": 200,
       "summary": "某工作流的纠正归因（按版本分组，含上游范围），200",
       "authorization": "仅受控租户 admin（这是分析器 A-14 的输入，以平台作业身份运行）"
+    },
+    {
+      "method": "POST",
+      "path": "/workflows/{workflow_id}/improvement-analysis",
+      "stage": "A5",
+      "success_status": 202,
+      "summary": "按纠正证据生成改进提案（经既有治理链编译/策略/风险分级），202",
+      "authorization": "工作流可见的 admin；未接线分析器且确有证据时 503"
     }
   ],
   "counts": {
     "source": 62,
-    "supplemental": 60,
-    "total": 122
+    "supplemental": 61,
+    "total": 123
   }
 }

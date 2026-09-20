@@ -123,7 +123,7 @@ def _service(server: Any) -> WorkBuddyRuntimeService:
     return WorkBuddyRuntimeService.for_control_plane(db)
 
 
-def _actor(principal: WorkBuddyPrincipal) -> RuntimeActor:
+def runtime_actor(principal: WorkBuddyPrincipal) -> RuntimeActor:
     return RuntimeActor(
         tenant_id=principal.tenant_id,
         user_id=principal.user_id,
@@ -219,7 +219,7 @@ async def execute_workflow(
     request under the same key conflicts.
     """
     view = _service(server).start_execution(
-        _actor(principal),
+        runtime_actor(principal),
         workflow_id=_uuid(workflow_id, field="workflow"),
         inputs=body.inputs,
         trigger_type="api",
@@ -243,7 +243,7 @@ async def list_executions(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     views = _service(server).list_executions(
-        _actor(principal),
+        runtime_actor(principal),
         scope=scope,
         workflow_id=_uuid(workflow_id, field="workflow") if workflow_id else None,
         status=status,
@@ -260,7 +260,7 @@ async def get_execution(
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     view, steps, edges = _service(server).execution_facts(
-        _actor(principal), _uuid(execution_id, field="execution")
+        runtime_actor(principal), _uuid(execution_id, field="execution")
     )
     payload = view.to_payload()
     payload["steps"] = [step.to_payload() for step in steps]
@@ -277,7 +277,7 @@ async def cancel_execution(
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     view = _service(server).cancel_execution(
-        _actor(principal), _uuid(execution_id, field="execution")
+        runtime_actor(principal), _uuid(execution_id, field="execution")
     )
     return workbuddy_envelope(request, view.to_payload())
 
@@ -293,7 +293,7 @@ async def resume_execution(
     if body.decision not in APPROVAL_DECISIONS:
         raise OctopError(ErrorCode.WORKBUDDY_VALIDATION_FAILED, "decision is not supported")
     view = _service(server).resume_execution(
-        _actor(principal),
+        runtime_actor(principal),
         _uuid(execution_id, field="execution"),
         approval_request_id=_uuid(body.approval_request_id, field="approval request"),
         decision=body.decision,
@@ -313,7 +313,7 @@ async def list_execution_input_requests(
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     items = _service(server).list_execution_input_requests(
-        _actor(principal), _uuid(execution_id, field="execution")
+        runtime_actor(principal), _uuid(execution_id, field="execution")
     )
     return workbuddy_envelope(request, {"items": items})
 
@@ -332,7 +332,7 @@ async def answer_input_request(
 ) -> dict[str, Any]:
     """Submit one answer; the values are checked against the question's form."""
     view = _service(server).submit_input(
-        _actor(principal),
+        runtime_actor(principal),
         _uuid(execution_id, field="execution"),
         input_request_id=_uuid(input_request_id, field="input request"),
         values=body.values,
@@ -350,7 +350,7 @@ async def list_input_requests(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     items = _service(server).list_input_requests(
-        _actor(principal), scope=scope, status=status, limit=limit
+        runtime_actor(principal), scope=scope, status=status, limit=limit
     )
     return workbuddy_envelope(request, {"items": items})
 
@@ -369,7 +369,7 @@ async def request_output_review(
 ) -> dict[str, Any]:
     """Request a review of a settled run's output; the run itself is untouched."""
     payload = _service(server).request_output_review(
-        _actor(principal),
+        runtime_actor(principal),
         _uuid(execution_id, field="execution"),
         reviewer_membership_ids=body.reviewer_user_ids,
     )
@@ -387,7 +387,7 @@ async def get_output_review(
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     payload = _service(server).get_output_review(
-        _actor(principal), _uuid(execution_id, field="execution")
+        runtime_actor(principal), _uuid(execution_id, field="execution")
     )
     return workbuddy_envelope(request, payload)
 
@@ -405,7 +405,7 @@ async def decide_output_review(
 ) -> dict[str, Any]:
     """Record the review decision; a re-run starts a new execution and links it."""
     payload = _service(server).decide_output_review(
-        _actor(principal),
+        runtime_actor(principal),
         _uuid(execution_id, field="execution"),
         decision=body.decision,
         corrected=body.corrected,
@@ -424,7 +424,7 @@ async def list_output_reviews(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     items = _service(server).list_output_reviews(
-        _actor(principal), scope=scope, status=status, limit=limit
+        runtime_actor(principal), scope=scope, status=status, limit=limit
     )
     return workbuddy_envelope(request, {"items": items})
 
@@ -443,7 +443,7 @@ async def workflow_attribution(
 ) -> dict[str, Any]:
     """Correction clusters per version, with the upstream steps each points at."""
     payload = _service(server).attribute_workflow_corrections(
-        _actor(principal),
+        runtime_actor(principal),
         _uuid(workflow_id, field="workflow"),
         since=since,
         limit=limit,
@@ -463,7 +463,7 @@ async def list_execution_feedback(
 ) -> dict[str, Any]:
     """The corrections and supplied facts recorded against this run, oldest first."""
     items = _service(server).list_execution_feedback(
-        _actor(principal), _uuid(execution_id, field="execution")
+        runtime_actor(principal), _uuid(execution_id, field="execution")
     )
     return workbuddy_envelope(request, {"items": items})
 
@@ -482,7 +482,7 @@ async def record_reconciliation(
             "decision must be 'confirmed_success' or 'confirmed_failed'",
         )
     payload = _service(server).record_reconciliation(
-        _actor(principal),
+        runtime_actor(principal),
         _uuid(execution_id, field="execution"),
         node_id=body.step_id,
         decision=body.decision,
@@ -501,7 +501,7 @@ async def list_reconciliations(
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     items = _service(server).list_reconciliations(
-        _actor(principal), _uuid(execution_id, field="execution")
+        runtime_actor(principal), _uuid(execution_id, field="execution")
     )
     return workbuddy_envelope(request, {"items": items})
 
@@ -521,7 +521,7 @@ async def list_approval_requests(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     views = _service(server).list_approval_requests(
-        _actor(principal), status=status, scope=scope, limit=limit
+        runtime_actor(principal), status=status, scope=scope, limit=limit
     )
     return workbuddy_envelope(request, {"items": [view.to_payload() for view in views]})
 
@@ -534,7 +534,7 @@ async def get_approval_request(
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     service = _service(server)
-    actor = _actor(principal)
+    actor = runtime_actor(principal)
     view = service.get_approval_request(actor, _uuid(approval_request_id, field="approval request"))
     payload = view.to_payload()
     payload["candidates"] = [
@@ -556,7 +556,7 @@ async def challenge_approval_request(
 ) -> dict[str, Any]:
     """Return the one-time token once; only its hash is stored (no-store)."""
     token = _service(server).issue_approval_challenge(
-        _actor(principal), _uuid(approval_request_id, field="approval request")
+        runtime_actor(principal), _uuid(approval_request_id, field="approval request")
     )
     response = workbuddy_envelope(request, {"approval_request_id": approval_request_id})
     response["token"] = token
@@ -577,7 +577,7 @@ async def list_jobs(
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
-    views = _service(server).list_jobs(_actor(principal), status=status, limit=limit)
+    views = _service(server).list_jobs(runtime_actor(principal), status=status, limit=limit)
     return workbuddy_envelope(request, {"items": [view.to_payload() for view in views]})
 
 
@@ -588,7 +588,7 @@ async def get_job(
     principal: _Principal,
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
-    view = _service(server).get_job(_actor(principal), _uuid(job_id, field="job"))
+    view = _service(server).get_job(runtime_actor(principal), _uuid(job_id, field="job"))
     return workbuddy_envelope(request, view.to_payload())
 
 
@@ -606,7 +606,7 @@ async def list_notifications(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     views = _service(server).list_notifications(
-        _actor(principal), unread_only=unread_only, limit=limit
+        runtime_actor(principal), unread_only=unread_only, limit=limit
     )
     return workbuddy_envelope(request, {"items": [view.to_payload() for view in views]})
 
@@ -619,7 +619,7 @@ async def read_notification(
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     view = _service(server).mark_notification_read(
-        _actor(principal), _uuid(notification_id, field="notification")
+        runtime_actor(principal), _uuid(notification_id, field="notification")
     )
     return workbuddy_envelope(request, view.to_payload())
 
@@ -642,7 +642,7 @@ async def chat(
     ``MODEL_NOT_CONFIGURED`` — the user turn is recorded, nothing is simulated.
     """
     view = _service(server).chat(
-        _actor(principal),
+        runtime_actor(principal),
         message=body.message,
         session_id=_uuid(body.session_id, field="chat session") if body.session_id else None,
     )
@@ -656,7 +656,7 @@ async def list_chat_sessions(
     server: Any = Depends(get_server),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
-    views = _service(server).list_chat_sessions(_actor(principal), limit=limit)
+    views = _service(server).list_chat_sessions(runtime_actor(principal), limit=limit)
     return workbuddy_envelope(request, {"items": [view.to_payload() for view in views]})
 
 
@@ -668,7 +668,7 @@ async def get_chat_session(
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     view = _service(server).get_chat_session(
-        _actor(principal), _uuid(session_id, field="chat session")
+        runtime_actor(principal), _uuid(session_id, field="chat session")
     )
     return workbuddy_envelope(request, view.to_payload())
 
@@ -688,7 +688,7 @@ async def list_audit_logs(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     views = _service(server).list_audit_logs(
-        _actor(principal), action=action, resource_type=resource_type, limit=limit
+        runtime_actor(principal), action=action, resource_type=resource_type, limit=limit
     )
     return workbuddy_envelope(request, {"items": [view.to_payload() for view in views]})
 
@@ -700,7 +700,7 @@ async def usage(
     server: Any = Depends(get_server),
     days: int = Query(default=30, ge=1, le=365),
 ) -> dict[str, Any]:
-    payload = _service(server).usage(_actor(principal), days=days)
+    payload = _service(server).usage(runtime_actor(principal), days=days)
     return workbuddy_envelope(request, dict(payload))
 
 
