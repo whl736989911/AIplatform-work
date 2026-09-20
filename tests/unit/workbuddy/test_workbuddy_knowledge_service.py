@@ -269,6 +269,7 @@ class FakeKnowledgeRepo:
         self.statuses: list[tuple[str, str | None]] = []
         self.search_calls: list[dict[str, Any]] = []
         self.created_documents: list[dict[str, Any]] = []
+        self.renames: list[dict[str, Any]] = []
 
     # reads
     def get_base(self, ctx: Any, kb_id: str, *, include_archived: bool = True) -> Any:
@@ -336,6 +337,13 @@ class FakeKnowledgeRepo:
         if self.file_ref is None or self.file_ref.kb_id != kb_id:
             return None
         return self.file_ref if self.file_ref.file_ref_id == file_ref_id else None
+
+    def rename_document(self, ctx: Any, kb_id: str, document_id: str, *, title: str) -> bool:
+        """Mirrors the row contract: ``False`` when this document is not visible."""
+        self.renames.append({"kb_id": kb_id, "document_id": document_id, "title": title})
+        if self.document is None or self.document.kb_id != kb_id:
+            return False
+        return self.document.document_id == document_id
 
     def department_exists(self, ctx: Any, department_id: str) -> bool:
         return department_id == "dddddddd-0000-0000-0000-000000000000"
@@ -695,6 +703,103 @@ def test_acl_never_grants_permission_below_base_read() -> None:
         acl_rows=[_acl(user_id=8, permission="admin")],
     )
     assert access.can_admin
+
+
+# ── payload: why this caller reads a base, and renaming a document ───────────
+
+
+def test_the_base_payload_reports_the_callers_own_access_sources() -> None:
+    """The page explains and filters rows by the resolver's own answer."""
+    repo = FakeKnowledgeRepo(
+        base=_base(scope="personal", owner_user_id=7),
+        acl=[_acl(user_id=8, permission="read")],
+    )
+    service = _service(repo, _search_hooks(FakeEmbedder()))
+
+    owner = service.list_bases(_actor(user_id=7))
+    granted = service.list_bases(_actor(user_id=8))
+    assert owner[0]["access_sources"] == ["owner"]
+    assert granted[0]["access_sources"] == ["acl:read"]
+    # The payload is the resolver's list, not a second copy of the rule.
+    computed = resolve_knowledge_access(
+        repo.base,
+        user_id=8,
+        department_id=None,
+        is_tenant_admin=False,
+        acl_rows=repo.acl,
+    )
+    assert granted[0]["access_sources"] == list(computed.sources)
+
+    enterprise = _service(
+        FakeKnowledgeRepo(base=_base(scope="enterprise", owner_user_id=None)),
+        _search_hooks(FakeEmbedder()),
+    ).list_bases(_actor(user_id=42))
+    assert enterprise[0]["access_sources"] == ["enterprise-member"]
+
+    # Another department's base reached as tenant admin is *that* reason, not a
+    # department membership the resolver never granted.
+    admin_viewed = _service(
+        FakeKnowledgeRepo(
+            base=_base(
+                scope="department",
+                owner_user_id=None,
+                department_id="88888888-8888-4888-8888-888888888888",
+            )
+        ),
+        _search_hooks(FakeEmbedder()),
+    ).list_bases(
+        _actor(
+            user_id=42,
+            department_id="99999999-9999-4999-8999-999999999999",
+            is_tenant_admin=True,
+        )
+    )
+    assert admin_viewed[0]["access_sources"] == ["tenant-admin"]
+
+
+def test_renaming_a_document_needs_write_permission() -> None:
+    owner_repo = FakeKnowledgeRepo()
+    owner = _service(owner_repo, _search_hooks(FakeEmbedder()))
+
+    with pytest.raises(OctopError) as blank:
+        owner.rename_document(_actor(), KB_ID, DOC_ID, title="   ")
+    assert blank.value.code is ErrorCode.WORKBUDDY_INVALID_ARGUMENT
+
+    with pytest.raises(OctopError) as too_long:
+        owner.rename_document(_actor(), KB_ID, DOC_ID, title="x" * 256)
+    assert too_long.value.code is ErrorCode.WORKBUDDY_INVALID_ARGUMENT
+    assert owner_repo.renames == []
+
+    reader = _service(
+        FakeKnowledgeRepo(base=_base(scope="enterprise", owner_user_id=None)),
+        _search_hooks(FakeEmbedder()),
+    )
+    with pytest.raises(OctopError) as forbidden:
+        reader.rename_document(_actor(user_id=42), KB_ID, DOC_ID, title="名称")
+    assert forbidden.value.code is ErrorCode.FORBIDDEN
+
+    with pytest.raises(OctopError) as invisible:
+        owner.rename_document(_actor(user_id=99), KB_ID, DOC_ID, title="名称")
+    assert invisible.value.code is ErrorCode.NOT_FOUND
+
+
+def test_renaming_stores_the_trimmed_title_for_a_writer() -> None:
+    repo = FakeKnowledgeRepo()
+    service = _service(repo, _search_hooks(FakeEmbedder()))
+
+    payload = service.rename_document(_actor(), KB_ID, DOC_ID, title="  运维手册  ")
+    assert payload == {"document_id": DOC_ID, "kb_id": KB_ID, "title": "运维手册"}
+    assert repo.renames == [{"kb_id": KB_ID, "document_id": DOC_ID, "title": "运维手册"}]
+
+    # A document the repository cannot see (here: another document id) stays
+    # invisible instead of being reported as renamed.
+    missing = _service(
+        FakeKnowledgeRepo(document=_document(document_id="99999999-9999-4999-8999-999999999999")),
+        _search_hooks(FakeEmbedder()),
+    )
+    with pytest.raises(OctopError) as not_found:
+        missing.rename_document(_actor(), KB_ID, DOC_ID, title="名称")
+    assert not_found.value.code is ErrorCode.NOT_FOUND
 
 
 # ── bounded upload / archive validation ──────────────────────────────────────

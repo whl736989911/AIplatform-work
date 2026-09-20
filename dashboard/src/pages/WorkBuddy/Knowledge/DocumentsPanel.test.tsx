@@ -14,6 +14,7 @@ import type { MockInstance } from "vitest";
 import type {
   KnowledgeBase,
   KnowledgeDocument,
+  KnowledgeDocumentRename,
   KnowledgeFolder,
   KnowledgeFolderMove,
   KnowledgePermission,
@@ -60,6 +61,7 @@ function knowledgeBase(permission: KnowledgePermission): KnowledgeBase {
     owner_user_id: 7,
     archived_at: null,
     permission,
+    access_sources: ["owner"],
     embedding: {
       adapter_key: "bge",
       model_key: "bge-m3",
@@ -92,6 +94,8 @@ interface FakeKnowledgeServer {
   documents: KnowledgeDocument[];
   /** ``failed`` entries the base-wide reindex reports back. */
   reindexFailed: KnowledgeReindexFailure[];
+  /** When set, the rename route refuses the way the server would. */
+  renameError: string | null;
 }
 
 // The panel's move test mutates the row it moves, so every test builds its own
@@ -115,8 +119,9 @@ function runbookDocument(): KnowledgeDocument {
 function serverWith(
   documents: KnowledgeDocument[],
   reindexFailed: KnowledgeReindexFailure[] = [],
+  renameError: string | null = null,
 ): FakeKnowledgeServer {
-  return { documents, reindexFailed };
+  return { documents, reindexFailed, renameError };
 }
 
 /** Folders exist while a document sits in them; the root is always listed. */
@@ -163,6 +168,31 @@ function fakeRequest(server: FakeKnowledgeServer): typeof request {
         document_id: documentId,
         kb_id: KB_ID,
         folder_path: body.folder_path,
+      });
+    }
+    const bare = /\/documents\/([^/?]+)$/.exec(path);
+    if (method === "PATCH" && bare) {
+      const body = JSON.parse(
+        String(init?.body ?? "{}"),
+      ) as KnowledgeDocumentRename;
+      const renamed = server.documents.find(
+        (document) => document.document_id === decodeURIComponent(bare[1]),
+      );
+      if (!renamed) {
+        throw new Error(
+          'Request failed: 404 Not Found - {"detail":"Not Found"}',
+        );
+      }
+      if (server.renameError) {
+        throw new Error(
+          `Request failed: 403 Forbidden - ${server.renameError}`,
+        );
+      }
+      renamed.title = body.title;
+      return envelope({
+        document_id: renamed.document_id,
+        kb_id: KB_ID,
+        title: body.title,
       });
     }
     if (method === "GET" && scoped?.[2] === "text") {
@@ -438,6 +468,123 @@ describe("knowledge documents panel", () => {
     expect(messageError).not.toHaveBeenCalled();
   });
 
+  it("renames a document inline and shows the trimmed title the server kept", async () => {
+    const server = serverWith([rootDocument()]);
+    mount(server);
+
+    await screen.findByText("根目录手册");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "workbuddy.knowledge.documents.rename",
+      }),
+    );
+    fireEvent.change(
+      await screen.findByLabelText("workbuddy.knowledge.documents.renameField"),
+      { target: { value: "  运维手册 2026  " } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "workbuddy.knowledge.documents.renameConfirm",
+      }),
+    );
+
+    const renamePath = `/v1/knowledge-bases/${KB_ID}/documents/doc-root`;
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(request)
+          .mock.calls.some(
+            ([path, init]) =>
+              String(path) === renamePath && init?.method === "PATCH",
+          ),
+      ).toBe(true),
+    );
+    const patch = vi
+      .mocked(request)
+      .mock.calls.find(
+        ([path, init]) =>
+          String(path) === renamePath && init?.method === "PATCH",
+      );
+    expect(patch?.[1]?.body).toBe(JSON.stringify({ title: "运维手册 2026" }));
+
+    // The refreshed list carries the new title, and the editor is closed.
+    await screen.findByText("运维手册 2026");
+    expect(
+      screen.queryByLabelText("workbuddy.knowledge.documents.renameField"),
+    ).toBeNull();
+    expect(messageSuccess).toHaveBeenCalled();
+    expect(messageError).not.toHaveBeenCalled();
+  });
+
+  it("keeps the editor open when the server refuses the rename", async () => {
+    mount(
+      serverWith(
+        [rootDocument()],
+        [],
+        '{"detail":{"code":"FORBIDDEN","message":"knowledge base requires write permission"}}',
+      ),
+    );
+
+    await screen.findByText("根目录手册");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "workbuddy.knowledge.documents.rename",
+      }),
+    );
+    const field = await screen.findByLabelText(
+      "workbuddy.knowledge.documents.renameField",
+    );
+    fireEvent.change(field, { target: { value: "另一个名字" } });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "workbuddy.knowledge.documents.renameConfirm",
+      }),
+    );
+
+    await waitFor(() => expect(messageError).toHaveBeenCalled());
+    // The reader keeps the typed title and can retry instead of retyping it.
+    expect(
+      (
+        screen.getByLabelText(
+          "workbuddy.knowledge.documents.renameField",
+        ) as HTMLInputElement
+      ).value,
+    ).toBe("另一个名字");
+    expect(messageSuccess).not.toHaveBeenCalled();
+  });
+
+  it("returns to the root once the folder being viewed no longer holds a document", async () => {
+    mount(serverWith([rootDocument(), runbookDocument()]));
+
+    await screen.findByText("根目录手册");
+    fireEvent.click(await screen.findByText("Runbooks"));
+    await screen.findByText("运行手册");
+
+    // Moving the folder's last document out deletes the folder; the reader must
+    // land back on the root list rather than on an empty folder view.
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "workbuddy.knowledge.folders.move",
+      }),
+    );
+    fireEvent.change(await screen.findByRole("combobox"), {
+      target: { value: "" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "workbuddy.knowledge.common.confirm",
+      }),
+    );
+
+    await screen.findByText("根目录手册");
+    expect(screen.getByText("运行手册")).toBeTruthy();
+    expect(screen.queryByText("Runbooks")).toBeNull();
+    expect(
+      screen.queryByText("workbuddy.knowledge.documents.folderEmpty"),
+    ).toBeNull();
+    expect(messageError).not.toHaveBeenCalled();
+  });
+
   it("keeps readers to the read-only affordances", async () => {
     mount(serverWith([rootDocument()]), "read");
 
@@ -463,6 +610,11 @@ describe("knowledge documents panel", () => {
     expect(
       screen.queryByRole("button", {
         name: "workbuddy.knowledge.documents.remove",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: "workbuddy.knowledge.documents.rename",
       }),
     ).toBeNull();
   });

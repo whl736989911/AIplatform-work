@@ -43,6 +43,14 @@ import {
   type KnowledgeResource,
 } from "./useKnowledgeResource";
 import { knowledgeLabel } from "./labels";
+import {
+  filterBasesByLayer,
+  KNOWLEDGE_LAYERS,
+  KNOWLEDGE_LAYER_LABEL_KEY,
+  knowledgeAccessSourceLabel,
+  toggleKnowledgeLayer,
+  type KnowledgeLayer,
+} from "./visibility";
 import styles from "./index.module.less";
 
 const { Text } = Typography;
@@ -68,12 +76,17 @@ interface BasesPanelProps {
   resource: KnowledgeResource<KnowledgeBase[]>;
   selectedId: string | null;
   onSelect: (kbId: string) => void;
+  /** Selected visibility layers (empty = every readable base). */
+  layers: readonly KnowledgeLayer[];
+  onLayersChange: (layers: KnowledgeLayer[]) => void;
 }
 
 export default function BasesPanel({
   resource,
   selectedId,
   onSelect,
+  layers,
+  onLayersChange,
 }: BasesPanelProps) {
   const { t } = useTranslation();
   const timeZone = useServerTimezone();
@@ -107,6 +120,15 @@ export default function BasesPanel({
       })),
     [modelCatalog.data],
   );
+
+  // The chips only re-present the server's own access sources, so this filter
+  // narrows what the caller already reads — it never hides a base the caller
+  // may read while another chip matches it.
+  const visibleBases = useMemo(
+    () => filterBasesByLayer(resource.data, layers),
+    [resource.data, layers],
+  );
+  const filterActive = layers.length > 0;
 
   const openCreate = useCallback(() => {
     setCreating(true);
@@ -193,6 +215,24 @@ export default function BasesPanel({
           <Tag color={value === "admin" ? "green" : "default"}>
             {knowledgeLabel(t, "permission", value)}
           </Tag>
+        ) : (
+          <Text type="secondary">—</Text>
+        ),
+    },
+    {
+      // Why *this* caller may read the row, straight from the server resolver:
+      // the same field the layer chips filter on.
+      title: t("workbuddy.knowledge.bases.columnAccessSources"),
+      dataIndex: "access_sources",
+      key: "access_sources",
+      width: 240,
+      render: (sources: string[] | undefined) =>
+        sources && sources.length > 0 ? (
+          <Space size={4} wrap>
+            {sources.map((source) => (
+              <Tag key={source}>{knowledgeAccessSourceLabel(t, source)}</Tag>
+            ))}
+          </Space>
         ) : (
           <Text type="secondary">—</Text>
         ),
@@ -342,17 +382,62 @@ export default function BasesPanel({
           onAction={openCreate}
         />
       ) : (
-        <ResizableTable
-          columns={columns}
-          dataSource={resource.data}
-          rowKey="kb_id"
-          size="middle"
-          tableLayout="fixed"
-          scroll={{ x: 1400 }}
-          storageKey="workbuddy-knowledge-bases-table-widths"
-          minWidth={72}
-          pagination={false}
-        />
+        <>
+          <div className={styles.layerBar}>
+            <span className={styles.layerBarLabel}>
+              {t("workbuddy.knowledge.layers.label")}
+            </span>
+            <Button
+              size="small"
+              type={filterActive ? "default" : "primary"}
+              onClick={() => onLayersChange([])}
+            >
+              {t("workbuddy.knowledge.layers.all")}
+            </Button>
+            {KNOWLEDGE_LAYERS.map((layer) => (
+              <Button
+                key={layer}
+                size="small"
+                type={layers.includes(layer) ? "primary" : "default"}
+                aria-pressed={layers.includes(layer)}
+                onClick={() =>
+                  onLayersChange(toggleKnowledgeLayer(layers, layer))
+                }
+              >
+                {t(KNOWLEDGE_LAYER_LABEL_KEY[layer])}
+              </Button>
+            ))}
+            <Text type="secondary" className={styles.layerBarCount}>
+              {t("workbuddy.knowledge.layers.count", {
+                visible: visibleBases.length,
+                total: resource.data.length,
+              })}
+            </Text>
+          </div>
+          <Text type="secondary" className={styles.layerBarHint}>
+            {t("workbuddy.knowledge.layers.hint")}
+          </Text>
+          {visibleBases.length === 0 ? (
+            <EmptyState
+              title={t("workbuddy.knowledge.bases.filterEmpty")}
+              description={t("workbuddy.knowledge.bases.filterEmptyHint")}
+              actionLabel={t("workbuddy.knowledge.bases.filterClear")}
+              onAction={() => onLayersChange([])}
+            />
+          ) : (
+            <ResizableTable
+              columns={columns}
+              dataSource={visibleBases}
+              rowKey="kb_id"
+              size="middle"
+              tableLayout="fixed"
+              scroll={{ x: 1600 }}
+              storageKey="workbuddy-knowledge-bases-table-widths"
+              minWidth={72}
+              pagination={false}
+            />
+          )}
+        </>
       )}
 
       <Modal

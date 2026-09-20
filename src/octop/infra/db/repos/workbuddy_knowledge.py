@@ -651,6 +651,19 @@ class WorkBuddyKnowledgeRepo:
             ).fetchone()
         return row is not None
 
+    def rename_document(
+        self, ctx: WorkBuddyDbContext, kb_id: str, document_id: str, *, title: str
+    ) -> bool:
+        """Replace one document's title; ``False`` when the document is not visible."""
+        with workbuddy_transaction(self._db, ctx) as conn:
+            row = conn.execute(
+                "UPDATE workbuddy_knowledge_documents SET title = ?, updated_at = ?"
+                " WHERE tenant_id = ? AND kb_id = ? AND document_id = ? AND deleted_at IS NULL"
+                " RETURNING document_id",
+                (title, now_ts(), ctx.tenant_id, kb_id, document_id),
+            ).fetchone()
+        return row is not None
+
     def list_folders(self, ctx: WorkBuddyDbContext, kb_id: str) -> list[tuple[str, int]]:
         """``(folder path, live document count)`` for one base, path order.
 

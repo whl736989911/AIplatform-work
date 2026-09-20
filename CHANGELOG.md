@@ -8,6 +8,9 @@
 
 ### 新增
 
+- WorkBuddy 知识库**迁移映射与回填**（B-13）：`scripts/migrate_kb.py` 新增 `--apply`（默认仍是只读侦察、幂等）：`shared=1 → scope=enterprise`（**共享行不落 owner**）、`shared=0 → scope=personal + owner`、`default_open=1 → 该 owner 的每成员偏好`、旧库 `knowledge_base_members` 残留 → **同时**写 `workbuddy_knowledge_acl`（决定可见性的表）与通用 `workbuddy_object_acl`（并注册通用 scope 行以满足外键）；无租户的 owner 单库跳过并计入报告。端到端验收：`--apply` 后经企业服务列库，被映射的 viewer/editor 分别以 `acl:read`/`acl:write` 看见该库，无残留行的成员看不见——**可见范围不变**；`--apply` 连跑两次两张 ACL 表都是 0 写。
+- WorkBuddy 知识库页**一个入口**（B-14）：四层可见范围筛选（我的/部门/公司/单独授权）直接消费后端新增的只读字段 `access_sources`（resolver 按调用者算出的来源，**前端不臆造可见性**），筛选为**并集**、默认展示全部可读库，切换页签不会让已匹配的行消失；新增文档重命名（`PATCH /knowledge-bases/{id}/documents/{document_id}`，标题 1–255、需该库写权限、看不见即 404），与既有文件夹/预览/文本下载/重建索引并存。
+- WorkBuddy 知识库**迁移校验工具**（B-15）：新增 `scripts/verify_kb_migration.py`（只读、可重复、无写语句）：①chunk 计数对账（源索引 vs 目标 `chunk_count`，含缺失/多余文档）；②**自检索抽样对比**——用源库自身分块向量作探针、目标侧走生产检索语义（`search_chunks`），比较最近邻集合给出 `hit_rate` 与逐条 missing/unexpected，**不引入模型提供方**；对 k 位并列分数显式识别并计入 `tied`（避免把并列误报为差异）。差异化退出码 + JSON 报告。
 - WorkBuddy 知识库页**文档区合流**（B-10 前端）：左侧文件夹树（缺祖先的嵌套路径自动合成祖先节点并全展开，否则子节点不可达）+ 面包屑与「位置」列；点标题用 `limit` 预览抽取文本（截断时提示可下载全文）；「下载文本」走 `download=true` 取 `text/plain` 附件（文件名=标题+.txt）；单篇与整库重建索引入口（整库的 `failed` 逐条常驻提示失败码，绝不静默）；「移动」对话框可在既有路径中选择或直接输入新路径建新文件夹（客户端先按服务端同口径校验，非法路径不发请求）。既有上传握手/删除/四态处理未改；`workbuddyKnowledge.ts` 追加 6 个封装，中英语言包纯追加同名键。
 - WorkBuddy 知识库**默认打开库接口**（B-10 收尾）：`GET /knowledge-bases/default-open` 列出当前成员默认打开的库，`PUT /knowledge-bases/{id}/default-open` 为其打开/关闭某个库（每成员偏好，共享库各持己见）；字面路径**声明在 `{id}` 参数路由之前**（否则会被吞掉），并加了顺序回归用例守住这一点。
 - WorkBuddy 知识库**文件夹**（迁移 055，B-10 第三批）：文档新增 `folder_path`（有界 CHECK 拒绝绝对路径、`..`/`.` 段、双斜杠、尾斜杠、反斜杠与段内/两端空白），并按 `(tenant, kb, folder_path, title)` 建部分索引；文件夹就是活文档的路径集合（个人版用占位文档建模，这里以文档为唯一事实源，不再维护第二套生命周期），`GET /knowledge-bases/{id}/folders` 列出各路径与文档数（根目录始终在列），`PATCH /knowledge-bases/{id}/documents/{document_id}/folder` 把文档移入文件夹或移回根目录；文档载荷带 `folder_path`，前端可据此直接渲染目录树。

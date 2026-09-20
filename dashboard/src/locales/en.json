@@ -5995,7 +5995,11 @@
         "modelRevisionRequired": "Select the embedding model revision",
         "modelRevisionHint": "Only published bge-m3 revisions granted to this tenant can back a knowledge base.",
         "modelRevisionEmpty": "No published bge-m3 revision is granted to this tenant yet. Ask a tenant admin to approve one under Enterprise → Models.",
-        "modelCatalogFailed": "Could not load the model catalog"
+        "modelCatalogFailed": "Could not load the model catalog",
+        "columnAccessSources": "Visible via",
+        "filterEmpty": "No readable knowledge base under this filter",
+        "filterEmptyHint": "Adjust or clear the visibility filter and try again; the filter only narrows this list and never changes your permissions.",
+        "filterClear": "Clear filter"
       },
       "documents": {
         "title": "Documents",
@@ -6051,7 +6055,14 @@
         "download": "Download text",
         "downloadFailed": "Could not download the extracted text",
         "folderEmpty": "No documents in this folder",
-        "folderEmptyHint": "“{{folder}}” holds no documents; pick another folder in the tree on the left."
+        "folderEmptyHint": "“{{folder}}” holds no documents; pick another folder in the tree on the left.",
+        "rename": "Rename",
+        "renameField": "New title",
+        "renameConfirm": "Save title",
+        "renameCancel": "Cancel rename",
+        "renameRequired": "A title is required",
+        "renameSuccess": "Title updated: {{title}}",
+        "renameFailed": "Could not rename the document"
       },
       "acl": {
         "title": "Access grants",
@@ -6158,6 +6169,23 @@
         "basePartial": "{{queued}} queued, {{failed}} refused",
         "baseFailed": "Could not reindex the knowledge base",
         "baseFailuresTitle": "{{count}} documents could not be reindexed"
+      },
+      "layers": {
+        "label": "Visibility",
+        "all": "All",
+        "personal": "Mine",
+        "department": "Department",
+        "enterprise": "Company",
+        "acl": "Granted",
+        "hint": "Filters by the access sources the server reports. Chips combine as a union; visibility itself always stays server-side and this list view never changes your permissions.",
+        "count": "{{visible}} of {{total}} bases"
+      },
+      "accessSource": {
+        "owner": "Owner",
+        "departmentMember": "Department member",
+        "enterpriseMember": "Enterprise member",
+        "tenantAdmin": "Tenant admin",
+        "acl": "Granted ({{permission}})"
       }
     },
     "workflows": {

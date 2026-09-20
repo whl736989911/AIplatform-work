@@ -6134,7 +6134,11 @@
         "modelRevisionRequired": "请选择向量模型修订",
         "modelRevisionHint": "只有本企业已获批的 bge-m3 已发布修订才能作为知识库的向量模型。",
         "modelRevisionEmpty": "本企业尚未获批可用的 bge-m3 已发布修订，请联系企业管理员在「企业治理 → 模型」中授权。",
-        "modelCatalogFailed": "无法加载模型目录"
+        "modelCatalogFailed": "无法加载模型目录",
+        "columnAccessSources": "可见来源",
+        "filterEmpty": "当前筛选下没有可读的知识库",
+        "filterEmptyHint": "调整或清除「可见范围」筛选后再查看；筛选只收窄此列表，不会改变你的权限。",
+        "filterClear": "清除筛选"
       },
       "documents": {
         "title": "文档",
@@ -6190,7 +6194,14 @@
         "download": "下载文本",
         "downloadFailed": "下载抽取文本失败",
         "folderEmpty": "此文件夹暂无文档",
-        "folderEmptyHint": "「{{folder}}」下暂无文档，可在左侧文件夹树中选择其他文件夹。"
+        "folderEmptyHint": "「{{folder}}」下暂无文档，可在左侧文件夹树中选择其他文件夹。",
+        "rename": "重命名",
+        "renameField": "新标题",
+        "renameConfirm": "保存标题",
+        "renameCancel": "取消重命名",
+        "renameRequired": "标题不能为空",
+        "renameSuccess": "标题已更新：{{title}}",
+        "renameFailed": "重命名文档失败"
       },
       "acl": {
         "title": "访问授权",
@@ -6297,6 +6308,23 @@
         "basePartial": "已排队 {{queued}} 篇，{{failed}} 篇被拒绝",
         "baseFailed": "整库重建索引失败",
         "baseFailuresTitle": "{{count}} 篇文档未能重建索引"
+      },
+      "layers": {
+        "label": "可见范围",
+        "all": "全部",
+        "personal": "我的",
+        "department": "部门",
+        "enterprise": "公司",
+        "acl": "单独授权",
+        "hint": "按服务端返回的可见来源筛选；可多选，选中项取并集。可见性始终以服务端为准，此处只影响列表展示。",
+        "count": "{{visible}} / {{total}} 个知识库"
+      },
+      "accessSource": {
+        "owner": "拥有者",
+        "departmentMember": "部门成员",
+        "enterpriseMember": "企业成员",
+        "tenantAdmin": "租户管理员",
+        "acl": "单独授权（{{permission}}）"
       }
     },
     "workflows": {

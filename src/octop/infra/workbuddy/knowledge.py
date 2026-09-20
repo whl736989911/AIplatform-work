@@ -74,6 +74,8 @@ DOCUMENT_SOURCE_TEXT = "text"
 DOCUMENT_SOURCE_MIGRATION = "migration"
 DOCUMENT_SOURCES = (DOCUMENT_SOURCE_UPLOAD, DOCUMENT_SOURCE_TEXT, DOCUMENT_SOURCE_MIGRATION)
 TEXT_DOCUMENT_SOURCES = (DOCUMENT_SOURCE_TEXT, DOCUMENT_SOURCE_MIGRATION)
+#: Same bound as the ``wb_knowledge_documents_title_length`` row constraint.
+DOCUMENT_TITLE_MAX_LENGTH = 255
 #: Fixed overlap window during which the previous webhook secret still verifies.
 SECRET_OVERLAP_SECONDS = 300
 DEFAULT_TOLERANCE_SECONDS = 300
@@ -1309,6 +1311,27 @@ class WorkBuddyKnowledgeService:
             raise OctopError(ErrorCode.NOT_FOUND, "document not found")
         return {"document_id": document_id, "kb_id": kb_id, "folder_path": target}
 
+    def rename_document(
+        self,
+        actor: WorkBuddyKnowledgeActor,
+        kb_id: str,
+        document_id: str,
+        *,
+        title: str,
+    ) -> dict[str, Any]:
+        """Replace one document's title (the same 1–255 bound its row enforces)."""
+        ctx = self.context(actor)
+        self._require(ctx, actor, kb_id, "write")
+        clean_title = (title or "").strip()
+        if not 1 <= len(clean_title) <= DOCUMENT_TITLE_MAX_LENGTH:
+            raise OctopError(
+                ErrorCode.WORKBUDDY_INVALID_ARGUMENT,
+                f"document title must be 1 to {DOCUMENT_TITLE_MAX_LENGTH} characters",
+            )
+        if not self._repository().rename_document(ctx, kb_id, document_id, title=clean_title):
+            raise OctopError(ErrorCode.NOT_FOUND, "document not found")
+        return {"document_id": document_id, "kb_id": kb_id, "title": clean_title}
+
     def document_text(
         self,
         actor: WorkBuddyKnowledgeActor,
@@ -1586,6 +1609,10 @@ class WorkBuddyKnowledgeService:
             "owner_user_id": base.owner_user_id,
             "archived_at": base.archived_at,
             "permission": access.permission,
+            # Why *this caller* can read the base, in resolver order: owner /
+            # department-member / enterprise-member / tenant-admin / acl:<perm>.
+            # It names the caller's own sources only, never another member's.
+            "access_sources": list(access.sources),
             "embedding": {
                 "adapter_key": base.embedding_adapter_key,
                 "model_key": base.embedding_model_key,

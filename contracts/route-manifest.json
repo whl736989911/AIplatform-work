@@ -1086,11 +1086,19 @@
       "success_status": 200,
       "summary": "为当前成员打开或关闭某个知识库（每成员偏好）",
       "authorization": "具备该库读权限"
+    },
+    {
+      "method": "PATCH",
+      "path": "/knowledge-bases/{id}/documents/{document_id}",
+      "stage": "A2",
+      "success_status": 200,
+      "summary": "重命名单篇文档（标题 1–255 字符，与行约束同口径）",
+      "authorization": "具备该库写权限"
     }
   ],
   "counts": {
     "source": 65,
-    "supplemental": 70,
-    "total": 135
+    "supplemental": 71,
+    "total": 136
   }
 }
