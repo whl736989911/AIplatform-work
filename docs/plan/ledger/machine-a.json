@@ -2,7 +2,7 @@
   "machine": "machine-A",
   "line": "A",
   "owner": "本机（工作流与编排）",
-  "updated": "2026-09-20T03:17:01Z",
+  "updated": "2026-09-20T03:23:42Z",
   "batches": {
     "1": {
       "state": "done",
@@ -58,12 +58,14 @@
       "tasks": [
         "A-08",
         "A-09",
-        "A-11"
+        "A-10",
+        "A-11",
+        "A-18"
       ],
       "pr": null,
       "commits": [],
       "evidence": "",
-      "notes": ""
+      "notes": "（批次 4 任务集更正：补入漏排的 A-10 超时与升级、A-18 会话续期）"
     },
     "5": {
       "state": "pending",
