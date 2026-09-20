@@ -356,7 +356,8 @@
     "workbuddyGovernance": "治理与设置",
     "workbuddyHome": "工作台",
     "workbuddyInbox": "收件箱",
-    "workbuddyRuns": "运行"
+    "workbuddyRuns": "运行",
+    "workbuddyChatflow": "对话触发"
   },
   "skillPackages": {
     "title": "技能包",
@@ -7769,6 +7770,24 @@
       "columnP95": "P95 活跃时长",
       "empty": "还没有已结算的运行",
       "emptyHint": "指标只统计已结算的运行——排队中或等人回答的运行没有结果，计进去只会让数字好看。"
+    },
+    "chatflow": {
+      "title": "对话触发",
+      "subtitle": "给某个会话发一条消息，看它触发了哪些流程（以及没跑起来的原因）。",
+      "sendTitle": "发一条消息",
+      "conversationPlaceholder": "会话标识（工作流把触发器绑到它就归它管）",
+      "messagePlaceholder": "例如：帮我查一下上个月的报价",
+      "send": "发送",
+      "bindingHint": "绑定由事件触发器决定：只有 filter 里写明这个会话的流程会跑。",
+      "result": "命中 {{count}} 个流程",
+      "deliveriesTitle": "这个会话触发过的运行",
+      "empty": "还没有触发过任何运行",
+      "emptyHint": "发送一条消息试试——消息 id 会随消息一起发，所以重发不会重复执行。",
+      "columnStatus": "状态",
+      "columnRun": "运行",
+      "columnReason": "未跑起来的原因",
+      "noRun": "未启动运行",
+      "failed": "没能发送这条消息"
     }
   },
   "workflowDiagnostics": {

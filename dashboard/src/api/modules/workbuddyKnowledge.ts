@@ -295,7 +295,47 @@ export function canonicalKnowledgeMime(filename: string): string | null {
   return CANONICAL_MIME[filename.slice(dot + 1).toLowerCase()] ?? null;
 }
 
+/** One message-triggered delivery: what the conversation's message caused (A-17). */
+export interface ConversationDelivery {
+  delivery_id: string;
+  registration_id: string;
+  event_key: string;
+  status: string;
+  execution_id: string | null;
+  rejection_code: string | null;
+  received_at: number;
+  completed_at: number | null;
+}
+
+export interface ConversationDeliveries {
+  conversation_id: string;
+  items: ConversationDelivery[];
+}
+
+export interface ChatMessageRequest {
+  /** The message's own id: it is the dedupe key, so a resend runs nothing twice. */
+  message_id: string;
+  text: string;
+}
+
+export interface ChatMessageResult {
+  conversation_id: string;
+  message_id: string;
+  matched: number;
+  deliveries: Array<{ workflow_id?: string; execution_id?: string | null; status?: string; duplicate?: boolean }>;
+}
+
 export const workbuddyKnowledgeApi = {
+  // Chatflow (A-17): a message may fire the flows bound to its conversation.
+  postChatMessage: (conversationId: string, body: ChatMessageRequest) =>
+    unwrap<ChatMessageResult>(
+      `${BASE}/conversations/${encodeURIComponent(conversationId)}/messages`,
+      jsonInit("POST", body),
+    ),
+  listConversationDeliveries: (conversationId: string) =>
+    unwrap<ConversationDeliveries>(
+      `${BASE}/conversations/${encodeURIComponent(conversationId)}/deliveries`,
+    ),
   // Knowledge bases
   listBases: () => unwrap<KnowledgeBaseList>(`${BASE}/knowledge-bases`),
   createBase: (body: KnowledgeBaseCreate) =>

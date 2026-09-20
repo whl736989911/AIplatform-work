@@ -1,34 +1,35 @@
 import type { ReactNode } from "react";
 import {
+  Activity,
+  BookOpen,
+  Building2,
+  ClipboardCheck,
+  Cpu,
+  Database,
+  FileClock,
+  GraduationCap,
+  HardDrive,
   Inbox,
   LayoutDashboard,
-  Monitor,
-  MessageSquareText,
-  PlayCircle,
-  Timer,
-  SlidersHorizontal,
-  Waypoints,
-  Link2,
-  Database,
-  Cpu,
-  Users as UsersIcon,
-  Activity,
-  Share2,
-  Sparkles,
-  Puzzle,
-  Package,
-  HardDrive,
-  GraduationCap,
-  Shield,
-  PanelsTopLeft,
-  Building2,
-  BookOpen,
-  Workflow,
-  ShieldCheck,
   Lightbulb,
+  Link2,
+  MessageSquare,
+  MessageSquareText,
+  Monitor,
+  Package,
+  PanelsTopLeft,
+  PlayCircle,
+  Puzzle,
+  Share2,
+  Shield,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sparkles,
   Store,
-  ClipboardCheck,
-  FileClock,
+  Timer,
+  Users as UsersIcon,
+  Waypoints,
+  Workflow,
 } from "lucide-react";
 import type { OctopUser } from "../api/modules/auth";
 import { navAllowed, userCan } from "../utils/permissions";
@@ -77,6 +78,7 @@ export const SIDEBAR_GROUPED_NAV_KEYS = [
   "workbuddy-home",
   "workbuddy-inbox",
   "workbuddy-runs",
+  "workbuddy-chatflow",
   "workbuddy-knowledge",
   "workbuddy-workflows",
   "workbuddy-approvals",
@@ -164,6 +166,12 @@ export function buildNavSections(
       labelKey: "nav.workbuddyWorkflows",
     },
     {
+      key: "workbuddy-chatflow",
+      path: "/workbuddy/chatflow",
+      icon: <MessageSquare size={iconSize} strokeWidth={iconStroke} />,
+      labelKey: "nav.workbuddyChatflow",
+    },
+    {
       key: "workbuddy-runs",
       path: "/workbuddy/runs",
       icon: <PlayCircle size={iconSize} strokeWidth={iconStroke} />,
@@ -210,7 +218,10 @@ export function buildNavSections(
       labelKey: "nav.workbuddyLifecycle",
     },
   ];
-  sections.push({ groupKey: "nav.workbuddyGovernance", items: governanceItems });
+  sections.push({
+    groupKey: "nav.workbuddyGovernance",
+    items: governanceItems,
+  });
 
   const settingsItems: NavItem[] = [
     {

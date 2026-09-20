@@ -356,7 +356,8 @@
     "workbuddyGovernance": "Governance & settings",
     "workbuddyHome": "Dashboard",
     "workbuddyInbox": "Inbox",
-    "workbuddyRuns": "Runs"
+    "workbuddyRuns": "Runs",
+    "workbuddyChatflow": "Chat triggers"
   },
   "skillPackages": {
     "title": "Skill Packages",
@@ -7630,6 +7631,24 @@
       "columnP95": "P95 active",
       "empty": "No settled runs yet",
       "emptyHint": "Metrics count settled runs only — a queued or parked run has no outcome yet, and counting it would only flatter the numbers."
+    },
+    "chatflow": {
+      "title": "Chat triggers",
+      "subtitle": "Send a message into a conversation and see which flows it fired — and which it did not, and why.",
+      "sendTitle": "Send a message",
+      "conversationPlaceholder": "Conversation id (a workflow answers it by binding a trigger to it)",
+      "messagePlaceholder": "For example: look up last month's quote for me",
+      "send": "Send",
+      "bindingHint": "The binding belongs to an event trigger: only the flows whose filter names this conversation run.",
+      "result": "{{count}} flow(s) matched",
+      "deliveriesTitle": "Runs this conversation triggered",
+      "empty": "Nothing triggered yet",
+      "emptyHint": "Try sending a message — the message id travels with it, so a resend will not run anything twice.",
+      "columnStatus": "Status",
+      "columnRun": "Run",
+      "columnReason": "Why it did not run",
+      "noRun": "No run",
+      "failed": "The message could not be sent"
     }
   },
   "workflowDiagnostics": {
